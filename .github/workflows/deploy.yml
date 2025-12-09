@@ -1,0 +1,37 @@
+name: Deploy Backend
+
+on:
+  push:
+    branches: ["main"]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install SSH Key
+        uses: shimataro/ssh-key-action@v2
+        with:
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          known_hosts: unnecessary
+
+      - name: Deploy to Azure VM
+        run: |
+          VM_USER=${{ secrets.VM_USER }}
+          VM_HOST=${{ secrets.VM_IP }}
+          TARGET_DIR="/opt/drs-app/backend"
+
+          # 1. Clean old backend files
+          ssh -o StrictHostKeyChecking=no $VM_USER@$VM_HOST "rm -rf $TARGET_DIR && mkdir -p $TARGET_DIR"
+
+          # 2. Upload Code
+          scp -o StrictHostKeyChecking=no -r ./* $VM_USER@$VM_HOST:$TARGET_DIR/
+
+          # 3. Rebuild Backend Container
+          ssh -o StrictHostKeyChecking=no $VM_USER@$VM_HOST "
+            cd /opt/drs-app &&
+            sudo docker compose up -d --build backend
+          "
