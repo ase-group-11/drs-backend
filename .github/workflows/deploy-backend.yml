@@ -24,7 +24,7 @@ jobs:
 
       - name: Build & run Docker container on VM
         run: |
-          ssh ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} ' 
+          ssh ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}
             set -e
             cd /var/www/drs-backend
 
