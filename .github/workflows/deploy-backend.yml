@@ -22,20 +22,6 @@ jobs:
           rsync -avz --delete ./ \
             ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:/var/www/drs-backend
 
-      - name: Build & run Docker container on VM
-        run: |
-          ssh ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}
-            set -e
-            cd /var/www/drs-backend
 
-            docker build -t drs-backend:latest .
-
-            docker stop drs-backend || true
-            docker rm drs-backend || true
-
-            docker run -d --name drs-backend \
-              -p 8000:8000 \
-              --restart unless-stopped \
-              drs-backend:latest
 
             
