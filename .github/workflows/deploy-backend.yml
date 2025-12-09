@@ -1,0 +1,41 @@
+name: Deploy Backend to Azure VM
+
+on: 
+  push:
+    branches: ["feature/thin-slice"]
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H "${{ secrets.SSH_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Sync backend to VM
+        run: |
+          rsync -avz --delete ./ \
+            ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:/var/www/drs-backend
+
+      - name: Build & run Docker container on VM
+        run: |
+          ssh ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} ' 
+            set -e
+            cd /var/www/drs-backend
+
+            docker build -t drs-backend:latest .
+
+            docker stop drs-backend || true
+            docker rm drs-backend || true
+
+            docker run -d --name drs-backend \
+              -p 8000:8000 \
+              --restart unless-stopped \
+              drs-backend:latest
+
+            
