@@ -1,0 +1,33 @@
+1. PEP 8 (The Official Python Style Guide)
+This is the baseline standard for Python code formatting.
+
+Naming Conventions:
+
+Classes (PascalCase): UserCreate, UserVerify (e.g., Capitalized words, no underscores).
+
+Variables/Fields (snake_case): mobile_number, otp_code (e.g., Lowercase with underscores).
+
+Constants (UPPER_CASE): PHONE_REGEX.
+
+Imports: Grouped correctly (Standard library datetime, re first, then third-party pydantic).
+
+2. Pydantic V2 (Modern Data Validation Standard)
+You are using Pydantic V2, which is the latest and fastest version of the library.
+
+model_config = ConfigDict(...): This is the V2 replacement for the old class Config: (V1). It provides better type checking for configuration.
+
+@field_validator: This is the V2 replacement for the old @validator.
+
+Field(...): You are correctly using Field to attach metadata (descriptions) and constraints (min_length, pattern) directly to the model attributes.
+
+3. PEP 484 (Type Hinting)
+You are explicitly using type hints (str, int, bool, datetime).
+
+This allows tools like Pylance (VS Code) and MyPy to catch bugs before you run the code (e.g., passing a number where a string is expected).
+
+4. E.164 (International Phone Number Standard)
+Your Regex (^\+3538\d{8}$) enforces the E.164 format specifically for Ireland.
+
+Standard: E.164 requires the format [+][Country Code][Subscriber Number].
+
+Your Implementation: You strictly enforce the Irish Country Code (+353) and the mobile prefix (8), ensuring data consistency before it ever reaches your database or Twilio.

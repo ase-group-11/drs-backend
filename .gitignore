@@ -1,0 +1,85 @@
+# .gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environments
+venv/
+env/
+ENV/
+.venv
+.env/
+poetry.lock  # Optional: commit if you want reproducible builds
+
+# Environment Variables
+.env.local
+.env.*.local
+.env
+.env.*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Logs
+*.log
+logs/
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+*.session.sql
+
+# Alembic
+alembic.ini  # Only if contains sensitive data
+
+# Docker
+docker-compose.override.yml
+
+# Azure
+.azure/
+
+# Jupyter Notebooks (if used)
+.ipynb_checkpoints
+
+# macOS
+.DS_Store
+
+# Backup files
+*.bak
+*.swp
+*.tmp
