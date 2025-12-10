@@ -18,6 +18,24 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           known_hosts: unnecessary
 
+      - name: Zip artifact for deployment 
+        run: |
+          zip -r release.zip . -x '*.git*'
+          
+      - name: Upload artifact to Azure Blob Storage 
+        env: 
+          AZURE_STORAGE_ACCOUNT: ${{ secrets.DRS_STORAGE_ACCOUNT }}
+          AZURE_STORAGE_KEY: ${{ secrets.AZURE_STORAGE_KEY }} 
+          CONTAINER_NAME: ${{ secrets.CONTAINER_NAME }}
+          run: | 
+            az storage blob upload \ 
+              --account-name $DRS_STORAGE_ACCOUNT \ 
+              --account-key $AZURE_STORAGE_KEY \ 
+              --container-name $CONTAINER_NAME \ 
+              --file release.zip \ 
+              --name python-app \ 
+              --overwrite true
+
       - name: Deploy to Azure VM
         run: |
           VM_USER=${{ secrets.VM_USER }}
