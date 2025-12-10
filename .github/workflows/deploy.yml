@@ -29,7 +29,7 @@ jobs:
           CONTAINER_NAME: ${{ secrets.CONTAINER_NAME }}
         run: | 
           az storage blob upload \ 
-            --account-name $DRS_STORAGE_ACCOUNT \ 
+            --account-name $AZURE_STORAGE_ACCOUNT \ 
             --account-key $AZURE_STORAGE_KEY \ 
             --container-name $CONTAINER_NAME \ 
             --file release.zip \ 
