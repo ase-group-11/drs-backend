@@ -21,24 +21,15 @@ jobs:
       - name: Zip artifact for deployment 
         run: |
           zip -r release.zip . -x '*.git*'
-
-      - name: Install Azure CLI
-        run: |
-          curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
           
       - name: Upload artifact to Azure Blob Storage 
         env: 
           AZURE_STORAGE_ACCOUNT: drsstoragev1
           AZURE_STORAGE_KEY: ${{ secrets.AZURE_STORAGE_KEY }} 
           CONTAINER_NAME: backend-artifacts
-        run: | 
-          az storage blob upload \ 
-            --account-name "$AZURE_STORAGE_ACCOUNT" \
-            --account-key "$AZURE_STORAGE_KEY" \
-            --container-name "$CONTAINER_NAME" \
-            --file release.zip \
-            --name python-app \
-            --overwrite true
+          run: |
+            echo "Uploading to account=$AZURE_STORAGE_ACCOUNT container=$CONTAINER_NAME"
+            az storage blob upload --account-name "$AZURE_STORAGE_ACCOUNT" --account-key "$AZURE_STORAGE_KEY" --container-name "$CONTAINER_NAME" --file release.zip --name "python-app-$(date +%Y%m%d%H%M%S).zip" --overwrite true
 
       - name: Deploy to Azure VM
         run: |
