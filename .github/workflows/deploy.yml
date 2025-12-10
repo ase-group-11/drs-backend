@@ -21,6 +21,10 @@ jobs:
       - name: Zip artifact for deployment 
         run: |
           zip -r release.zip . -x '*.git*'
+
+      - name: Install Azure CLI
+        run: |
+          curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
           
       - name: Upload artifact to Azure Blob Storage 
         env: 
