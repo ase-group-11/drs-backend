@@ -1,16 +1,102 @@
-from datetime import datetime
-from sqlalchemy import Integer, String, Boolean, DateTime
-from sqlalchemy.sql import func
+# File: app/models/user.py
+"""
+User model for regular users.
+
+Regular users authenticate using OTP (SMS-based).
+They can submit emergency requests and track their status.
+"""
+
+from sqlalchemy import String, Enum as SQLEnum, Index
 from sqlalchemy.orm import Mapped, mapped_column
-from app.core.database import Base
+
+from app.models.base import Base
+from app.models.enums import UserStatus
+
 
 class User(Base):
+    """
+    Regular user model (OTP-based authentication).
+    
+    Users authenticate via OTP sent to their phone number.
+    No password is stored for regular users.
+    
+    Fields:
+    - phone_number: Unique phone number (E.164 format)
+    - full_name: User's full name
+    - email: Optional email address
+    - status: Account status (pending, active, inactive, etc.)
+    """
+    
     __tablename__ = "users"
-
-    user_id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    mobile_number: Mapped[str] = mapped_column(String, unique=True, index=True, nullable=False)
     
-    is_verified: Mapped[bool] = mapped_column(Boolean, default=True) 
+    # Phone number (unique, E.164 format: +1234567890)
+    phone_number: Mapped[str] = mapped_column(
+        String(15),
+        unique=True,
+        nullable=False,
+        index=True
+    )
     
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), onupdate=func.now(), nullable=True)
+    # User details
+    full_name: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False
+    )
+    
+    email: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+        unique=True,
+        index=True
+    )
+    
+    # Account status
+    status: Mapped[UserStatus] = mapped_column(
+        SQLEnum(UserStatus, name="user_status"),
+        default=UserStatus.PENDING,
+        nullable=False,
+        index=True
+    )
+    
+    # Indexes for common queries
+    __table_args__ = (
+        Index('idx_user_phone_status', 'phone_number', 'status'),
+        Index('idx_user_status_created', 'status', 'created_at'),
+    )
+    
+    def __repr__(self) -> str:
+        return f"<User(id={self.id}, phone={self.phone_number}, status={self.status})>"
+    
+    def activate(self) -> None:
+        """
+        Activate user account after OTP verification.
+        
+        Changes status from PENDING to ACTIVE.
+        """
+        self.status = UserStatus.ACTIVE
+    
+    def deactivate(self) -> None:
+        """
+        Deactivate user account.
+        
+        Changes status to INACTIVE. Account can be reactivated.
+        """
+        self.status = UserStatus.INACTIVE
+    
+    def suspend(self) -> None:
+        """
+        Suspend user account (security/policy violation).
+        
+        Changes status to SUSPENDED.
+        """
+        self.status = UserStatus.SUSPENDED
+    
+    @property
+    def is_active(self) -> bool:
+        """Check if user account is active."""
+        return self.status == UserStatus.ACTIVE
+    
+    @property
+    def is_pending(self) -> bool:
+        """Check if user account is pending verification."""
+        return self.status == UserStatus.PENDING
