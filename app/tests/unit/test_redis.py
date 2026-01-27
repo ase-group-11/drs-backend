@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, patch, MagicMock
 async def test_redis_client_creation():
     """Test that Redis client is created with correct configuration."""
     # Act
-    from app.db.redis_client import get_redis_client
+    from redis.redis_client import get_redis_client
     
     redis = await get_redis_client()
     
@@ -32,7 +32,7 @@ async def test_redis_client_creation():
 @pytest.mark.asyncio
 async def test_redis_set_and_get():
     """Test basic Redis SET and GET operations."""
-    from app.db.redis_client import get_redis_client
+    from redis.redis_client import get_redis_client
     
     redis = await get_redis_client()
     
@@ -55,7 +55,7 @@ async def test_redis_set_and_get():
 @pytest.mark.asyncio
 async def test_redis_setex_with_ttl():
     """Test Redis SETEX operation with TTL (Time To Live)."""
-    from app.db.redis_client import get_redis_client
+    from redis.redis_client import get_redis_client
     
     redis = await get_redis_client()
     
@@ -80,7 +80,7 @@ async def test_redis_setex_with_ttl():
 @pytest.mark.asyncio
 async def test_redis_delete_operation():
     """Test Redis DELETE operation."""
-    from app.db.redis_client import get_redis_client
+    from redis.redis_client import get_redis_client
     
     redis = await get_redis_client()
     
@@ -105,7 +105,7 @@ async def test_redis_delete_operation():
 async def test_redis_connection_pool():
     """Test that Redis uses connection pooling correctly."""
     # This test verifies connection pooling configuration
-    from app.db.redis_client import create_redis_client
+    from redis.redis_client import create_redis_client
     
     # Act
     redis = await create_redis_client()
@@ -120,7 +120,7 @@ async def test_redis_connection_pool():
 @pytest.mark.asyncio
 async def test_redis_client_singleton():
     """Test that get_redis_client returns the same instance (singleton-like behavior)."""
-    from app.db.redis_client import get_redis_client
+    from redis.redis_client import get_redis_client
     
     # Act: Get client twice
     redis1 = await get_redis_client()
@@ -140,7 +140,7 @@ async def test_redis_handles_connection_errors():
     with patch('app.db.redis_client.settings') as mock_settings:
         mock_settings.REDIS_URL = "redis://invalid-host:9999/0"
         
-        from app.db.redis_client import create_redis_client
+        from redis.redis_client import create_redis_client
         
         # Should not crash, but may raise connection error
         # In production, we'd want retry logic

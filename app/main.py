@@ -17,7 +17,7 @@ from contextlib import asynccontextmanager
 
 from app.core.config import settings
 from app.api.v1 import auth
-from app.db.redis_client import close_redis_connection
+from redis.redis_client import close_redis_connection
 
 
 @asynccontextmanager
