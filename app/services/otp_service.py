@@ -13,7 +13,7 @@ Provides:
 import secrets
 from typing import Optional
 
-from app.db.redis_client import get_redis_client
+from redis.redis_client import get_redis_client
 from app.core.config import settings
 
 
