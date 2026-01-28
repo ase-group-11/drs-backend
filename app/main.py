@@ -14,11 +14,11 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
+from dotenv import load_dotenv
 
 from app.core.config import settings
 from app.api.v1 import auth
-from app.db.redis_client import close_redis_connection
-
+from app.api.v1 import emergency_team_auth
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -104,10 +104,9 @@ async def global_exception_handler(request: Request, exc: Exception):
         }
     )
 
-
 # Include routers
 app.include_router(auth.router, prefix="/api/v1")
-
+app.include_router(emergency_team_auth.router, prefix="/api/v1")
 
 # Root endpoints
 @app.get(
