@@ -106,6 +106,7 @@ udocker run -p 5432:5432 \
 udocker run -p 6379:6379 redis-drs
 
 # to Run the Backend
+source venv/bin/activate  
 uvicorn app.main:app --reload
 
 # Database Management
