@@ -8,9 +8,9 @@ They can submit emergency requests and track their status.
 
 from sqlalchemy import String, Enum as SQLEnum, Index
 from sqlalchemy.orm import Mapped, mapped_column
-
-from app.models.base import Base
-from app.models.enums import UserStatus
+from typing import Optional
+from app.db.models.base import Base
+from app.db.models.enums import UserStatus, UserRole
 
 
 class User(Base):
@@ -31,7 +31,7 @@ class User(Base):
     
     # Phone number (unique, E.164 format: +1234567890)
     phone_number: Mapped[str] = mapped_column(
-        String(15),
+        String(20),
         unique=True,
         nullable=False,
         index=True
@@ -43,10 +43,17 @@ class User(Base):
         nullable=False
     )
     
-    email: Mapped[str | None] = mapped_column(
+    email: Mapped[Optional[str]] = mapped_column(
         String(255),
         nullable=True,
         unique=True,
+        index=True
+    )
+
+    role: Mapped[UserRole] = mapped_column(
+        SQLEnum(UserRole, name = "user_role"),
+        default=UserRole.RESIDENT,
+        nullable=False,
         index=True
     )
     

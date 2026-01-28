@@ -8,9 +8,9 @@ They have roles (Admin, Manager, Staff) and belong to departments.
 
 from sqlalchemy import String, Enum as SQLEnum, Index
 from sqlalchemy.orm import Mapped, mapped_column
-
-from app.models.base import Base
-from app.models.enums import UserStatus, EmergencyTeamRole, Department
+from typing import Optional
+from app.db.models.base import Base
+from app.db.models.enums import UserStatus, EmergencyTeamRole, Department
 
 
 class EmergencyTeam(Base):
@@ -37,7 +37,7 @@ class EmergencyTeam(Base):
     
     # Authentication
     phone_number: Mapped[str] = mapped_column(
-        String(15),
+        String(20),
         unique=True,
         nullable=False,
         index=True
@@ -61,7 +61,7 @@ class EmergencyTeam(Base):
         index=True
     )
     
-    employee_id: Mapped[str | None] = mapped_column(
+    employee_id: Mapped[Optional[str]] = mapped_column(
         String(50),
         unique=True,
         nullable=True,
@@ -104,7 +104,7 @@ class EmergencyTeam(Base):
         )
     
     def activate(self) -> None:
-        """Activate team member account after OTP verification."""
+        """Activate team member account after onboarding."""
         self.status = UserStatus.ACTIVE
     
     def deactivate(self) -> None:

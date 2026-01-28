@@ -188,7 +188,7 @@ from app.core.config import settings
 from app.core.logging_config import setup_logging
 from app.api.v1 import auth
 from app.api.v1 import emergency_team_auth
-from app.db.redis_client import close_redis_connection
+from redis.redis_client import close_redis_connection
 
 # Setup logging FIRST
 setup_logging()
