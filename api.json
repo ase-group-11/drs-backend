@@ -1,49 +1,52 @@
 {
   "info": {
-    "name": "ASE Emergency Services Backend API",
-    "_postman_id": "b7a1c5f6-4a2b-4d7f-9c9f-3e6b8a2e1111",
-    "description": "User authentication and Emergency Team authentication APIs",
+    "name": "DRS Authentication APIs",
+    "description": "User Auth + Emergency Team Auth APIs",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
     {
       "key": "base_url",
-      "value": "http://localhost:8000"
+      "value": "http://localhost:8000/api/v1"
+    },
+    {
+      "key": "phone_number",
+      "value": "+911234567890"
+    },
+    {
+      "key": "otp",
+      "value": "123456"
+    },
+    {
+      "key": "team_member_id",
+      "value": "UUID-HERE"
     }
   ],
   "item": [
     {
-      "name": "User Authentication",
+      "name": "Auth - User",
       "item": [
         {
           "name": "Register User (Send OTP)",
           "request": {
             "method": "POST",
             "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "url": {
-              "raw": "{{base_url}}/api/v1/auth/register",
-              "host": ["{{base_url}}"],
-              "path": ["api", "v1", "auth", "register"]
-            },
+            "url": "{{base_url}}/auth/register",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"phone_number\": \"+1234567890\",\n  \"full_name\": \"John Doe\",\n  \"email\": \"john.doe@example.com\"\n}"
+              "raw": "{\n  \"phone_number\": \"{{phone_number}}\",\n  \"full_name\": \"John Doe\",\n  \"email\": \"john@example.com\"\n}"
             }
           }
         },
         {
-          "name": "Verify Registration OTP",
+          "name": "Verify User Registration OTP",
           "request": {
             "method": "POST",
             "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "url": {
-              "raw": "{{base_url}}/api/v1/auth/register/verify",
-              "host": ["{{base_url}}"],
-              "path": ["api", "v1", "auth", "register", "verify"]
-            },
+            "url": "{{base_url}}/auth/register/verify",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"phone_number\": \"+1234567890\",\n  \"otp\": \"123456\"\n}"
+              "raw": "{\n  \"phone_number\": \"{{phone_number}}\",\n  \"otp\": \"{{otp}}\"\n}"
             }
           }
         },
@@ -52,30 +55,22 @@
           "request": {
             "method": "POST",
             "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "url": {
-              "raw": "{{base_url}}/api/v1/auth/login",
-              "host": ["{{base_url}}"],
-              "path": ["api", "v1", "auth", "login"]
-            },
+            "url": "{{base_url}}/auth/login",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"phone_number\": \"+1234567890\"\n}"
+              "raw": "{\n  \"phone_number\": \"{{phone_number}}\"\n}"
             }
           }
         },
         {
-          "name": "Verify Login OTP",
+          "name": "Verify User Login OTP",
           "request": {
             "method": "POST",
             "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "url": {
-              "raw": "{{base_url}}/api/v1/auth/login/verify",
-              "host": ["{{base_url}}"],
-              "path": ["api", "v1", "auth", "login", "verify"]
-            },
+            "url": "{{base_url}}/auth/login/verify",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"phone_number\": \"+1234567890\",\n  \"otp\": \"123456\"\n}"
+              "raw": "{\n  \"phone_number\": \"{{phone_number}}\",\n  \"otp\": \"{{otp}}\"\n}"
             }
           }
         },
@@ -83,75 +78,74 @@
           "name": "Auth Health Check",
           "request": {
             "method": "GET",
-            "url": {
-              "raw": "{{base_url}}/api/v1/auth/health",
-              "host": ["{{base_url}}"],
-              "path": ["api", "v1", "auth", "health"]
-            }
+            "url": "{{base_url}}/auth/health"
           }
         }
       ]
     },
     {
-      "name": "Emergency Team Authentication",
+      "name": "Auth - Emergency Team",
       "item": [
         {
-          "name": "Register Emergency Team Member",
+          "name": "Register Emergency Team (Send OTP)",
           "request": {
             "method": "POST",
             "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "url": {
-              "raw": "{{base_url}}/api/v1/emergency-team/register",
-              "host": ["{{base_url}}"],
-              "path": ["api", "v1", "emergency-team", "register"]
-            },
+            "url": "{{base_url}}/emergency-team/register",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"phone_number\": \"+1234567890\",\n  \"password\": \"SecurePass123\",\n  \"full_name\": \"John Doe\",\n  \"email\": \"john.doe@emergency.ie\",\n  \"role\": \"staff\",\n  \"department\": \"medical\",\n  \"employee_id\": \"EMP001\"\n}"
+              "raw": "{\n  \"phone_number\": \"+911234567890\",\n  \"password\": \"StrongPass1\",\n  \"full_name\": \"Dr Smith\",\n  \"email\": \"dr.smith@example.com\",\n  \"role\": \"admin\",\n  \"department\": \"medical\",\n  \"employee_id\": \"EMP001\"\n}"
             }
           }
         },
         {
-          "name": "Login Emergency Team Member (Email)",
+          "name": "Verify Emergency Team Registration OTP",
           "request": {
             "method": "POST",
             "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "url": {
-              "raw": "{{base_url}}/api/v1/emergency-team/login",
-              "host": ["{{base_url}}"],
-              "path": ["api", "v1", "emergency-team", "login"]
-            },
+            "url": "{{base_url}}/emergency-team/register/verify",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"email\": \"john.doe@emergency.ie\",\n  \"password\": \"SecurePass123\"\n}"
+              "raw": "{\n  \"phone_number\": \"{{phone_number}}\",\n  \"otp\": \"{{otp}}\"\n}"
             }
           }
         },
         {
-          "name": "Login Emergency Team Member (Phone)",
+          "name": "Emergency Team Login",
           "request": {
             "method": "POST",
             "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "url": {
-              "raw": "{{base_url}}/api/v1/emergency-team/login",
-              "host": ["{{base_url}}"],
-              "path": ["api", "v1", "emergency-team", "login"]
-            },
+            "url": "{{base_url}}/emergency-team/login",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"phone_number\": \"+1234567890\",\n  \"password\": \"SecurePass123\"\n}"
+              "raw": "{\n  \"email\": \"dr.smith@example.com\",\n  \"password\": \"StrongPass1\"\n}"
             }
+          }
+        },
+        {
+          "name": "Change Emergency Team Password",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{base_url}}/emergency-team/change-password?team_member_id={{team_member_id}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"old_password\": \"StrongPass1\",\n  \"new_password\": \"NewStrongPass1\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Deactivate Emergency Team Member",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/emergency-team/deactivate/{{team_member_id}}"
           }
         },
         {
           "name": "Emergency Team Health Check",
           "request": {
             "method": "GET",
-            "url": {
-              "raw": "{{base_url}}/api/v1/emergency-team/health",
-              "host": ["{{base_url}}"],
-              "path": ["api", "v1", "emergency-team", "health"]
-            }
+            "url": "{{base_url}}/emergency-team/health"
           }
         }
       ]
