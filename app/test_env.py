@@ -1,31 +1,3 @@
-# from dotenv import load_dotenv
-# load_dotenv()  # loads .env from current working dir (or parent)
-
-# from twilio.rest import Client
-# import os
-
-# account_sid = os.environ.get("TWILIO_ACCOUNT_SID")
-# auth_token = os.environ.get("TWILIO_AUTH_TOKEN")
-# from_number = os.environ.get("TWILIO_FROM_NUMBER")
-
-# if not all([account_sid, auth_token, from_number]):
-#     raise RuntimeError(
-#         "Missing Twilio environment variables. "
-#         "Need TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER"
-#     )
-
-# client = Client(account_sid, auth_token)
-
-# message = client.messages.create(
-#     body="Twilio test message from local machine",
-#     from_=from_number,
-#     to="+918125019220"  # change to your target
-# )
-
-# print("Message SID:", message.sid)
-# print("Status:", message.status)
-
-
 #!/usr/bin/env python3
 """
 Check if .env file is loading correctly.

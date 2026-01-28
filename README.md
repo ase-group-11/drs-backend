@@ -110,14 +110,15 @@ source venv/bin/activate
 uvicorn app.main:app --reload
 
 # Database Management
-python manage_db.py check         # Check DB connection
-python manage_db.py migrate "msg" # Create migration  
-python manage_db.py upgrade       # Apply migrations
-python manage_db.py current       # Show current
-python manage_db.py history       # Show history
-python manage_db.py downgrade 1   # Rollback
-python manage_db.py reset         # Reset DB (⚠️)
-python manage_db.py help          # Show help
+python scripts/manage_db.py check         # Check DB connection
+python scripts/manage_db.py migrate "msg" # Create migration  
+python scripts/manage_db.py upgrade       # Apply migrations
+python scripts/manage_db.py current       # Show current
+python scripts/manage_db.py history       # Show history
+python scripts/manage_db.py downgrade 1   # Rollback
+python scripts/manage_db.py reset         # Reset DB (⚠️)
+python scripts/manage_db.py help          # Show help
+python3 scripts/manage_db.py create       # Create tables
 
 # Alembic (Direct)
 alembic revision --autogenerate -m "Message"
@@ -125,3 +126,7 @@ alembic upgrade head
 alembic current
 alembic history
 alembic downgrade -1
+
+# Test
+
+pytest app/tests/integration/test_emergency_team_api.py -v
