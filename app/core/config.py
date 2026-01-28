@@ -19,6 +19,10 @@
 #     Uses Pydantic Settings for type-safe configuration with validation.
 #     """
     
+#     # Application
+#     APP_NAME: str = Field(default="ASE Emergency Services", description="Application name")
+#     APP_VERSION: str = Field(default="1.0.0", description="Application version")
+    
 #     # Environment
 #     ENVIRONMENT: Literal["development", "testing", "production"] = Field(
 #         default="development",
@@ -133,12 +137,14 @@
 # settings = get_settings()
 
 
+
 # File: app/core/config.py
 """
 Configuration management using Pydantic Settings.
 
-Loads configuration from environment variables with validation.
-Supports multiple environments (development, testing, production).
+UPDATED:
+- Access token expires in 1 YEAR (525600 minutes)
+- Refresh token expires in 2 YEARS (730 days)
 """
 
 from functools import lru_cache
@@ -187,13 +193,17 @@ class Settings(BaseSettings):
         default="HS256",
         description="JWT signing algorithm"
     )
+    
+    # UPDATED: 1 YEAR token expiry
     ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(
-        default=30,
-        description="Access token expiration in minutes"
+        default=525600,  # 365 days * 24 hours * 60 minutes = 525600 minutes (1 YEAR)
+        description="Access token expiration in minutes (default: 1 year)"
     )
+    
+    # UPDATED: 2 YEARS refresh token
     REFRESH_TOKEN_EXPIRE_DAYS: int = Field(
-        default=7,
-        description="Refresh token expiration in days"
+        default=730,  # 2 years
+        description="Refresh token expiration in days (default: 2 years)"
     )
     
     # Twilio Configuration
@@ -209,6 +219,10 @@ class Settings(BaseSettings):
         ...,  # Required field
         description="Twilio phone number for sending SMS"
     )
+    TWILIO_SERVICE_SID: str = Field(
+        default="",
+        description="Twilio Verify Service SID (optional)"
+    )
     
     # OTP Configuration
     OTP_EXPIRY_SECONDS: int = Field(
@@ -220,14 +234,14 @@ class Settings(BaseSettings):
         description="Length of OTP code"
     )
     
-    # Application Info
-    APP_NAME: str = Field(
-        default="ASE Emergency Services API",
-        description="Application name"
+    # Logging Configuration
+    LOG_LEVEL: str = Field(
+        default="INFO",
+        description="Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)"
     )
-    APP_VERSION: str = Field(
-        default="1.0.0",
-        description="Application version"
+    LOG_FILE: str = Field(
+        default="logs/app.log",
+        description="Log file path"
     )
     
     # Pydantic Settings Configuration
