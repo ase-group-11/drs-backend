@@ -1,13 +1,16 @@
-# File: app/api/v1/auth.py
+# File: app/api/v1/auth_updated.py
 """
-Authentication API endpoints.
+Authentication API endpoints (UPDATED).
+
+CHANGES:
+- verify_registration now only requires phone_number and OTP
+- Registration data is retrieved from Redis cache
 
 Provides:
 - User registration (send OTP)
 - Registration verification (create account + get tokens)
 - User login (send OTP)
 - Login verification (get tokens)
-- Token refresh
 """
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -22,7 +25,10 @@ from app.schemas.auth import (
     MessageResponse,
     AuthResponse,
 )
-from app.schemas.common import ResponseBase, ErrorResponse
+from app.schemas.common import ResponseBase
+
+import logging
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -44,25 +50,12 @@ async def register_user(
     Steps:
     1. Validate phone number format (E.164)
     2. Check if phone/email already registered
-    3. Generate 6-digit OTP
-    4. Send OTP via SMS (Twilio)
-    5. Store OTP in Redis with 5-minute expiry
+    3. Store registration data in Redis cache
+    4. Generate 6-digit OTP
+    5. Send OTP via SMS (Twilio)
+    6. Store OTP in Redis with 5-minute expiry
     
     Rate Limit: 3 OTP requests per hour per phone number
-    
-    **Request Body:**
-    - phone_number: E.164 format (e.g., +1234567890)
-    - full_name: User's full name
-    - email: Optional email address
-    
-    **Response:**
-    - message: Success message with phone number
-    
-    **Errors:**
-    - 400: Phone number already registered
-    - 400: Email already registered
-    - 429: Too many OTP requests (rate limited)
-    - 500: Failed to send SMS
     """
     service = UserService(db)
     
@@ -81,6 +74,7 @@ async def register_user(
             detail=str(e)
         )
     except Exception as e:
+        logger.exception("Register failed") 
         # OTP sending failed or other error
         if "rate limit" in str(e).lower():
             raise HTTPException(
@@ -107,36 +101,24 @@ async def verify_registration(
     """
     Verify OTP and complete user registration.
     
+    UPDATED: No longer requires full_name and email in request.
+    These are retrieved from Redis cache.
+    
     Steps:
     1. Verify OTP from Redis
-    2. Create user account (status: ACTIVE)
-    3. Generate JWT access token (30 min expiry)
-    4. Generate JWT refresh token (7 days expiry)
-    5. Delete OTP from Redis (one-time use)
-    
-    **Request Body:**
-    - phone_number: Phone number that received OTP
-    - otp: 6-digit OTP code
-    
-    **Response:**
-    - user: User profile data
-    - tokens: Access and refresh tokens
-    
-    **Errors:**
-    - 400: Invalid or expired OTP
-    - 400: User already verified
+    2. Retrieve registration data (full_name, email) from Redis cache
+    3. Create user account (status: ACTIVE)
+    4. Delete registration cache
+    5. Generate JWT access token (30 min expiry)
+    6. Generate JWT refresh token (7 days expiry)
+    7. Delete OTP from Redis (one-time use)
     """
     service = UserService(db)
     
     try:
-        # Note: In production, you'd get full_name and email from session/cache
-        # For now, we'll need to store them temporarily during registration
-        # This is a simplified version - see note below
         result = await service.verify_registration(
             phone_number=request.phone_number,
-            otp=request.otp,
-            full_name="User",  # TODO: Get from session/cache
-            email=None
+            otp=request.otp
         )
         return AuthResponse(**result)
         
@@ -166,16 +148,6 @@ async def login_user(
     2. Generate 6-digit OTP
     3. Send OTP via SMS
     4. Store OTP in Redis with 5-minute expiry
-    
-    **Request Body:**
-    - phone_number: Registered phone number
-    
-    **Response:**
-    - message: Success message
-    
-    **Errors:**
-    - 404: User not found or account not active
-    - 429: Too many OTP requests
     """
     service = UserService(db)
     
@@ -220,18 +192,6 @@ async def verify_login(
     3. Generate JWT access token
     4. Generate JWT refresh token
     5. Delete OTP from Redis
-    
-    **Request Body:**
-    - phone_number: Phone number that received OTP
-    - otp: 6-digit OTP code
-    
-    **Response:**
-    - user: User profile data
-    - tokens: Access and refresh tokens
-    
-    **Errors:**
-    - 400: Invalid or expired OTP
-    - 404: User not found
     """
     service = UserService(db)
     
@@ -264,21 +224,5 @@ async def verify_login(
 async def health_check():
     """
     Health check endpoint for authentication service.
-    
-    Returns:
-        ResponseBase: Status message
     """
     return ResponseBase(message="Authentication service is healthy")
-
-
-# NOTE: Production Enhancement for Registration Flow
-# =====================================================
-# The current verify_registration endpoint has a limitation:
-# it needs full_name and email, but these aren't in OTPVerifyRequest.
-#
-# Production solutions:
-# 1. Store registration data in Redis during /register step
-# 2. Use session management (Redis-based sessions)
-# 3. Modify OTPVerifyRequest to include full_name and email
-# 4. Use a two-step registration table (pending_users)
-#
