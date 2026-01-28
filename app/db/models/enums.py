@@ -29,6 +29,18 @@ class UserStatus(str, enum.Enum):
     SUSPENDED = "suspended"
     DELETED = "deleted"
 
+class UserRole(str, enum.Enum):
+    """
+    User roles in the system.
+    
+    Roles:
+    - USER: Standard user with access to emergency services
+    - PRIVILEGED: System administrator/ERT with elevated privileges
+    """
+    RESIDENT = "user"
+    PRIVILEGED = "privileged"
+    ADMIN = "IT"
+
 
 class EmergencyTeamRole(str, enum.Enum):
     """

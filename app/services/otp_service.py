@@ -233,7 +233,7 @@ from typing import Optional
 import logging
 
 # Use the fallback-enabled helper functions
-from app.db.redis_client import (
+from redis.redis_client import (
     set_with_expiry,
     get_value,
     delete_key,

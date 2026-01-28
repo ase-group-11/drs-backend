@@ -9,10 +9,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Optional
 import re
 
-try:
-    from pydantic import field_validator
-except ImportError:
-    from pydantic import validator as field_validator
+
 
 
 class UserRegisterRequest(BaseModel):
@@ -27,7 +24,7 @@ class UserRegisterRequest(BaseModel):
         ...,
         description="Phone number in E.164 format (+1234567890)",
         min_length=10,
-        max_length=15
+        max_length=16
     )
     
     # Option 1: Single full_name field
