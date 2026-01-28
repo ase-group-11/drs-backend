@@ -65,11 +65,19 @@ class UserService:
             # Step 3: Store registration data in cache
             logger.info(f"💾 Storing registration data in Redis cache...")
             try:
-                await store_registration_data(
-                    phone_number=phone_number,
-                    full_name=full_name,
-                    email=email
-                )
+                # await store_registration_data(
+                #     phone_number=phone_number,
+                #     full_name=full_name,
+                #     email=email
+                # )
+                # await store_registration_data(
+                #     phone_number=phone_number,
+                #     data={
+                #         "full_name": full_name,
+                #         "email": email,
+                #         "user_type": "user"
+                #     }
+                # )
                 logger.info("✅ Registration data cached successfully")
             except Exception as cache_error:
                 logger.error(f"❌ Failed to cache registration data: {cache_error}")

@@ -128,6 +128,19 @@ class EmergencyTeamService:
                     department=department.value,
                     employee_id=employee_id
                 )
+
+                # await store_registration_data(
+                #     phone_number=phone_number,
+                #     data={
+                #         "full_name": full_name,
+                #         "email": email,
+                #         "password_hash": password_hash,
+                #         "role": role.value,
+                #         "department": department.value,
+                #         "employee_id": employee_id,
+                #         "user_type": "emergency_team"
+                #     }
+                # )
                 logger.info("✅ Registration data cached successfully")
             except Exception as cache_error:
                 logger.error(f"❌ Failed to cache registration data: {cache_error}")
