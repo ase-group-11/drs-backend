@@ -1,173 +1,3 @@
-# # File: app/main.py
-# """
-# ASE Emergency Services Backend - Main Application
-
-# FastAPI application with:
-# - User authentication (OTP-based)
-# - Emergency team authentication (OTP registration + password login)
-# - Emergency request management
-# - Real-time notifications
-# - RBAC (Role-Based Access Control)
-# """
-
-# from fastapi import FastAPI, Request
-# from fastapi.middleware.cors import CORSMiddleware
-# from fastapi.responses import JSONResponse
-# from contextlib import asynccontextmanager
-
-# from app.core.config import settings
-# from app.api.v1 import auth
-# from app.api.v1 import emergency_team_auth
-# from app.db.redis_client import close_redis_connection  # ← FIX: Import this!
-
-
-# @asynccontextmanager
-# async def lifespan(app: FastAPI):
-#     """
-#     Application lifespan manager.
-    
-#     Handles startup and shutdown events.
-#     """
-#     # Startup
-#     print(f"🚀 Starting {settings.APP_NAME} v{settings.APP_VERSION}")
-#     print(f"📍 Environment: {settings.ENVIRONMENT}")
-#     print(f"🔒 Debug Mode: {settings.DEBUG}")
-    
-#     yield
-    
-#     # Shutdown
-#     print("🛑 Shutting down...")
-#     await close_redis_connection()  # ← Now this will work!
-#     print("✅ Cleanup complete")
-
-
-# # Create FastAPI application
-# app = FastAPI(
-#     title=settings.APP_NAME,
-#     version=settings.APP_VERSION,
-#     description="""
-#     ASE Emergency Services Backend API
-    
-#     ## Features
-    
-#     * **User Authentication** - OTP-based registration and login
-#     * **Emergency Team Auth** - OTP registration + password login
-#     * **Emergency Requests** - Submit and track emergency requests
-#     * **Real-time Updates** - WebSocket notifications
-#     * **Multi-Department** - Medical, Police, Fire, IT support
-    
-#     ## Authentication
-    
-#     ### Users (Regular Citizens)
-#     - Register with phone number + OTP
-#     - Login with phone number + OTP
-    
-#     ### Emergency Teams (Responders)
-#     - Register with phone number + password + OTP
-#     - Login with email/phone + password (no OTP)
-#     - Role-based access (Admin, Manager, Staff)
-#     - Department-specific access
-#     """,
-#     docs_url="/docs",
-#     redoc_url="/redoc",
-#     lifespan=lifespan,
-#     debug=settings.DEBUG
-# )
-
-
-# # CORS Middleware
-# app.add_middleware(
-#     CORSMiddleware,
-#     allow_origins=["*"],  # TODO: Update in production with specific origins
-#     allow_credentials=True,
-#     allow_methods=["*"],
-#     allow_headers=["*"],
-# )
-
-
-# # Exception Handlers
-# @app.exception_handler(Exception)
-# async def global_exception_handler(request: Request, exc: Exception):
-#     """
-#     Global exception handler for unhandled errors.
-    
-#     Logs the error and returns a generic error response.
-#     """
-#     # In production, log this to a logging service
-#     print(f"❌ Unhandled error: {str(exc)}")
-    
-#     return JSONResponse(
-#         status_code=500,
-#         content={
-#             "error": "InternalServerError",
-#             "message": "An unexpected error occurred. Please try again later.",
-#             "details": str(exc) if settings.DEBUG else None
-#         }
-#     )
-
-
-# # Include routers
-# app.include_router(auth.router, prefix="/api/v1")
-# app.include_router(emergency_team_auth.router, prefix="/api/v1")
-
-
-# # Root endpoints
-# @app.get(
-#     "/",
-#     tags=["Root"],
-#     summary="API Root",
-#     description="Welcome endpoint with API information"
-# )
-# async def root():
-#     """
-#     API root endpoint.
-    
-#     Returns basic API information and links.
-#     """
-#     return {
-#         "message": f"Welcome to {settings.APP_NAME} API",
-#         "version": settings.APP_VERSION,
-#         "environment": settings.ENVIRONMENT,
-#         "docs": "/docs",
-#         "redoc": "/redoc",
-#         "health": "/health"
-#     }
-
-
-# @app.get(
-#     "/health",
-#     tags=["Root"],
-#     summary="Health Check",
-#     description="Check if the API is running"
-# )
-# async def health_check():
-#     """
-#     Health check endpoint.
-    
-#     Returns API health status.
-#     """
-#     return {
-#         "status": "healthy",
-#         "service": settings.APP_NAME,
-#         "version": settings.APP_VERSION,
-#         "environment": settings.ENVIRONMENT
-#     }
-
-
-# # Development server runner
-# if __name__ == "__main__":
-#     import uvicorn
-    
-#     uvicorn.run(
-#         "app.main:app",
-#         host="0.0.0.0",
-#         port=8000,
-#         reload=settings.DEBUG,
-#         log_level="info" if not settings.DEBUG else "debug"
-#     )
-
-
-
 # File: app/main.py
 """
 ASE Emergency Services Backend - Main Application
@@ -186,9 +16,9 @@ import logging
 
 from app.core.config import settings
 from app.core.logging_config import setup_logging
-from app.api.v1 import auth
+from app.api.v1 import user_auth
 from app.api.v1 import emergency_team_auth
-from redis.redis_client import close_redis_connection
+from cache.redis_client import close_redis_connection
 
 # Setup logging FIRST
 setup_logging()
@@ -215,9 +45,9 @@ async def lifespan(app: FastAPI):
     
     # Shutdown
     logger.info("=" * 70)
-    logger.info("🛑 Shutting down...")
+    logger.info("Shutting down...")
     await close_redis_connection()
-    logger.info("✅ Cleanup complete")
+    logger.info("Cleanup complete")
     logger.info("=" * 70)
 
 
@@ -277,7 +107,7 @@ async def global_exception_handler(request: Request, exc: Exception):
     
     Logs the error and returns a generic error response.
     """
-    logger.exception(f"❌ Unhandled error: {str(exc)}")
+    logger.exception(f"Unhandled error: {str(exc)}")
     
     return JSONResponse(
         status_code=500,
@@ -290,7 +120,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 
 # Include routers
-app.include_router(auth.router, prefix="/api/v1")
+app.include_router(user_auth.router, prefix="/api/v1")
 app.include_router(emergency_team_auth.router, prefix="/api/v1")
 
 
@@ -330,7 +160,7 @@ async def health_check():
     
     Returns API health status including Redis status.
     """
-    from app.db.redis_client import check_redis_health
+    from cache.redis_client import check_redis_health
     
     redis_health = await check_redis_health()
     

@@ -21,7 +21,7 @@ from app.schemas.emergency_team import (
 )
 from app.schemas.auth import OTPVerifyRequest, MessageResponse
 from app.schemas.common import ResponseBase
-from app.models.enums import EmergencyTeamRole, Department
+from app.db.models.enums import EmergencyTeamRole, Department
 
 logger = logging.getLogger(__name__)
 

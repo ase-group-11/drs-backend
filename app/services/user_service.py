@@ -17,8 +17,8 @@ from app.services.registration_cache import (
     delete_registration_data
 )
 from app.auth.jwt_handler import create_access_token, create_refresh_token
-from app.models.user import User
-from app.models.enums import UserStatus
+from app.db.models.user import User
+from app.db.models.enums import UserStatus
 from app.core.config import settings
 
 # Setup logging
