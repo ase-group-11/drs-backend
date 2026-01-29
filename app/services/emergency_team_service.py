@@ -20,8 +20,8 @@ from app.services.registration_cache import (
 )
 from app.auth.password_handler import hash_password, verify_password
 from app.auth.jwt_handler import create_access_token, create_refresh_token
-from app.models.emergency_team import EmergencyTeam
-from app.models.enums import UserStatus, EmergencyTeamRole, Department
+from app.db.models.emergency_team import EmergencyTeam
+from app.db.models.enums import UserStatus, EmergencyTeamRole, Department
 from app.core.config import settings
 
 # Setup logging

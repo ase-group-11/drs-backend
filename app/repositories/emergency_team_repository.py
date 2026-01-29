@@ -9,8 +9,8 @@ from typing import Optional, List
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.emergency_team import EmergencyTeam
-from app.models.enums import UserStatus, EmergencyTeamRole, Department
+from app.db.models.emergency_team import EmergencyTeam
+from app.db.models.enums import UserStatus, EmergencyTeamRole, Department
 from app.repositories.base import BaseRepository
 
 
