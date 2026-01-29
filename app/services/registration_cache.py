@@ -89,7 +89,7 @@ async def store_registration_data(
     """
     Store registration data temporarily (with automatic fallback).
     
-    UPDATED: Now supports both user and emergency team registration data.
+    supports both user and emergency team registration data.
     
     Uses set_with_expiry which automatically handles:
     - Redis if available
