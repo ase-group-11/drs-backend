@@ -29,8 +29,8 @@ from app.core.config import settings
 from app.core.database import Base, engine
 from app.api.v1 import api_router
 
-# Create tables
-Base.metadata.create_all(bind=engine)
+# Tables are managed by Alembic migrations
+# Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title=settings.PROJECT_NAME)
 

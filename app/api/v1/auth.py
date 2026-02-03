@@ -40,23 +40,33 @@ def request_signup_otp(
     logger.info(f"✅ OTP request accepted for {user_data.mobile_number}")
     return {"message": "OTP sent successfully. Please verify to complete registration."}
 
-@router.post("/signup/verify", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/signup/verify", status_code=status.HTTP_201_CREATED)
 def verify_signup_otp(
-    verify_data: UserVerify, 
+    verify_data: UserVerify,
     db: Session = Depends(get_db)
-) -> UserResponse:
+) -> dict:
     """
     Verifies the OTP and creates the new user account.
+    Returns user data with session token for authentication.
     """
     logger.info(f"🔐 Verifying OTP for mobile: {verify_data.mobile_number}")
-    
+
     service = AuthService(db)
-    
+
     # Logic specifically for creating a NEW user
     user = service.verify_and_create(
-        mobile_number=verify_data.mobile_number, 
+        mobile_number=verify_data.mobile_number,
         otp_code=verify_data.otp_code
     )
-    
+
     logger.info(f"🎉 User created successfully: ID {user.user_id}")
-    return user
+
+    # Return user data with session token
+    return {
+        "user_id": user.user_id,
+        "mobile_number": user.mobile_number,
+        "role": user.role,
+        "is_verified": user.is_verified,
+        "created_at": user.created_at,
+        "session_token": getattr(user, 'session_token', None)
+    }

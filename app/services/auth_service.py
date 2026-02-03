@@ -81,6 +81,19 @@ class AuthService:
             logger.info(f"User {mobile_number} already exists in DB. Returning existing profile.")
             # Cleanup Redis even if user existed, to prevent replay attacks
             redis_client.delete(redis_key)
+
+            # Generate session token for existing user
+            import secrets
+            session_token = secrets.token_urlsafe(32)
+            session_key = f"session:{session_token}"
+            session_expiry_seconds = 86400  # 24 hours
+
+            redis_client.setex(session_key, session_expiry_seconds, str(existing_user.user_id))
+            logger.info(f"Session token generated for existing user {existing_user.user_id}")
+
+            # Store the token in user object for endpoint to return
+            existing_user.session_token = session_token
+
             return existing_user
 
         logger.info(f"Creating new user record for {mobile_number}")
@@ -88,8 +101,21 @@ class AuthService:
         self.db.add(new_user)
         self.db.commit()
         self.db.refresh(new_user)
-        
+
         # 4. Cleanup: Delete the OTP so it can't be used again
         redis_client.delete(redis_key)
-        
+
+        # 5. Generate session token for authenticated requests
+        import secrets
+        session_token = secrets.token_urlsafe(32)
+        session_key = f"session:{session_token}"
+        session_expiry_seconds = 86400  # 24 hours
+
+        redis_client.setex(session_key, session_expiry_seconds, str(new_user.user_id))
+        logger.info(f"Session token generated for user {new_user.user_id}")
+
+        # Store the token in user object for endpoint to return
+        # (This is a temporary attribute, not persisted to DB)
+        new_user.session_token = session_token
+
         return new_user
