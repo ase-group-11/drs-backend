@@ -91,3 +91,42 @@ For open source projects, say how it is licensed.
 
 ## Project status
 If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+
+
+
+
+# Run PostgreSQL container
+udocker run -p 5432:5432 \
+  -e POSTGRES_USER=drs_user \
+  -e POSTGRES_PASSWORD=drs_password \
+  -e POSTGRES_DB=disaster_response_db \
+  postgres-drs
+
+# Run Redis container
+udocker run -p 6379:6379 redis-drs
+
+# to Run the Backend
+source venv/bin/activate  
+uvicorn app.main:app --reload
+
+# Database Management
+python scripts/manage_db.py check         # Check DB connection
+python scripts/manage_db.py migrate "msg" # Create migration  
+python scripts/manage_db.py upgrade       # Apply migrations
+python scripts/manage_db.py current       # Show current
+python scripts/manage_db.py history       # Show history
+python scripts/manage_db.py downgrade 1   # Rollback
+python scripts/manage_db.py reset         # Reset DB (⚠️)
+python scripts/manage_db.py help          # Show help
+python3 scripts/manage_db.py create       # Create tables
+
+# Alembic (Direct)
+alembic revision --autogenerate -m "Message"
+alembic upgrade head
+alembic current
+alembic history
+alembic downgrade -1
+
+# Test
+
+pytest app/tests/integration/test_emergency_team_api.py -v

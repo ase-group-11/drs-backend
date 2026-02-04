@@ -1,0 +1,110 @@
+# File: app/models/enums.py
+"""
+Enumerations for the ASE Emergency Services system.
+
+Defines:
+- User account status
+- Emergency team roles
+- Emergency service departments
+- OTP verification status
+"""
+
+import enum
+
+
+class UserStatus(str, enum.Enum):
+    """
+    User account status.
+    
+    States:
+    - PENDING: Account created, awaiting OTP verification
+    - ACTIVE: Account verified and active
+    - INACTIVE: Account deactivated (can be reactivated)
+    - SUSPENDED: Account suspended (security/policy violation)
+    - DELETED: Soft deleted (can be recovered)
+    """
+    PENDING = "pending"
+    ACTIVE = "active"
+    INACTIVE = "inactive"
+    SUSPENDED = "suspended"
+    DELETED = "deleted"
+
+class UserRole(str, enum.Enum):
+    """
+    User roles in the system.
+    
+    Roles:
+    - USER: Standard user with access to emergency services
+    - PRIVILEGED: System administrator/ERT with elevated privileges
+    """
+    RESIDENT = "user"
+    PRIVILEGED = "privileged"
+    ADMIN = "IT"
+
+
+class EmergencyTeamRole(str, enum.Enum):
+    """
+    Emergency team member roles.
+    
+    Roles (hierarchical):
+    - ADMIN: Full system access, can manage all teams
+    - MANAGER: Can manage team members and view all data
+    - STAFF: Standard emergency responder access
+    """
+    ADMIN = "admin"
+    MANAGER = "manager"
+    STAFF = "staff"
+
+
+class Department(str, enum.Enum):
+    """
+    Emergency service departments.
+    
+    Departments:
+    - MEDICAL: Ambulance, paramedics, hospitals
+    - POLICE: Law enforcement
+    - FIRE: Fire department
+    - IT: Technical support and system administration
+    """
+    MEDICAL = "medical"
+    POLICE = "police"
+    FIRE = "fire"
+    IT = "it"
+
+
+class OTPStatus(str, enum.Enum):
+    """
+    OTP verification status.
+    
+    States:
+    - PENDING: OTP sent, awaiting verification
+    - VERIFIED: OTP successfully verified
+    - EXPIRED: OTP expired (TTL exceeded)
+    - FAILED: OTP verification failed (wrong code)
+    - REVOKED: OTP manually revoked/invalidated
+    """
+    PENDING = "pending"
+    VERIFIED = "verified"
+    EXPIRED = "expired"
+    FAILED = "failed"
+    REVOKED = "revoked"
+
+
+class EmergencyRequestStatus(str, enum.Enum):
+    """
+    Emergency request lifecycle status.
+    
+    States:
+    - SUBMITTED: Request created by user
+    - ASSIGNED: Request assigned to emergency team
+    - IN_PROGRESS: Team responding to emergency
+    - RESOLVED: Emergency resolved
+    - CANCELLED: Request cancelled by user
+    - REJECTED: Request rejected (false alarm, duplicate, etc.)
+    """
+    SUBMITTED = "submitted"
+    ASSIGNED = "assigned"
+    IN_PROGRESS = "in_progress"
+    RESOLVED = "resolved"
+    CANCELLED = "cancelled"
+    REJECTED = "rejected"
