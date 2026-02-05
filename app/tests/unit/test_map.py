@@ -1,87 +1,3 @@
-# import pytest, json
-
-
-# @pytest.mark.asyncio
-# async def test_bootstrap_returns_minimum_config(client):
-#     r = await client.get("/map/bootstrap")
-#     assert r.status_code == 200
-#     data = r.json()
-
-#     assert "default_center" in data
-#     assert "default_zoom" in data
-#     assert "refresh_intervals" in data
-
-#     assert "lat" in data["default_center"]
-#     assert "lng" in data["default_center"]
-#     assert isinstance(data["refresh_intervals"], dict)
-
-
-
-# @pytest.mark.asyncio
-# async def test_traffic_invalid_bbox_returns_400(client):
-#     r = await client.get("/map/traffic?bbox=1,2,3&zoom=12")
-#     assert r.status_code == 400
-
-# @pytest.mark.asyncio
-# async def test_traffic_invalid_zoom_returns_400(client):
-#     r = await client.get("/map/traffic?bbox=-6.4,53.2,-6.1,53.5&zoom=bad")
-#     assert r.status_code == 400
-
-
-# @pytest.mark.asyncio
-# async def test_traffic_cache_hit_does_not_call_provider(client, mock_redis_client, mock_traffic_provider):
-#     bbox = "-6.4,53.2,-6.1,53.5"
-#     zoom = 12
-
-#     cached_geojson = {
-#         "type": "FeatureCollection",
-#         "features": [{"type": "Feature", "geometry": {"type": "Point", "coordinates": [-6.26, 53.35]}, "properties": {"id": "cached"}}],
-#     }
-
-#     # cache hit
-#     mock_redis_client.get.return_value = json.dumps(cached_geojson)
-
-#     r = await client.get(f"/map/traffic?bbox={bbox}&zoom={zoom}")
-#     assert r.status_code == 200
-#     assert r.json()["features"][0]["properties"]["id"] == "cached"
-
-#     assert mock_traffic_provider.get_traffic.await_count == 0
-
-
-# @pytest.mark.asyncio
-# async def test_traffic_cache_miss_calls_provider_and_sets_cache(client, mock_redis_client, mock_traffic_provider):
-#     bbox = "-6.4,53.2,-6.1,53.5"
-#     zoom = 12
-
-#     live_geojson = {
-#         "type": "FeatureCollection",
-#         "features": [{"type": "Feature", "geometry": {"type": "Point", "coordinates": [-6.27, 53.34]}, "properties": {"id": "live"}}],
-#     }
-
-#     # cache miss
-#     mock_redis_client.get.return_value = None
-#     mock_traffic_provider.get_traffic.return_value = live_geojson
-
-#     r = await client.get(f"/map/traffic?bbox={bbox}&zoom={zoom}")
-#     assert r.status_code == 200
-#     assert r.json()["features"][0]["properties"]["id"] == "live"
-
-#     assert mock_traffic_provider.get_traffic.await_count == 1
-#     assert mock_redis_client.setex.await_count == 1
-
-
-# @pytest.mark.asyncio
-# async def test_traffic_provider_down_and_no_cache_returns_503(client, mock_redis_client, mock_traffic_provider):
-#     bbox = "-6.4,53.2,-6.1,53.5"
-#     zoom = 12
-
-#     mock_redis_client.get.return_value = None
-#     mock_traffic_provider.get_traffic.side_effect = RuntimeError("TomTom down")
-
-#     r = await client.get(f"/map/traffic?bbox={bbox}&zoom={zoom}")
-#     assert r.status_code in (502, 503)
-
-
 
 import json
 import pytest
@@ -103,7 +19,7 @@ async def test_base_map_tiles_calls_map_provider(mock_redis_client):
     """
     Expectation:
     - LiveMapService.get_base_map_tiles(center, zoom) calls MapProvider.get_base_map_tiles
-    - Returns the provider payload (tiles template / style / whatever you decide)
+    - Returns the provider payload (tiles template / style / other params)
     """
     map_provider = AsyncMock()
     map_provider.get_base_map_tiles.return_value = {
@@ -228,7 +144,7 @@ async def test_get_traffic_provider_down_falls_back_to_cached(mock_redis_client)
     Provider fails:
     - traffic_provider raises
     - service tries cache.get(traffic_key)
-    - returns cached payload (and marks it as cached if you want)
+    - returns cached payload (and marks it as cached)
     """
     bounds = _bounds()
     cache_key = f"live_map:traffic:{bounds}"
