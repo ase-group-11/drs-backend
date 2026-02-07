@@ -7,14 +7,15 @@ They can submit emergency requests and track their status.
 """
 
 from sqlalchemy import String, Enum as SQLEnum, Index
-from sqlalchemy.orm import Mapped, mapped_column
-from typing import Optional
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from typing import Optional, List
 from app.db.models.base import Base
 from app.db.models.enums import UserStatus, UserRole
 
 
 class User(Base):
     """
+
     Regular user model (OTP-based authentication).
     
     Users authenticate via OTP sent to their phone number.
@@ -25,6 +26,7 @@ class User(Base):
     - full_name: User's full name
     - email: Optional email address
     - status: Account status (pending, active, inactive, etc.)
+
     """
     
     __tablename__ = "users"
@@ -63,6 +65,12 @@ class User(Base):
         default=UserStatus.PENDING,
         nullable=False,
         index=True
+    )
+
+    reported_disasters: Mapped[List["Disaster"]] = relationship(
+        "Disaster",
+        back_populates = "reported_by",
+        foreign_keys = "Disaster.reported_by_user_id"
     )
     
     # Indexes for common queries
