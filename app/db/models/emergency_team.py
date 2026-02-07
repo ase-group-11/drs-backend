@@ -7,8 +7,8 @@ They have roles (Admin, Manager, Staff) and belong to departments.
 """
 
 from sqlalchemy import String, Enum as SQLEnum, Index
-from sqlalchemy.orm import Mapped, mapped_column
-from typing import Optional
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from typing import Optional, List
 from app.db.models.base import Base
 from app.db.models.enums import UserStatus, EmergencyTeamRole, Department
 
@@ -31,6 +31,10 @@ class EmergencyTeam(Base):
     - department: Service department
     - employee_id: Optional employee ID
     - status: Account status
+
+    Relationships:
+    - verified_disasters: Disasters verified by this team member
+
     """
     
     __tablename__ = "emergency_teams"
@@ -88,6 +92,12 @@ class EmergencyTeam(Base):
         default=UserStatus.PENDING,
         nullable=False,
         index=True
+    )
+    
+    verified_disasters: Mapped[List["Disaster"]] = relationship(
+        "Disaster",
+        back_populates="verified_by",
+        foreign_keys="Disaster.verified_by_team_id"
     )
     
     # Indexes for common queries

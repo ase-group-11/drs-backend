@@ -30,7 +30,7 @@ async def test_base_map_tiles_calls_map_provider(mock_redis_client):
     traffic_provider = AsyncMock()
     repo = AsyncMock()
 
-    from app.services.live_map import LiveMapService 
+    from app.services.live_map_service import LiveMapService 
 
     svc = LiveMapService(
         disaster_repo=repo,
@@ -62,7 +62,7 @@ async def test_get_disasters_cache_hit_returns_cached(mock_redis_client):
     map_provider = AsyncMock()
     traffic_provider = AsyncMock()
 
-    from app.services.live_map import LiveMapService
+    from app.services.live_map_service import LiveMapService
 
     svc = LiveMapService(repo, mock_redis_client, map_provider, traffic_provider)
 
@@ -91,7 +91,7 @@ async def test_get_disasters_cache_miss_fetches_repo_and_sets_cache(mock_redis_c
     map_provider = AsyncMock()
     traffic_provider = AsyncMock()
 
-    from app.services.live_map import LiveMapService
+    from app.services.live_map_service import LiveMapService
 
     svc = LiveMapService(repo, mock_redis_client, map_provider, traffic_provider)
 
@@ -123,7 +123,7 @@ async def test_get_traffic_success_caches_live(mock_redis_client):
     traffic_provider = AsyncMock()
     traffic_provider.get_traffic.return_value = {"source": "tomtom", "flow": [{"speed": 22}]}
 
-    from app.services.live_map import LiveMapService
+    from app.services.live_map_service import LiveMapService
 
     svc = LiveMapService(repo, mock_redis_client, map_provider, traffic_provider)
 
@@ -158,7 +158,7 @@ async def test_get_traffic_provider_down_falls_back_to_cached(mock_redis_client)
     traffic_provider = AsyncMock()
     traffic_provider.get_traffic.side_effect = TimeoutError("TomTom timeout")
 
-    from app.services.live_map import LiveMapService
+    from app.services.live_map_service import LiveMapService
 
     svc = LiveMapService(repo, mock_redis_client, map_provider, traffic_provider)
 
@@ -184,7 +184,7 @@ async def test_get_traffic_provider_down_no_cache_returns_none(mock_redis_client
     traffic_provider = AsyncMock()
     traffic_provider.get_traffic.side_effect = TimeoutError("TomTom timeout")
 
-    from app.services.live_map import LiveMapService
+    from app.services.live_map_service import LiveMapService
 
     svc = LiveMapService(repo, mock_redis_client, map_provider, traffic_provider)
 
