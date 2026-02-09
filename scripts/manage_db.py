@@ -14,6 +14,7 @@ import asyncio
 import sys
 import subprocess
 from pathlib import Path
+from sqlalchemy import text  # Add this with other imports
 
 # Add project root to path
 project_root = Path(__file__).resolve().parent.parent
@@ -57,6 +58,37 @@ async def drop_tables():
     await engine.dispose()
     print("✅ Tables dropped successfully!")
 
+async def cleanup_database():
+    """Drop all tables and enum types completely."""
+    print("Cleaning up database (dropping tables and enums)...")
+    
+    response = input("Are you sure? This will delete ALL data and types! (yes/no): ")
+    if response.lower() != "yes":
+        print("❌ Aborted")
+        return
+    
+    engine = create_async_engine(settings.DATABASE_URL, echo=True)
+    
+    async with engine.begin() as conn:
+        # Drop all tables first
+        await conn.run_sync(Base.metadata.drop_all)
+        
+        # Drop enum types manually
+        await conn.execute(text("""
+            DROP TYPE IF EXISTS report_status CASCADE;
+            DROP TYPE IF EXISTS severity CASCADE;
+            DROP TYPE IF EXISTS disaster_type CASCADE;
+            DROP TYPE IF EXISTS department CASCADE;
+            DROP TYPE IF EXISTS emergency_team_role CASCADE;
+            DROP TYPE IF EXISTS user_role CASCADE;
+            DROP TYPE IF EXISTS user_status CASCADE;
+            DROP TYPE IF EXISTS otp_status CASCADE;
+            DROP TYPE IF EXISTS emergency_request_status CASCADE;
+            DROP TABLE IF EXISTS alembic_version CASCADE;
+        """))
+    
+    await engine.dispose()
+    print("✅ Database cleaned successfully!")
 
 async def check_connection():
     """Check database connection."""
@@ -79,11 +111,30 @@ async def check_connection():
         return False
 
 
+# def run_alembic_command(command: list):
+#     """Run alembic command."""
+#     try:
+#         result = subprocess.run(
+#             ["python", "-m", "alembic"] + command,
+#             capture_output=True,
+#             text=True,
+#             check=True
+#         )
+#         print(result.stdout)
+#         if result.stderr:
+#             print(result.stderr)
+#         return True
+#     except subprocess.CalledProcessError as e:
+#         print(f"❌ Command failed: {e}")
+#         print(e.stdout)
+#         print(e.stderr)
+#         return False
+
 def run_alembic_command(command: list):
     """Run alembic command."""
     try:
         result = subprocess.run(
-            ["python", "-m", "alembic"] + command,
+            ["alembic"] + command,  # Call alembic directly
             capture_output=True,
             text=True,
             check=True
@@ -97,7 +148,6 @@ def run_alembic_command(command: list):
         print(e.stdout)
         print(e.stderr)
         return False
-
 
 def create_migration(message: str):
     """Create a new migration."""
@@ -197,6 +247,9 @@ async def main():
     
     elif command == "drop":
         await drop_tables()
+        
+    elif command == "cleanup":
+        await cleanup_database()
     
     elif command == "migrate":
         if len(sys.argv) < 3:

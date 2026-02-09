@@ -17,28 +17,45 @@ depends_on = None
 
 
 def upgrade() -> None:
-    # Create enums first
-    disaster_type_enum = postgresql.ENUM(
-        'FIRE', 'FLOOD', 'EARTHQUAKE', 'MEDICAL_EMERGENCY', 'ACCIDENT',
-        'CRIME', 'BUILDING_COLLAPSE', 'GAS_LEAK', 'POWER_OUTAGE',
-        'WATER_CONTAMINATION', 'LANDSLIDE', 'STORM', 'HAZMAT',
-        'EXPLOSION', 'RIOT', 'TERRORIST_ATTACK', 'OTHER',
-        name='disaster_type'
-    )
-    disaster_type_enum.create(op.get_bind())
+    # Get database connection
+    conn = op.get_bind()
     
-    severity_enum = postgresql.ENUM(
-        'LOW', 'MEDIUM', 'HIGH', 'CRITICAL',
-        name='severity'
-    )
-    severity_enum.create(op.get_bind())
+    # Create disaster_type enum only if it doesn't exist
+    result = conn.execute(sa.text(
+        "SELECT 1 FROM pg_type WHERE typname = 'disaster_type'"
+    ))
+    if not result.fetchone():
+        disaster_type_enum = postgresql.ENUM(
+            'FIRE', 'FLOOD', 'EARTHQUAKE', 'MEDICAL_EMERGENCY', 'ACCIDENT',
+            'CRIME', 'BUILDING_COLLAPSE', 'GAS_LEAK', 'POWER_OUTAGE',
+            'WATER_CONTAMINATION', 'LANDSLIDE', 'STORM', 'HAZMAT',
+            'EXPLOSION', 'RIOT', 'TERRORIST_ATTACK', 'OTHER',
+            name='disaster_type'
+        )
+        disaster_type_enum.create(conn)
     
-    report_status_enum = postgresql.ENUM(
-        'SUBMITTED', 'UNDER_REVIEW', 'ASSIGNED', 'IN_PROGRESS',
-        'RESOLVED', 'CANCELLED', 'REJECTED',
-        name='report_status'
-    )
-    report_status_enum.create(op.get_bind())
+    # Create severity enum only if it doesn't exist
+    result = conn.execute(sa.text(
+        "SELECT 1 FROM pg_type WHERE typname = 'severity'"
+    ))
+    if not result.fetchone():
+        severity_enum = postgresql.ENUM(
+            'LOW', 'MEDIUM', 'HIGH', 'CRITICAL',
+            name='severity'
+        )
+        severity_enum.create(conn)
+    
+    # Create report_status enum only if it doesn't exist
+    result = conn.execute(sa.text(
+        "SELECT 1 FROM pg_type WHERE typname = 'report_status'"
+    ))
+    if not result.fetchone():
+        report_status_enum = postgresql.ENUM(
+            'SUBMITTED', 'UNDER_REVIEW', 'ASSIGNED', 'IN_PROGRESS',
+            'RESOLVED', 'CANCELLED', 'REJECTED',
+            name='report_status'
+        )
+        report_status_enum.create(conn)
     
     # Create disaster_reports table
     op.create_table(
@@ -57,8 +74,17 @@ def upgrade() -> None:
         sa.Column('location_longitude', sa.Float(), nullable=True),
         
         # Disaster information
-        sa.Column('disaster_type', disaster_type_enum, nullable=False),
-        sa.Column('severity', severity_enum, nullable=False),
+        sa.Column('disaster_type', postgresql.ENUM(
+            'FIRE', 'FLOOD', 'EARTHQUAKE', 'MEDICAL_EMERGENCY', 'ACCIDENT',
+            'CRIME', 'BUILDING_COLLAPSE', 'GAS_LEAK', 'POWER_OUTAGE',
+            'WATER_CONTAMINATION', 'LANDSLIDE', 'STORM', 'HAZMAT',
+            'EXPLOSION', 'RIOT', 'TERRORIST_ATTACK', 'OTHER',
+            name='disaster_type', create_type=False
+        ), nullable=False),
+        sa.Column('severity', postgresql.ENUM(
+            'LOW', 'MEDIUM', 'HIGH', 'CRITICAL',
+            name='severity', create_type=False
+        ), nullable=False),
         sa.Column('description', sa.Text(), nullable=False),
         
         # Media
@@ -74,9 +100,16 @@ def upgrade() -> None:
         sa.Column('road_blocked', sa.Boolean(), nullable=False, server_default='false'),
         
         # Status and assignment
-        sa.Column('status', report_status_enum, nullable=False, server_default='SUBMITTED'),
+        sa.Column('status', postgresql.ENUM(
+            'SUBMITTED', 'UNDER_REVIEW', 'ASSIGNED', 'IN_PROGRESS',
+            'RESOLVED', 'CANCELLED', 'REJECTED',
+            name='report_status', create_type=False
+        ), nullable=False, server_default='SUBMITTED'),
         sa.Column('assigned_to_id', postgresql.UUID(as_uuid=False), nullable=True),
-        sa.Column('assigned_department', postgresql.ENUM('MEDICAL', 'POLICE', 'FIRE', 'IT', name='department'), nullable=True),
+        sa.Column('assigned_department', postgresql.ENUM(
+            'MEDICAL', 'POLICE', 'FIRE', 'IT', 
+            name='department', create_type=False
+        ), nullable=True),
         
         # Timeline
         sa.Column('response_time', sa.DateTime(timezone=True), nullable=True),
@@ -129,7 +162,29 @@ def downgrade() -> None:
     # Drop table
     op.drop_table('disaster_reports')
     
-    # Drop enums
-    sa.Enum(name='report_status').drop(op.get_bind())
-    sa.Enum(name='severity').drop(op.get_bind())
-    sa.Enum(name='disaster_type').drop(op.get_bind())
+    # Drop enums only if they exist and are not used by other tables
+    conn = op.get_bind()
+    
+    # Check if report_status is only used by disaster_reports
+    result = conn.execute(sa.text("""
+        SELECT COUNT(*) FROM information_schema.columns 
+        WHERE udt_name = 'report_status' AND table_name != 'disaster_reports'
+    """))
+    if result.fetchone()[0] == 0:
+        sa.Enum(name='report_status').drop(conn, checkfirst=True)
+    
+    # Check if severity is only used by disaster_reports
+    result = conn.execute(sa.text("""
+        SELECT COUNT(*) FROM information_schema.columns 
+        WHERE udt_name = 'severity' AND table_name != 'disaster_reports'
+    """))
+    if result.fetchone()[0] == 0:
+        sa.Enum(name='severity').drop(conn, checkfirst=True)
+    
+    # Check if disaster_type is only used by disaster_reports
+    result = conn.execute(sa.text("""
+        SELECT COUNT(*) FROM information_schema.columns 
+        WHERE udt_name = 'disaster_type' AND table_name != 'disaster_reports'
+    """))
+    if result.fetchone()[0] == 0:
+        sa.Enum(name='disaster_type').drop(conn, checkfirst=True)
