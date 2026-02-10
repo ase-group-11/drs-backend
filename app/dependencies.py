@@ -2,18 +2,16 @@ from fastapi import Depends, HTTPException, status, Header
 from sqlalchemy.orm import Session
 from typing import Optional
 
-from app.core.database import SessionLocal
-from app.models import User
-from app.core.cache import redis_client
+from app.db.session import get_sync_db  # Use sync DB for disaster reporting
+from app.db.models import User
+from cache.redis_client import redis_client
 
+# Alias for compatibility
 def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+    """Get database session (sync version for disaster reporting)"""
+    return get_sync_db()
 
-async def get_current_user(
+def get_current_user(
     authorization: Optional[str] = Header(None),
     db: Session = Depends(get_db)
 ) -> User:
@@ -35,9 +33,9 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # Parse Bearer token
+    # Parse Bearer token - Fixed: use maxsplit=1 to handle extra whitespace
     try:
-        scheme, token = authorization.split()
+        scheme, token = authorization.split(maxsplit=1)
         if scheme.lower() != "bearer":
             raise ValueError("Invalid authentication scheme")
     except ValueError:
@@ -58,9 +56,9 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # Get user from database
-    user_id = int(user_id_str)
-    user = db.query(User).filter(User.user_id == user_id).first()
+    # Get user from database (UUID in main branch)
+    user_id = user_id_str if isinstance(user_id_str, str) else user_id_str.decode('utf-8')
+    user = db.query(User).filter(User.id == user_id).first()
 
     if not user:
         # Cleanup invalid session

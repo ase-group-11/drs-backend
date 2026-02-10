@@ -24,11 +24,12 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from app.core.config import settings
-from app.models.base import Base
+from app.db.models.base import Base
 
 # Import all models so Alembic can detect them
-from app.models.user import User
-from app.models.emergency_team import EmergencyTeam
+from app.db.models.user import User
+from app.db.models.emergency_team import EmergencyTeam
+from app.db.models.disaster import Disaster  # Import disaster model for migrations
 
 # Alembic Config object
 config = context.config

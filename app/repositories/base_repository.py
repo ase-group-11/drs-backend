@@ -1,5 +1,6 @@
 from typing import Generic, TypeVar, Type, Optional, List
 from sqlalchemy.orm import Session
+from sqlalchemy import inspect as sa_inspect
 from app.core.database import Base
 
 ModelType = TypeVar("ModelType", bound=Base)
@@ -22,11 +23,11 @@ class BaseRepository(Generic[ModelType]):
         self.db.refresh(db_obj)
         return db_obj
 
-    def get_by_id(self, id: int) -> Optional[ModelType]:
-        """Get a record by primary key"""
-        return self.db.query(self.model).filter(
-            self.model.disaster_id == id
-        ).first()
+    def get_by_id(self, id) -> Optional[ModelType]:
+        """Get a record by primary key (dynamically determined)"""
+        # Dynamically get the primary key column
+        pk_col = sa_inspect(self.model).mapper.primary_key[0]
+        return self.db.query(self.model).filter(pk_col == id).first()
 
     def get_all(self, skip: int = 0, limit: int = 100) -> List[ModelType]:
         """Get all records with pagination"""

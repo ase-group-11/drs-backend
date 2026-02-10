@@ -1,5 +1,6 @@
 import logging
-from datetime import datetime
+import json
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 from pathlib import Path
 
@@ -26,7 +27,7 @@ audit_logger.propagate = False
 
 def log_event(
     event_type: str,
-    user_id: Optional[int],
+    user_id: Optional[str],  # UUID string
     details: Dict[str, Any],
     ip_address: Optional[str] = None
 ) -> None:
@@ -42,9 +43,9 @@ def log_event(
     Example:
         log_event(
             event_type='disaster_reported',
-            user_id=123,
+            user_id='550e8400-e29b-41d4-a716-446655440000',
             details={
-                'disaster_id': 456,
+                'disaster_id': '660e8400-e29b-41d4-a716-446655440000',
                 'severity': 'critical',
                 'location': '53.3498,-6.2603'
             },
@@ -54,13 +55,12 @@ def log_event(
     event_data = {
         'event_type': event_type,
         'user_id': user_id,
-        'timestamp': datetime.utcnow().isoformat(),
+        'timestamp': datetime.now(timezone.utc).isoformat(),  # Fixed: timezone-aware datetime
         'details': details
     }
 
     if ip_address:
         event_data['ip_address'] = ip_address
 
-    # Format as JSON-like string for easy parsing
-    import json
+    # Format as JSON string for easy parsing
     audit_logger.info(json.dumps(event_data))

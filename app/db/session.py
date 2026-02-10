@@ -1,21 +1,24 @@
 # File: app/db/session.py
 """
-Database session management using SQLAlchemy 2.0 async.
+Database session management using SQLAlchemy 2.0 async and sync.
 
 Provides:
 - Async engine creation
 - Async session factory
+- Sync engine for disaster reporting (PostGIS compatibility)
 - FastAPI dependency for database sessions
 """
 
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Generator
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     AsyncEngine,
     create_async_engine,
     async_sessionmaker,
 )
-from sqlalchemy.pool import NullPool, AsyncAdaptedQueuePool
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.pool import NullPool, AsyncAdaptedQueuePool, QueuePool
 
 from app.core.config import settings
 
@@ -82,15 +85,15 @@ async_session_factory = get_async_session_factory()
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
     """
     FastAPI dependency that provides database sessions.
-    
+
     Usage in FastAPI route:
         @router.get("/users")
         async def get_users(db: AsyncSession = Depends(get_db)):
             ...
-    
+
     Yields:
         AsyncSession: Database session
-        
+
     Note:
         Automatically handles session cleanup and commit/rollback.
     """
@@ -103,3 +106,51 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
             raise
         finally:
             await session.close()
+
+
+# Sync database session for disaster reporting (PostGIS compatibility)
+def create_sync_engine_instance():
+    """
+    Create synchronous SQLAlchemy engine for PostGIS operations.
+
+    Note: Used for disaster reporting which requires PostGIS/psycopg2.
+    """
+    # Convert async URL to sync URL (postgresql+asyncpg -> postgresql+psycopg2)
+    sync_url = settings.DATABASE_URL.replace('postgresql+asyncpg://', 'postgresql+psycopg2://')
+
+    poolclass = NullPool if settings.ENVIRONMENT == "testing" else QueuePool
+
+    engine_kwargs = {
+        "url": sync_url,
+        "echo": settings.DEBUG,
+        "future": True,
+        "poolclass": poolclass,
+        "pool_pre_ping": True,
+    }
+
+    if poolclass == QueuePool:
+        engine_kwargs["pool_size"] = 5
+        engine_kwargs["max_overflow"] = 10
+
+    return create_engine(**engine_kwargs)
+
+
+# Sync session factory
+sync_engine = create_sync_engine_instance()
+SyncSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=sync_engine)
+
+
+def get_sync_db() -> Generator[Session, None, None]:
+    """
+    FastAPI dependency for synchronous database sessions.
+
+    Used for disaster reporting with PostGIS/psycopg2.
+
+    Yields:
+        Session: Synchronous database session
+    """
+    db = SyncSessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()

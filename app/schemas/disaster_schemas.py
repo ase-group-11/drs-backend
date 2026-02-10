@@ -2,7 +2,7 @@ from pydantic import BaseModel, Field, field_validator, ConfigDict
 from typing import Optional, List
 from datetime import datetime
 
-from app.models.disaster import DisasterType, DisasterSeverity, DisasterStatus
+from app.db.models.disaster import DisasterType, DisasterSeverity, DisasterStatus
 
 # Dublin bounding box constants
 DUBLIN_LAT_MIN = 53.2
@@ -34,7 +34,7 @@ class DisasterCreate(BaseModel):
     )
     image_urls: Optional[List[str]] = Field(
         default=[],
-        max_items=5,
+        max_length=5,  # Fixed: max_length for Pydantic V2 (was max_items)
         description="List of image URLs (max 5)"
     )
 
@@ -73,15 +73,15 @@ class DisasterCreate(BaseModel):
 
 # Output: Returned after successful creation
 class DisasterResponse(BaseModel):
-    disaster_id: int
+    id: str  # UUID from Base class
     location_lat: float
     location_lng: float
     disaster_type: DisasterType
     severity: DisasterSeverity
     description: str
-    reporter_id: int
+    reporter_id: str  # UUID
     status: DisasterStatus
-    image_urls: List[str]
+    image_urls: Optional[List[str]]  # Can be None
     created_at: datetime
 
     # ERT notification flag (populated by service layer)

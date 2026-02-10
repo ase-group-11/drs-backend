@@ -1,7 +1,8 @@
 from typing import List, Optional
 from sqlalchemy.orm import Session
+from sqlalchemy import case
 
-from app.models import Disaster
+from app.db.models import Disaster
 from app.repositories.base_repository import BaseRepository
 
 class DisasterRepository(BaseRepository[Disaster]):
@@ -20,8 +21,8 @@ class DisasterRepository(BaseRepository[Disaster]):
         disaster_type: str,
         severity: str,
         description: str,
-        reporter_id: int,
-        image_urls: List[str] = []
+        reporter_id: str,
+        image_urls: Optional[List[str]] = None
     ) -> Disaster:
         """
         Create a new disaster report with PostGIS point geometry.
@@ -42,6 +43,10 @@ class DisasterRepository(BaseRepository[Disaster]):
         # Note: PostGIS expects (longitude, latitude) order
         point_wkt = f'POINT({location_lng} {location_lat})'
 
+        # Handle None default for image_urls
+        if image_urls is None:
+            image_urls = []
+
         disaster_data = {
             'location': point_wkt,
             'location_lat': location_lat,
@@ -55,7 +60,7 @@ class DisasterRepository(BaseRepository[Disaster]):
 
         return self.create(disaster_data)
 
-    def get_by_reporter(self, reporter_id: int) -> List[Disaster]:
+    def get_by_reporter(self, reporter_id: str) -> List[Disaster]:
         """Get all disasters reported by a specific user"""
         return self.db.query(Disaster).filter(
             Disaster.reporter_id == reporter_id
@@ -74,10 +79,19 @@ class DisasterRepository(BaseRepository[Disaster]):
         ).order_by(Disaster.created_at.desc()).all()
 
     def get_pending_disasters(self) -> List[Disaster]:
-        """Get all pending disasters (for ERT assignment)"""
+        """Get all pending disasters (for ERT assignment), ordered by severity priority"""
+        # Use CASE expression to map severity to numeric priority for correct sorting
+        severity_order = case(
+            (Disaster.severity == 'critical', 4),
+            (Disaster.severity == 'high', 3),
+            (Disaster.severity == 'medium', 2),
+            (Disaster.severity == 'low', 1),
+            else_=0
+        )
+
         return self.db.query(Disaster).filter(
             Disaster.status == 'pending'
         ).order_by(
-            Disaster.severity.desc(),  # Critical first
+            severity_order.desc(),      # Critical first (4 → 3 → 2 → 1)
             Disaster.created_at.asc()   # Oldest first
         ).all()

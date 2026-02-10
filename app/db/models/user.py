@@ -3,14 +3,17 @@
 User model for regular users.
 
 Regular users authenticate using OTP (SMS-based).
-They can submit emergency requests and track their status.
+They can submit emergency requests and disaster reports, and track their status.
 """
 
 from sqlalchemy import String, Enum as SQLEnum, Index
-from sqlalchemy.orm import Mapped, mapped_column
-from typing import Optional
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from typing import Optional, TYPE_CHECKING
 from app.db.models.base import Base
 from app.db.models.enums import UserStatus, UserRole
+
+if TYPE_CHECKING:
+    from app.db.models.disaster import Disaster
 
 
 class User(Base):
@@ -64,7 +67,14 @@ class User(Base):
         nullable=False,
         index=True
     )
-    
+
+    # Relationships
+    reported_disasters: Mapped[list["Disaster"]] = relationship(
+        "Disaster",
+        back_populates="reporter",
+        cascade="all, delete-orphan"
+    )
+
     # Indexes for common queries
     __table_args__ = (
         Index('idx_user_phone_status', 'phone_number', 'status'),

@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.schemas.disaster_schemas import DisasterCreate, DisasterResponse
 from app.dependencies import get_db, get_current_user
-from app.models import User, UserRole
+from app.db.models import User, UserRole
 from app.repositories.disaster_repository import DisasterRepository
 from app.core.audit import log_event
 
@@ -40,7 +40,7 @@ def report_disaster(
     Auth: Requires valid session token (Bearer token in Authorization header)
     """
     logger.info(
-        f"Disaster report received from user {current_user.user_id} "
+        f"Disaster report received from user {current_user.id} "
         f"at ({disaster_data.location_lat}, {disaster_data.location_lng})"
     )
 
@@ -53,32 +53,32 @@ def report_disaster(
         disaster_type=disaster_data.disaster_type.value,
         severity=disaster_data.severity.value,
         description=disaster_data.description,
-        reporter_id=current_user.user_id,
+        reporter_id=current_user.id,
         image_urls=disaster_data.image_urls or []
     )
 
-    logger.info(f"Disaster {disaster.disaster_id} created successfully")
+    logger.info(f"Disaster {disaster.id} created successfully")
 
     # Audit logging
     log_event(
         event_type='disaster_reported',
-        user_id=current_user.user_id,
+        user_id=current_user.id,
         details={
-            'disaster_id': disaster.disaster_id,
+            'disaster_id': disaster.id,
             'disaster_type': disaster.disaster_type,
             'severity': disaster.severity,
             'location': f"{disaster.location_lat},{disaster.location_lng}",
-            'has_images': len(disaster.image_urls) > 0
+            'has_images': bool(disaster.image_urls)  # Fixed: handle None safely
         },
         ip_address=request.client.host if request.client else None
     )
 
-    # Check if reporter is ERT member
-    is_reporter_ert = current_user.role == UserRole.ERT.value
+    # Check if reporter is privileged/admin user (ERT equivalent in main branch)
+    is_reporter_ert = current_user.role in [UserRole.PRIVILEGED, UserRole.ADMIN]
     ert_notified = False
 
     if not is_reporter_ert:
-        logger.info(f"Reporter is not ERT. Triggering notifications for disaster {disaster.disaster_id}")
+        logger.info(f"Reporter is not ERT. Triggering notifications for disaster {disaster.id}")
 
         # ========================================
         # STUB: Developer 2 Integration Points
@@ -88,17 +88,17 @@ def report_disaster(
         # if disaster.severity in ['high', 'critical']:
         #     ai_service = AIVerificationService()
         #     verified_severity = ai_service.verify_severity(
-        #         disaster_id=disaster.disaster_id,
+        #         disaster_id=disaster.id,
         #         images=disaster.image_urls,
         #         description=disaster.description
         #     )
         #     if verified_severity != disaster.severity:
-        #         disaster_repo.update_severity(disaster.disaster_id, verified_severity)
+        #         disaster_repo.update_severity(disaster.id, verified_severity)
 
         # TODO (Developer 2): ERT Notification Service
         # notification_service = ERTNotificationService(db)
         # notified_teams = notification_service.notify_nearby_ert(
-        #     disaster_id=disaster.disaster_id,
+        #     disaster_id=disaster.id,
         #     location_lat=disaster.location_lat,
         #     location_lng=disaster.location_lng,
         #     severity=disaster.severity
@@ -108,7 +108,7 @@ def report_disaster(
         # Placeholder: Mark as notified for now
         ert_notified = True  # Will be actual value from notification_service
 
-        logger.info(f"[STUB] ERT notification would be sent for disaster {disaster.disaster_id}")
+        logger.info(f"[STUB] ERT notification would be sent for disaster {disaster.id}")
     else:
         logger.info(f"Reporter is ERT member. Skipping notifications.")
 

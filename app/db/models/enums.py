@@ -93,7 +93,7 @@ class OTPStatus(str, enum.Enum):
 class EmergencyRequestStatus(str, enum.Enum):
     """
     Emergency request lifecycle status.
-    
+
     States:
     - SUBMITTED: Request created by user
     - ASSIGNED: Request assigned to emergency team
@@ -108,3 +108,55 @@ class EmergencyRequestStatus(str, enum.Enum):
     RESOLVED = "resolved"
     CANCELLED = "cancelled"
     REJECTED = "rejected"
+
+
+class DisasterType(str, enum.Enum):
+    """
+    Types of disasters that can be reported.
+
+    Types:
+    - FLOOD: Flooding, water-related disasters
+    - FIRE: Fire emergencies
+    - ACCIDENT: Vehicle accidents, collisions
+    - MEDICAL: Medical emergencies
+    - OTHER: Other types of disasters not categorized above
+    """
+    FLOOD = "flood"
+    FIRE = "fire"
+    ACCIDENT = "accident"
+    MEDICAL = "medical"
+    OTHER = "other"
+
+
+class DisasterSeverity(str, enum.Enum):
+    """
+    Severity levels for disaster reports.
+
+    Levels (from least to most severe):
+    - LOW: Minor incident, no immediate danger
+    - MEDIUM: Moderate incident, some risk
+    - HIGH: Serious incident, significant risk
+    - CRITICAL: Life-threatening situation, immediate response required
+    """
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    CRITICAL = "critical"
+
+
+class DisasterStatus(str, enum.Enum):
+    """
+    Lifecycle status of disaster reports.
+
+    States:
+    - PENDING: Report submitted, awaiting verification/assignment
+    - ASSIGNED: Report assigned to emergency team
+    - IN_PROGRESS: Team actively responding to disaster
+    - RESOLVED: Disaster situation resolved
+    - CLOSED: Report closed (resolved and verified)
+    """
+    PENDING = "pending"
+    ASSIGNED = "assigned"
+    IN_PROGRESS = "in_progress"
+    RESOLVED = "resolved"
+    CLOSED = "closed"
