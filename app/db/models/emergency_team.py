@@ -13,7 +13,7 @@ from app.db.models.base import Base
 from app.db.models.enums import UserStatus, EmergencyTeamRole, Department
 
 if TYPE_CHECKING:
-    from app.db.models.disaster_report import UserReport
+    from app.db.models.disaster_report import DisasterReport
 
 
 class EmergencyTeam(Base):
@@ -94,10 +94,10 @@ class EmergencyTeam(Base):
     )
     
     # Relationships
-    assigned_reports: Mapped[List["UserReport"]] = relationship(
-        "UserReport",
+    assigned_reports: Mapped[List["DisasterReport"]] = relationship(
+        "DisasterReport",
         back_populates="assigned_to",
-        foreign_keys="[UserReport.assigned_to_id]",
+        foreign_keys="[DisasterReport.assigned_to_id]",
         lazy="select"
     )
     
