@@ -1,14 +1,12 @@
 from fastapi import APIRouter
 
-from app.api.v1 import auth
-from app.api.v1 import disasters
-# from app.api.v1 import users      <-- Add future files here
-# from app.api.v1 import payments   <-- Add future files here
+from app.api.v1 import user_auth, emergency_team_auth, disasters
 
 api_router = APIRouter()
 
-# Register the routers
-api_router.include_router(auth.router)
-api_router.include_router(disasters.router)
-# api_router.include_router(users.router)
-# api_router.include_router(payments.router)
+# Register authentication routers from main
+api_router.include_router(user_auth.router, prefix="/auth/users", tags=["user-auth"])
+api_router.include_router(emergency_team_auth.router, prefix="/auth/emergency-teams", tags=["emergency-team-auth"])
+
+# Register disaster reporting router
+api_router.include_router(disasters.router, prefix="/disasters", tags=["disasters"])

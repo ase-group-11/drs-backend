@@ -1,102 +1,87 @@
+# File: tests/conftest.py
+"""
+Pytest configuration and shared fixtures.
+
+Provides:
+- Mock settings for testing
+- Database fixtures
+- Redis fixtures
+- Test client fixtures
+"""
+
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from fastapi.testclient import TestClient
+import os
+from unittest.mock import MagicMock, AsyncMock
 
-from app.core.database import Base
-from app.dependencies import get_db
-from main import app
 
-# Test database URL - Use PostgreSQL test database
-SQLALCHEMY_TEST_DATABASE_URL = "postgresql://pgadmin:Ase4life!@localhost:5432/drs_backend_test"
-
-@pytest.fixture(scope="function")
-def test_db():
+@pytest.fixture(scope="session", autouse=True)
+def setup_test_environment():
     """
-    Create a fresh database for each test.
-    Uses PostgreSQL to properly test PostGIS features.
+    Set up test environment variables before any tests run.
+    This runs once per test session.
     """
-    from sqlalchemy import text
+    os.environ["ENVIRONMENT"] = "testing"
+    os.environ["DEBUG"] = "false"
+    os.environ["DATABASE_URL"] = "postgresql+asyncpg://test:test@localhost:5432/test_db"
+    os.environ["REDIS_URL"] = "redis://localhost:6379/1"
+    os.environ["JWT_SECRET_KEY"] = "test-secret-key-for-testing-minimum-32-characters-long-required"
+    os.environ["JWT_ALGORITHM"] = "HS256"
+    os.environ["ACCESS_TOKEN_EXPIRE_MINUTES"] = "30"
+    os.environ["REFRESH_TOKEN_EXPIRE_DAYS"] = "7"
+    os.environ["TWILIO_ACCOUNT_SID"] = "test_account_sid"
+    os.environ["TWILIO_AUTH_TOKEN"] = "test_auth_token"
+    os.environ["TWILIO_PHONE_NUMBER"] = "+1234567890"
+    os.environ["OTP_EXPIRY_SECONDS"] = "300"
+    os.environ["OTP_LENGTH"] = "6"
+    
+    yield
+    
+    # Cleanup after all tests
+    # (In practice, environment variables persist, but this is good practice)
 
-    # Create test engine
-    engine = create_engine(SQLALCHEMY_TEST_DATABASE_URL)
-    TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
-    # Create tables
-    Base.metadata.create_all(bind=engine)
-
-    db = TestingSessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-        # Clean up tables after test
-        Base.metadata.drop_all(bind=engine)
-
-@pytest.fixture(scope="function")
-def client(test_db):
-    """
-    FastAPI test client with overridden database dependency.
-    """
-    def override_get_db():
-        try:
-            yield test_db
-        finally:
-            test_db.close()
-
-    app.dependency_overrides[get_db] = override_get_db
-
-    with TestClient(app) as test_client:
-        yield test_client
-
-    app.dependency_overrides.clear()
 
 @pytest.fixture
-def sample_user(test_db):
+def mock_settings():
     """
-    Create a sample user for testing.
+    Provide a mock Settings object for testing.
+    Can be customized per test.
     """
-    from app.models import User, UserRole
+    from app.core.config import Settings
+    return Settings()
 
-    user = User(
-        mobile_number="+919876543210",
-        role=UserRole.CITIZEN.value,
-        is_verified=True
-    )
-    test_db.add(user)
-    test_db.commit()
-    test_db.refresh(user)
-
-    return user
 
 @pytest.fixture
-def ert_user(test_db):
+def mock_db_session():
     """
-    Create a sample ERT user for testing.
+    Provide a mock database session for unit tests.
+    Avoids actual database connections in isolated unit tests.
     """
-    from app.models import User, UserRole
+    session = AsyncMock()
+    session.commit = AsyncMock()
+    session.rollback = AsyncMock()
+    session.close = AsyncMock()
+    session.execute = AsyncMock()
+    session.scalar = AsyncMock()
+    session.add = MagicMock()
+    session.delete = MagicMock()
+    session.refresh = AsyncMock()
+    session.flush = AsyncMock()  # Added for user service tests
+    
+    return session
 
-    user = User(
-        mobile_number="+919876543211",
-        role=UserRole.ERT.value,
-        is_verified=True
-    )
-    test_db.add(user)
-    test_db.commit()
-    test_db.refresh(user)
-
-    return user
 
 @pytest.fixture
-def auth_token(sample_user):
+def mock_redis_client():
     """
-    Generate authentication token for sample user.
+    Provide a mock Redis client for unit tests.
+    Avoids actual Redis connections in isolated unit tests.
     """
-    import secrets
-    from app.core.cache import redis_client
-
-    token = secrets.token_urlsafe(32)
-    session_key = f"session:{token}"
-    redis_client.setex(session_key, 3600, str(sample_user.user_id))
-
-    return token
+    client = AsyncMock()
+    client.set = AsyncMock()
+    client.get = AsyncMock()
+    client.delete = AsyncMock()
+    client.exists = AsyncMock()
+    client.expire = AsyncMock()
+    client.setex = AsyncMock()
+    
+    return client

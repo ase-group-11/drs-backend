@@ -1,53 +1,42 @@
-# requirements.txt (Production Dependencies)
+# File: requirements.txt
+# ASE Emergency Services Backend - Dependencies
 
-# Web Framework
-fastapi==0.115.2
-uvicorn[standard]==0.32.0
-python-multipart
+# FastAPI Framework
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+python-multipart==0.0.6
 
 # Database
-SQLAlchemy==2.0.34
-alembic==1.17.1
-# asyncpg==0.30.0
-psycopg2-binary==2.9.10
-GeoAlchemy2==0.16.0
+sqlalchemy[asyncio]==2.0.25
+asyncpg==0.29.0
+psycopg2-binary==2.9.10  # For PostGIS support
+alembic==1.13.1
+greenlet==3.0.3  # Required for SQLAlchemy async
+GeoAlchemy2==0.16.0  # For PostGIS geography types
 
-# Caching & Queue
-redis==5.2.1
-# aioredis==2.0.1
-# celery==5.5.3
-# kombu==5.4.3
+# Redis
+redis[hiredis]==5.0.1
 
-# Message Queue
-# pika==1.3.2
-
-# Security & Auth
-PyJWT==2.10.1
-passlib[bcrypt]==1.7.4
+# Authentication & Security
 python-jose[cryptography]==3.3.0
-bcrypt==4.3.0
+passlib[argon2]==1.7.4
+argon2-cffi==23.1.0
 
-# Cloud Storage
-azure-storage-blob==12.24.0
+# Twilio SMS
+twilio==8.12.0
 
-# External API Integrations
-twilio
+# Validation & Settings
+pydantic==2.5.3
+pydantic-settings==2.1.0
+email-validator==2.1.0
 
-# Validation & Serialization
-pydantic==2.10.1
-pydantic-core==2.27.1
-typing_extensions==4.12.2
-pydantic-settings==2.7.1
-# email-validator==2.2.0
+# Testing
+pytest==7.4.4
+pytest-asyncio==0.23.3
+pytest-cov==4.1.0
+pytest-mock==3.12.0
+httpx==0.26.0
+faker==22.0.0
 
 # Utilities
-python-dotenv==1.0.1
-# pytz==2024.2
-# python-dateutil==2.9.0
-pandas==2.2.3
-
-# WebSocket
-websockets
-
-# # Logging & Monitoring
-# loguru==0.7.3
+python-dotenv==1.0.0
