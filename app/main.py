@@ -18,6 +18,7 @@ from app.core.config import settings
 from app.core.logging_config import setup_logging
 from app.api.v1 import user_auth
 from app.api.v1 import emergency_team_auth
+from app.api.v1 import disasters  # Import disaster reporting
 from cache.redis_client import close_redis_connection
 
 # Setup logging FIRST
@@ -59,9 +60,10 @@ app = FastAPI(
     ASE Emergency Services Backend API
     
     ## Features
-    
+
     * **User Authentication** - OTP-based registration and login
     * **Emergency Team Auth** - OTP registration + password login
+    * **Disaster Reporting** - Report disasters with location, severity, images
     * **Emergency Requests** - Submit and track emergency requests
     * **Real-time Updates** - WebSocket notifications
     * **Multi-Department** - Medical, Police, Fire, IT support
@@ -122,6 +124,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 # Include routers
 app.include_router(user_auth.router, prefix="/api/v1")
 app.include_router(emergency_team_auth.router, prefix="/api/v1")
+app.include_router(disasters.router, prefix="/api/v1")  # Disaster reporting
 
 
 # Root endpoints
