@@ -23,6 +23,7 @@ from app.schemas.live_map import(
     TrafficDataResponse,
     TrafficFlowResponse
 )
+from app.api.v1.live_map import get_live_map_service_dependency
 from app.schemas.common import ResponseBase
 import logging
 
