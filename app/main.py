@@ -19,11 +19,18 @@ from app.core.logging_config import setup_logging
 from app.api.v1 import user_auth
 from app.api.v1 import emergency_team_auth
 from cache.redis_client import close_redis_connection
+from app.providers.map_provider import MapProvider
+from app.providers.traffic import TrafficProvider
+from app.api.v1.live_map import set_live_map_providers
 
 # Setup logging FIRST
 setup_logging()
 logger = logging.getLogger(__name__)
 
+map_provider = MapProvider(api_key=settings.MAPBOX_API_KEY)
+traffic_provider = TrafficProvider(api_key=settings.TRAFFIC_API_KEY)
+
+set_live_map_providers(map_provider, traffic_provider)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
