@@ -4,7 +4,7 @@ from typing import Optional
 
 from app.db.session import get_sync_db  # Use sync DB for disaster reporting
 from app.db.models import User
-from cache.redis_client import redis_client
+from cache.sync_redis_client import redis_client  # Use sync Redis for disaster reporting
 
 # Alias for compatibility
 def get_db():

@@ -25,7 +25,7 @@ from app.db.models.enums import EmergencyTeamRole, Department
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/emergency-team", tags=["Emergency Team Auth"])
+router = APIRouter(tags=["Emergency Team Auth"])
 
 
 @router.post(

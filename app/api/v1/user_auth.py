@@ -30,7 +30,7 @@ from app.schemas.common import ResponseBase
 import logging
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/auth", tags=["Authentication"])
+router = APIRouter(tags=["Authentication"])
 
 
 @router.post(

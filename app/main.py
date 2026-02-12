@@ -16,9 +16,7 @@ import logging
 
 from app.core.config import settings
 from app.core.logging_config import setup_logging
-from app.api.v1 import user_auth
-from app.api.v1 import emergency_team_auth
-from app.api.v1 import disasters  # Import disaster reporting
+from app.api.v1 import api_router
 from cache.redis_client import close_redis_connection
 
 # Setup logging FIRST
@@ -121,10 +119,8 @@ async def global_exception_handler(request: Request, exc: Exception):
     )
 
 
-# Include routers
-app.include_router(user_auth.router, prefix="/api/v1")
-app.include_router(emergency_team_auth.router, prefix="/api/v1")
-app.include_router(disasters.router, prefix="/api/v1")  # Disaster reporting
+# Include API router
+app.include_router(api_router, prefix="/api/v1")
 
 
 # Root endpoints
