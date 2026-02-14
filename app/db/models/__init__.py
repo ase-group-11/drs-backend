@@ -21,12 +21,14 @@ from app.db.models.enums import (
 from app.db.models.user import User
 from app.db.models.emergency_team import EmergencyTeam
 from app.db.models.disaster import Disaster, DisasterPhoto
+from app.db.models.disaster_report import DisasterReport
 
 __all__ = [
     "Base",
     "User",
     "EmergencyTeam",
     "Disaster",
+    "DisasterReport"
     "DisasterPhoto",
     "UserStatus",
     "UserRole",

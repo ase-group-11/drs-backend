@@ -8,10 +8,13 @@ They can submit emergency requests and track their status.
 
 from sqlalchemy import String, Enum as SQLEnum, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from typing import Optional, List
+from typing import Optional, List, TYPE_CHECKING
 from app.db.models.base import Base
 from app.db.models.enums import UserStatus, UserRole
 
+if TYPE_CHECKING:
+    from app.db.models.disaster_report import DisasterReport
+    from app.db.models.disaster import Disaster
 
 class User(Base):
     """
@@ -67,6 +70,13 @@ class User(Base):
         index=True
     )
 
+    disaster_reports: Mapped[List["DisasterReport"]] = relationship(
+        "DisasterReport",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        lazy="select"
+    )
+
     reported_disasters: Mapped[List["Disaster"]] = relationship(
         "Disaster",
         back_populates = "reported_by",
@@ -114,4 +124,4 @@ class User(Base):
     @property
     def is_pending(self) -> bool:
         """Check if user account is pending verification."""
-        return self.status == UserStatus.PENDING
+        return self.status == UserStatus.PENDING# File: app/models/user.py

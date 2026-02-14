@@ -22,6 +22,11 @@ class Settings(BaseSettings):
     
     Uses Pydantic Settings for type-safe configuration with validation.
     """
+    """
+    Application settings loaded from environment variables.
+    
+    Uses Pydantic Settings for type-safe configuration with validation.
+    """
     
     # Application
     APP_NAME: str = Field(default="ASE Emergency Services", description="Application name")
@@ -161,6 +166,31 @@ class Settings(BaseSettings):
         if len(v) < 32:
             raise ValueError("JWT_SECRET_KEY must be at least 32 characters long")
         return v
+    
+    def model_post_init(self, __context) -> None:
+        """Post-initialization hook to set DEBUG based on ENVIRONMENT."""
+        # If DEBUG wasn't explicitly set via environment and is default True
+        # but ENVIRONMENT is not development, update DEBUG
+        if self.ENVIRONMENT != "development":
+            object.__setattr__(self, 'DEBUG', False)
+
+
+@lru_cache()
+def get_settings() -> Settings:
+    """
+    Get cached settings instance (singleton pattern).
+    
+    Using lru_cache ensures settings are loaded only once.
+    This improves performance and ensures consistency.
+    
+    Returns:
+        Settings: Application settings instance
+    """
+    return Settings()
+
+
+# Global settings instance for easy import
+settings = get_settings()
     
     def model_post_init(self, __context) -> None:
         """Post-initialization hook to set DEBUG based on ENVIRONMENT."""
