@@ -233,3 +233,4 @@ class MapProvider:
         """
         all_ids = set(self.STYLES.values())
         return style in all_ids
+ 

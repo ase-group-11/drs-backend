@@ -18,6 +18,8 @@ from app.core.config import settings
 from app.core.logging_config import setup_logging
 from app.api.v1 import user_auth
 from app.api.v1 import emergency_team_auth
+from app.api.v1 import live_map
+
 from cache.redis_client import close_redis_connection
 from app.providers.map_provider import MapProvider
 from app.providers.traffic import TrafficProvider
@@ -27,10 +29,7 @@ from app.api.v1.live_map import set_live_map_providers
 setup_logging()
 logger = logging.getLogger(__name__)
 
-map_provider = MapProvider(api_key=settings.MAPBOX_API_KEY)
-traffic_provider = TrafficProvider(api_key=settings.TRAFFIC_API_KEY)
 
-set_live_map_providers(map_provider, traffic_provider)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -47,6 +46,11 @@ async def lifespan(app: FastAPI):
     logger.info(f"🔑 Access Token: {settings.ACCESS_TOKEN_EXPIRE_MINUTES} minutes ({settings.ACCESS_TOKEN_EXPIRE_MINUTES // 525600} year)")
     logger.info(f"🔄 Refresh Token: {settings.REFRESH_TOKEN_EXPIRE_DAYS} days ({settings.REFRESH_TOKEN_EXPIRE_DAYS // 365} years)")
     logger.info("=" * 70)
+
+    map_provider = MapProvider(api_key=settings.MAPBOX_API_KEY)
+    traffic_provider = TrafficProvider(api_key=settings.TRAFFIC_API_KEY)
+    set_live_map_providers(map_provider, traffic_provider)
+    logger.info("🗺️  Map and traffic providers initialized")
     
     yield
     
@@ -54,6 +58,7 @@ async def lifespan(app: FastAPI):
     logger.info("=" * 70)
     logger.info("Shutting down...")
     await close_redis_connection()
+    await traffic_provider.close()
     logger.info("Cleanup complete")
     logger.info("=" * 70)
 
@@ -129,6 +134,9 @@ async def global_exception_handler(request: Request, exc: Exception):
 # Include routers
 app.include_router(user_auth.router, prefix="/api/v1")
 app.include_router(emergency_team_auth.router, prefix="/api/v1")
+app.include_router(live_map.router, prefix="/api/v1")
+
+
 
 
 # Root endpoints

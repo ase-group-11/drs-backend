@@ -130,7 +130,7 @@ class TrafficProvider:
         if self.session and not self.session.closed:
             await self.session.close()
 
-    async def get_traffic(self, bounds: str) -> Dict[str, Any]:
+    async def get_traffic(self, bounds: str, style: Optional[str] = None) -> Dict[str, Any]:
         """
 
         Get real-time traffic flow data for the specified bounds.
@@ -175,6 +175,8 @@ class TrafficProvider:
 
         logger.info(f"Fetching TomTom traffic data for bounds: {bounds}")
 
+        active_style = style or self.style
+
         try: 
             # Parse bounds
 
@@ -216,15 +218,16 @@ class TrafficProvider:
             raise
         except Exception as e:
             logger.error(f"Unexpected error fetching traffic: {e}")
-            
-            
+            raise
+                       
     async def _fetch_flow_data_for_bounds(
             
         self,
         south: float,
         west: float, 
         north: float, 
-        east: float
+        east: float,
+        # style: str = "relative"
             
     ) -> List[Dict[str, Any]]:
         """
@@ -283,7 +286,8 @@ class TrafficProvider:
         session: aiohttp.ClientSession, 
         lat: float, 
         lon: float,
-        zoom: int = 10
+        zoom: int = 10, 
+        style: str = "relative"
     ) -> List[Dict[str, Any]]:
         
         """
@@ -294,11 +298,11 @@ class TrafficProvider:
 
         """
 
-        url = f"{self.FLOW_BASE_URL}/{self.style}/{zoom}/json"
+        url = f"{self.FLOW_BASE_URL}/{style}/{zoom}/json"
 
         params = {
             "key": self.api_key,
-            "point" : f"{lat}, {lon}",
+            "point" : f"{lat},{lon}",
             "unit" : "KMPH",
             "thickness" : 10,
         }
@@ -346,7 +350,7 @@ class TrafficProvider:
         if free_flow_speed > 0:
             speed_ratio = current_speed / free_flow_speed
             if speed_ratio >= 0.8:
-                congestion = "free"
+                congestion = "light"
             elif speed_ratio >= 0.5:
                 congestion = "moderate"
             elif speed_ratio >= 0.3:
@@ -490,5 +494,5 @@ class TrafficProvider:
         except Exception as e:
             logger.error(f"TomTom API key validation error: {e}")
             return False
-        
-        
+
+       

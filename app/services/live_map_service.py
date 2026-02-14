@@ -130,25 +130,32 @@ class LiveMapService:
         cache_key = f"live_map:disasters:{bounds}"
         
         # Try cache first
-        cached_data = await self.cache.get(cache_key)
-        if cached_data is not None:
-            logger.info(f"Cache HIT for disasters: {cache_key}")
-            return json.loads(cached_data)
-        
+        try:
+            cached_data = await self.cache.get(cache_key)
+            if cached_data is not None:
+                logger.info(f"Cache HIT for disasters: {cache_key}")
+                return json.loads(cached_data)
+        except Exception as e:
+            logger.warning(f"Cache read failed for disasters : {e}")
+
         # Cache miss - fetch from database
         logger.info(f"Cache MISS for disasters: {cache_key}, querying database")
         disasters = await self.disaster_repo.list_active_disasters(bounds=bounds)
         
-        # Cache the result
-        await self.cache.setex(
-            cache_key,
-            self.DISASTER_CACHE_TTL,
-            json.dumps(disasters)
-        )
-        
+        try:
+            # Cache the result
+            await self.cache.setex(
+                cache_key,
+                self.DISASTER_CACHE_TTL,
+                json.dumps(disasters)
+            )
+            logger.info(f"Successfully cached disasters data")
+        except Exception as e:
+            logger.warning(f"Failed to cache disasters: {e}")
+            
         return disasters
     
-    async def get_traffic(self, bounds: str) -> Optional[Dict[str, Any]]:
+    async def get_traffic(self, bounds: str, style: str = "relative") -> Optional[Dict[str, Any]]:
         """
         Get real-time traffic data with resilient fallback to cache.
         
@@ -169,19 +176,34 @@ class LiveMapService:
                 - flow: List of traffic flow segments
             Returns None if provider is down and no cached data exists.
         """
-        cache_key = f"live_map:traffic:{bounds}"
+        cache_key = f"live_map:traffic:{bounds}:{style}"
         
         try:
             # Try to get live traffic data
             logger.info(f"Fetching live traffic for bounds: {bounds}")
+            cached_data = await self.cache.get(cache_key)
+            if cached_data is not None:
+                logger.info(f"Cache HIT for traffic: {cache_key}")
+                return json.loads(cached_data)
+        except Exception as e:
+            logger.warning(f"cache read failed: {e}")
+        try:
             traffic_data = await self.traffic_provider.get_traffic(bounds=bounds)
+
+            if traffic_data:
+                traffic_data["style"] = style
+
+                try:
             
-            # Success - cache the live data
-            await self.cache.setex(
-                cache_key,
-                self.TRAFFIC_CACHE_TTL,
-                json.dumps(traffic_data)
-            )
+                # Success - cache the live data
+                    await self.cache.setex(
+                        cache_key,
+                        self.TRAFFIC_CACHE_TTL,
+                        json.dumps(traffic_data)
+                    )
+                    logger.info(f"Successfully cached traffic data")
+                except Exception as cache_error:
+                    logger.warning(f"Failed to cache traffic data: {cache_error}")
             
             logger.info(f"Successfully fetched and cached live traffic data")
             return traffic_data
@@ -192,11 +214,13 @@ class LiveMapService:
                 f"Traffic provider failed ({type(e).__name__}: {e}), "
                 f"attempting to use cached data"
             )
-            
-            cached_data = await self.cache.get(cache_key)
-            if cached_data is not None:
-                logger.info(f"Using cached traffic data (stale-while-revalidate)")
-                return json.loads(cached_data)
+            try:
+                cached_data = await self.cache.get(cache_key)
+                if cached_data is not None:
+                    logger.info(f"Using cached traffic data (stale-while-revalidate)")
+                    return json.loads(cached_data)
+            except Exception as cache_error:
+                logger.warning(f"Cache fallback failed: {cache_error}")
             
             # No cached data available
             logger.error(f"No cached traffic data available, returning None")

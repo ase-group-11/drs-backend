@@ -34,7 +34,7 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-traffic_provider: Optional[traffic] = None
+traffic_provider: Optional[TrafficProvider] = None
 
 router = APIRouter(prefix="/live-map", tags=["Live Map"])
 

@@ -136,7 +136,7 @@ class Disaster(Base):
     )
     
     # Additional metadata (flexible JSON field)
-    metadata: Mapped[Optional[dict]] = mapped_column(
+    disaster_metadata: Mapped[Optional[dict]] = mapped_column(
         JSON,
         nullable=True,
         comment="Additional metadata (casualties, damage estimates, etc.)"
