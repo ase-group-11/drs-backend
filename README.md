@@ -94,14 +94,6 @@ If you have run out of energy or time for your project, put a note at the top of
 
 
 
-
-# Run PostgreSQL container
-udocker run -p 5432:5432 \
-  -e POSTGRES_USER=drs_user \
-  -e POSTGRES_PASSWORD=drs_password \
-  -e POSTGRES_DB=disaster_response_db \
-  postgres-drs
-
 # Run Redis container
 udocker run -p 6379:6379 redis-drs
 
