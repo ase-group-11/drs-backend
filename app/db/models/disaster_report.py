@@ -15,7 +15,7 @@ from sqlalchemy import String, Integer, Float, Boolean, Text, JSON, ForeignKey, 
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.dialects.postgresql import UUID
 from app.db.models.base import Base
-from app.db.models.enums import DisasterType, Severity, ReportStatus, Department
+from app.db.models.enums import DisasterType, Department, DisasterReportStatus, DisasterStatus, DisasterSeverity
 
 if TYPE_CHECKING:
     from app.db.models.user import User
@@ -65,6 +65,12 @@ class DisasterReport(Base):
         nullable=False,
         index=True
     )
+
+    severity: Mapped[str] = mapped_column(
+        SQLEnum(DisasterSeverity, name = "disaster_severity"), 
+        nullable=False,
+
+    )
     
     # Location information
     location_address: Mapped[str] = mapped_column(
@@ -89,11 +95,6 @@ class DisasterReport(Base):
         index=True
     )
     
-    severity: Mapped[Severity] = mapped_column(
-        SQLEnum(Severity, name="severity"),
-        nullable=False,
-        index=True
-    )
     
     description: Mapped[str] = mapped_column(
         Text,
@@ -140,9 +141,9 @@ class DisasterReport(Base):
     )
     
     # Status and assignment
-    status: Mapped[ReportStatus] = mapped_column(
-        SQLEnum(ReportStatus, name="report_status"),
-        default=ReportStatus.SUBMITTED,
+    status: Mapped[DisasterReportStatus] = mapped_column(
+        SQLEnum(DisasterReportStatus, name="report_status"),
+        default=DisasterReportStatus.PENDING,
         nullable=False,
         index=True
     )
@@ -191,7 +192,7 @@ class DisasterReport(Base):
     
     # Composite indexes for common queries
     __table_args__ = (
-        Index('idx_report_status_severity', 'status', 'severity'),
+        # Index('idx_report_status_severity', 'status', 'severity'),
         Index('idx_report_disaster_status', 'disaster_type', 'status'),
         Index('idx_report_user_status', 'user_id', 'status'),
         Index('idx_report_assigned', 'assigned_to_id', 'status'),
@@ -202,14 +203,14 @@ class DisasterReport(Base):
     
     def __repr__(self) -> str:
         return (
-            f"<DisasterReport(id={self.id}, type={self.disaster_type}, "
-            f"severity={self.severity}, status={self.status})>"
+            f"<DisasterReport(id={self.id}, type={self.disaster_type} "
+            # f"severity={self.severity}, status={self.status})>"
         )
     
     # Status transition methods
     def mark_under_review(self) -> None:
         """Mark report as under review by emergency team."""
-        self.status = ReportStatus.UNDER_REVIEW
+        self.status = DisasterReportStatus.PENDING
     
     def assign_to(
         self, 
@@ -225,11 +226,11 @@ class DisasterReport(Base):
         """
         self.assigned_to_id = team_member_id
         self.assigned_department = department
-        self.status = ReportStatus.ASSIGNED
+        self.status = DisasterReportStatus.VERIFIED
     
     def start_response(self) -> None:
         """Mark when emergency team starts responding."""
-        self.status = ReportStatus.IN_PROGRESS
+        self.status = DisasterReportStatus.PENDING
         if not self.response_time:
             self.response_time = datetime.utcnow()
     
@@ -240,7 +241,7 @@ class DisasterReport(Base):
         Args:
             resolution_notes: Optional notes about the resolution
         """
-        self.status = ReportStatus.RESOLVED
+        self.status = DisasterStatus.RESOLVED
         self.resolved_time = datetime.utcnow()
         if resolution_notes:
             self.resolution_notes = resolution_notes
@@ -252,7 +253,7 @@ class DisasterReport(Base):
         Args:
             reason: Optional reason for cancellation
         """
-        self.status = ReportStatus.CANCELLED
+        self.status = DisasterReportStatus.REJECTED
         if reason:
             self.resolution_notes = f"Cancelled: {reason}"
     
@@ -263,15 +264,15 @@ class DisasterReport(Base):
         Args:
             reason: Optional reason for rejection
         """
-        self.status = ReportStatus.REJECTED
+        self.status = DisasterReportStatus.REJECTED
         if reason:
             self.resolution_notes = f"Rejected: {reason}"
     
     # Property helpers
-    @property
-    def is_critical(self) -> bool:
-        """Check if report is critical severity."""
-        return self.severity == Severity.CRITICAL
+    # @property
+    # def is_critical(self) -> bool:
+    #     """Check if report is critical severity."""
+    #     return self.severity == D.CRITICAL
     
     @property
     def is_high_priority(self) -> bool:
@@ -280,10 +281,10 @@ class DisasterReport(Base):
         
         High priority = Critical severity OR (High severity + critical flags)
         """
-        if self.severity == Severity.CRITICAL:
+        if self.severity == DisasterSeverity.CRITICAL:
             return True
         
-        if self.severity == Severity.HIGH:
+        if self.severity == DisasterSeverity.HIGH:
             critical_flags = (
                 self.multiple_casualties or
                 self.structural_damage or
@@ -297,10 +298,8 @@ class DisasterReport(Base):
     def is_active(self) -> bool:
         """Check if report is still active (not resolved/cancelled/rejected)."""
         return self.status in (
-            ReportStatus.SUBMITTED,
-            ReportStatus.UNDER_REVIEW,
-            ReportStatus.ASSIGNED,
-            ReportStatus.IN_PROGRESS
+            DisasterStatus.ACTIVE,
+            DisasterStatus.MONITORING,
         )
     
     @property
@@ -365,7 +364,7 @@ class DisasterReport(Base):
             "status": self.status.value,
             "location": self.location_address,
             "people_affected": self.people_affected,
-            "is_critical": self.is_critical,
+            # "is_critical": self.is_critical,
             "is_high_priority": self.is_high_priority,
             "has_media": self.has_media,
             "critical_flags_count": self.critical_flags_count,

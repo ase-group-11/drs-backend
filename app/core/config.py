@@ -192,12 +192,12 @@ def get_settings() -> Settings:
 # Global settings instance for easy import
 settings = get_settings()
     
-    def model_post_init(self, __context) -> None:
-        """Post-initialization hook to set DEBUG based on ENVIRONMENT."""
-        # If DEBUG wasn't explicitly set via environment and is default True
-        # but ENVIRONMENT is not development, update DEBUG
-        if self.ENVIRONMENT != "development":
-            object.__setattr__(self, 'DEBUG', False)
+def model_post_init(self, __context) -> None:
+    """Post-initialization hook to set DEBUG based on ENVIRONMENT."""
+    # If DEBUG wasn't explicitly set via environment and is default True
+    # but ENVIRONMENT is not development, update DEBUG
+    if self.ENVIRONMENT != "development":
+        object.__setattr__(self, 'DEBUG', False)
 
 
 @lru_cache()
