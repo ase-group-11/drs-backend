@@ -14,6 +14,7 @@ from app.db.models.enums import UserStatus, EmergencyTeamRole, Department
 
 if TYPE_CHECKING:
     from app.db.models.disaster_report import DisasterReport
+    from app.db.models.disaster import Disaster
 
 
 class EmergencyTeam(Base):
@@ -92,6 +93,13 @@ class EmergencyTeam(Base):
         nullable=False,
         index=True
     )
+
+    verified_disasters: Mapped[List["Disaster"]] = relationship(
+        "Disaster",
+        back_populates="verified_by",
+        foreign_keys="Disaster.verified_by_team_id"
+    )
+    
     
     # Relationships
     assigned_reports: Mapped[List["DisasterReport"]] = relationship(
@@ -159,4 +167,4 @@ class EmergencyTeam(Base):
     def total_resolved_count(self) -> int:
         """Get count of total reports resolved by this team member."""
         from app.db.models.enums import ReportStatus
-        return sum(1 for r in self.assigned_reports if r.status == ReportStatus.RESOLVED)
+        return sum(1 for r in self.assigned_reports if r.status == ReportStatus.RESOLVED)# File: app/models/emergency_team.py

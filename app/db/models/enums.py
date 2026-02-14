@@ -1,17 +1,16 @@
 # File: app/models/enums.py
 """
+
 Enumerations for the ASE Emergency Services system.
 
 Defines:
 - User account status
-- User roles
 - Emergency team roles
 - Emergency service departments
 - OTP verification status
 - Emergency request status
-- Disaster types
-- Severity levels
-- Report status
+- Disaster types, severity, and status
+
 """
 
 import enum
@@ -28,11 +27,11 @@ class UserStatus(str, enum.Enum):
     - SUSPENDED: Account suspended (security/policy violation)
     - DELETED: Soft deleted (can be recovered)
     """
-    PENDING = "PENDING"
-    ACTIVE = "ACTIVE"
-    INACTIVE = "INACTIVE"
-    SUSPENDED = "SUSPENDED"
-    DELETED = "DELETED"
+    PENDING = "pending"
+    ACTIVE = "active"
+    INACTIVE = "inactive"
+    SUSPENDED = "suspended"
+    DELETED = "deleted"
 
 
 class UserRole(str, enum.Enum):
@@ -40,13 +39,12 @@ class UserRole(str, enum.Enum):
     User roles in the system.
     
     Roles:
-    - RESIDENT: Standard user with access to emergency services
+    - USER: Standard user with access to emergency services
     - PRIVILEGED: System administrator/ERT with elevated privileges
-    - ADMIN: IT administrator with full system access
     """
-    RESIDENT = "RESIDENT"
-    PRIVILEGED = "PRIVILEGED"
-    ADMIN = "ADMIN"
+    RESIDENT = "user"
+    PRIVILEGED = "privileged"
+    ADMIN = "IT"
 
 
 class EmergencyTeamRole(str, enum.Enum):
@@ -58,9 +56,9 @@ class EmergencyTeamRole(str, enum.Enum):
     - MANAGER: Can manage team members and view all data
     - STAFF: Standard emergency responder access
     """
-    ADMIN = "ADMIN"
-    MANAGER = "MANAGER"
-    STAFF = "STAFF"
+    ADMIN = "admin"
+    MANAGER = "manager"
+    STAFF = "staff"
 
 
 class Department(str, enum.Enum):
@@ -73,10 +71,10 @@ class Department(str, enum.Enum):
     - FIRE: Fire department
     - IT: Technical support and system administration
     """
-    MEDICAL = "MEDICAL"
-    POLICE = "POLICE"
-    FIRE = "FIRE"
-    IT = "IT"
+    MEDICAL = "medical"
+    POLICE = "police"
+    FIRE = "fire"
+    IT = "it"
 
 
 class OTPStatus(str, enum.Enum):
@@ -90,11 +88,11 @@ class OTPStatus(str, enum.Enum):
     - FAILED: OTP verification failed (wrong code)
     - REVOKED: OTP manually revoked/invalidated
     """
-    PENDING = "PENDING"
-    VERIFIED = "VERIFIED"
-    EXPIRED = "EXPIRED"
-    FAILED = "FAILED"
-    REVOKED = "REVOKED"
+    PENDING = "pending"
+    VERIFIED = "verified"
+    EXPIRED = "expired"
+    FAILED = "failed"
+    REVOKED = "revoked"
 
 
 class EmergencyRequestStatus(str, enum.Enum):
@@ -109,74 +107,91 @@ class EmergencyRequestStatus(str, enum.Enum):
     - CANCELLED: Request cancelled by user
     - REJECTED: Request rejected (false alarm, duplicate, etc.)
     """
-    SUBMITTED = "SUBMITTED"
-    ASSIGNED = "ASSIGNED"
-    IN_PROGRESS = "IN_PROGRESS"
-    RESOLVED = "RESOLVED"
-    CANCELLED = "CANCELLED"
-    REJECTED = "REJECTED"
+    SUBMITTED = "submitted"
+    ASSIGNED = "assigned"
+    IN_PROGRESS = "in_progress"
+    RESOLVED = "resolved"
+    CANCELLED = "cancelled"
+    REJECTED = "rejected"
 
-
-# ============================================================================
-# NEW ENUMS FOR DISASTER REPORTS
-# ============================================================================
 
 class DisasterType(str, enum.Enum):
     """
-    Types of disasters/emergencies that can be reported.
+    Types of disasters tracked in the live map system.
+    
+    Types:
+    - FLOOD: Flooding events
+    - FIRE: Fire emergencies
+    - EARTHQUAKE: Seismic events
+    - HURRICANE: Hurricane/cyclone
+    - TORNADO: Tornado events
+    - TSUNAMI: Tsunami warnings/events
+    - DROUGHT: Drought conditions
+    - HEATWAVE: Extreme heat
+    - COLDWAVE: Extreme cold
+    - STORM: Storm events
+    - OTHER: Other disaster types
     """
-    FIRE = "FIRE"
-    FLOOD = "FLOOD"
-    EARTHQUAKE = "EARTHQUAKE"
-    MEDICAL_EMERGENCY = "MEDICAL_EMERGENCY"
-    ACCIDENT = "ACCIDENT"
-    CRIME = "CRIME"
-    BUILDING_COLLAPSE = "BUILDING_COLLAPSE"
-    GAS_LEAK = "GAS_LEAK"
-    POWER_OUTAGE = "POWER_OUTAGE"
-    WATER_CONTAMINATION = "WATER_CONTAMINATION"
-    LANDSLIDE = "LANDSLIDE"
-    STORM = "STORM"
-    HAZMAT = "HAZMAT"  # Hazardous materials
-    EXPLOSION = "EXPLOSION"
-    RIOT = "RIOT"
-    TERRORIST_ATTACK = "TERRORIST_ATTACK"
-    OTHER = "OTHER"
+    FLOOD = "flood"
+    FIRE = "fire"
+    EARTHQUAKE = "earthquake"
+    HURRICANE = "hurricane"
+    TORNADO = "tornado"
+    TSUNAMI = "tsunami"
+    DROUGHT = "drought"
+    HEATWAVE = "heatwave"
+    COLDWAVE = "coldwave"
+    STORM = "storm"
+    OTHER = "other"
 
 
-class Severity(str, enum.Enum):
+class DisasterSeverity(str, enum.Enum):
     """
-    Severity levels for emergency reports.
+    Severity levels for disasters.
     
     Levels:
-    - LOW: Minor incidents, no immediate danger
-    - MEDIUM: Significant incidents requiring attention
-    - HIGH: Serious incidents requiring urgent response
-    - CRITICAL: Life-threatening emergencies requiring immediate action
+    - LOW: Minor impact, limited response needed
+    - MEDIUM: Moderate impact, standard response
+    - HIGH: Significant impact, elevated response
+    - CRITICAL: Severe impact, maximum response
     """
-    LOW = "LOW"
-    MEDIUM = "MEDIUM"
-    HIGH = "HIGH"
-    CRITICAL = "CRITICAL"
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    CRITICAL = "critical"
 
 
-class ReportStatus(str, enum.Enum):
+class DisasterStatus(str, enum.Enum):
     """
-    Status of disaster reports throughout their lifecycle.
+    Status of disaster tracking and response.
     
     States:
-    - SUBMITTED: Report created by user, awaiting review
-    - UNDER_REVIEW: Being reviewed by emergency team
-    - ASSIGNED: Assigned to emergency team/department
-    - IN_PROGRESS: Emergency team responding to the report
-    - RESOLVED: Report has been addressed and closed
-    - CANCELLED: Report cancelled by user or marked invalid
-    - REJECTED: Report rejected (false alarm, duplicate, etc.)
+    - ACTIVE: Disaster is currently ongoing
+    - MONITORING: Situation being monitored
+    - RESOLVED: Disaster resolved/contained
+    - ARCHIVED: Historical record (no longer relevant)
     """
-    SUBMITTED = "SUBMITTED"
-    UNDER_REVIEW = "UNDER_REVIEW"
-    ASSIGNED = "ASSIGNED"
-    IN_PROGRESS = "IN_PROGRESS"
-    RESOLVED = "RESOLVED"
-    CANCELLED = "CANCELLED"
-    REJECTED = "REJECTED"
+    ACTIVE = "active"
+    MONITORING = "monitoring"
+    RESOLVED = "resolved"
+    ARCHIVED = "archived"
+
+
+class DisasterReportStatus(str, enum.Enum):
+    """
+    Validation status for disaster reports (especially user-reported).
+    
+    Flow: PENDING → VERIFIED/REJECTED/DUPLICATE
+    
+    States:
+    - PENDING: Report submitted, awaiting verification
+    - VERIFIED: Report verified by emergency team, disaster is legitimate
+    - REJECTED: Report rejected (false alarm, insufficient evidence)
+    - DUPLICATE: Duplicate of existing disaster report
+    """
+    PENDING = "pending"
+    VERIFIED = "verified"
+    REJECTED = "rejected"
+    DUPLICATE = "duplicate"
+
+ 

@@ -14,18 +14,22 @@ from app.db.models.enums import (
     OTPStatus,
     EmergencyRequestStatus,
     DisasterType,
-    Severity,
-    ReportStatus,
+    DisasterSeverity,
+    DisasterStatus,
+    DisasterReportStatus,
 )
 from app.db.models.user import User
 from app.db.models.emergency_team import EmergencyTeam
+from app.db.models.disaster import Disaster, DisasterPhoto
 from app.db.models.disaster_report import DisasterReport
 
 __all__ = [
     "Base",
     "User",
     "EmergencyTeam",
-    "DisasterReport",
+    "Disaster",
+    "DisasterReport"
+    "DisasterPhoto",
     "UserStatus",
     "UserRole",
     "EmergencyTeamRole",
@@ -33,6 +37,7 @@ __all__ = [
     "OTPStatus",
     "EmergencyRequestStatus",
     "DisasterType",
-    "Severity",
-    "ReportStatus",
+    "DisasterSeverity",
+    "DisasterStatus",
+    "DisasterReportStatus",
 ]

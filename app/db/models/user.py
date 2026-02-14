@@ -14,10 +14,11 @@ from app.db.models.enums import UserStatus, UserRole
 
 if TYPE_CHECKING:
     from app.db.models.disaster_report import DisasterReport
-
+    from app.db.models.disaster import Disaster
 
 class User(Base):
     """
+
     Regular user model (OTP-based authentication).
     
     Users authenticate via OTP sent to their phone number.
@@ -28,6 +29,7 @@ class User(Base):
     - full_name: User's full name
     - email: Optional email address
     - status: Account status (pending, active, inactive, etc.)
+
     """
     
     __tablename__ = "users"
@@ -67,13 +69,18 @@ class User(Base):
         nullable=False,
         index=True
     )
-    
-    # Relationships
+
     disaster_reports: Mapped[List["DisasterReport"]] = relationship(
         "DisasterReport",
         back_populates="user",
         cascade="all, delete-orphan",
         lazy="select"
+    )
+
+    reported_disasters: Mapped[List["Disaster"]] = relationship(
+        "Disaster",
+        back_populates = "reported_by",
+        foreign_keys = "Disaster.reported_by_user_id"
     )
     
     # Indexes for common queries
@@ -117,19 +124,4 @@ class User(Base):
     @property
     def is_pending(self) -> bool:
         """Check if user account is pending verification."""
-        return self.status == UserStatus.PENDING
-    
-    @property
-    def total_reports(self) -> int:
-        """Get total number of disaster reports submitted by this user."""
-        return len(self.disaster_reports)
-    
-    @property
-    def active_reports_count(self) -> int:
-        """Get count of active (non-resolved) disaster reports."""
-        from app.db.models.enums import ReportStatus
-        return sum(1 for r in self.disaster_reports if r.status not in [
-            ReportStatus.RESOLVED,
-            ReportStatus.CANCELLED,
-            ReportStatus.REJECTED
-        ])
+        return self.status == UserStatus.PENDING# File: app/models/user.py

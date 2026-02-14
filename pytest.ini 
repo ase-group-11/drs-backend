@@ -1,0 +1,47 @@
+# File: pytest.ini
+# Pytest configuration for ASE Emergency Services Backend
+
+[pytest]
+# Test discovery patterns
+python_files = test_*.py
+python_classes = Test*
+python_functions = test_*
+
+# Directories to search for tests
+testpaths = tests
+
+# Minimum Python version
+minversion = 3.11
+
+# Add project root to Python path
+pythonpath = .
+
+# Async support
+asyncio_mode = auto
+
+# Output options
+addopts =
+    # Verbose output
+    -v
+    # Show extra test summary info
+    -ra
+    # Show local variables in tracebacks
+    --showlocals
+    # Strict markers
+    --strict-markers
+    # Coverage options (optional, can be enabled later)
+    # --cov=app
+    # --cov-report=html
+    # --cov-report=term-missing
+
+# Markers for categorizing tests
+markers =
+    unit: Unit tests (fast, isolated)
+    integration: Integration tests (require database/redis)
+    slow: Slow running tests
+    auth: Authentication related tests
+    otp: OTP related tests
+
+# Ignore deprecation warnings from third-party libraries
+filterwarnings =
+    ignore::DeprecationWarning
