@@ -567,6 +567,13 @@ class DisasterPhoto(Base):
         index=True,
         comment="Report this photo belongs to"
     )
+
+    reference_id: Mapped[str] = mapped_column(
+        String(50), 
+        nullable=False, 
+        index=True,
+        comment="Grouping reference; can be any uuid if thats a preference."
+    )
     
     # === CLOUD STORAGE ===
     image_url: Mapped[str] = mapped_column(

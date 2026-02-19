@@ -59,6 +59,7 @@ class LiveMapService:
     def __init__(
         self,
         disaster_repo,
+        disaster_report_repo,
         cache,
         map_provider,
         traffic_provider
@@ -73,6 +74,7 @@ class LiveMapService:
             traffic_provider: Provider for real-time traffic data
         """
         self.disaster_repo = disaster_repo
+        self.disaster_report_repo = disaster_report_repo
         self.cache = cache
         self.map_provider = map_provider
         self.traffic_provider = traffic_provider

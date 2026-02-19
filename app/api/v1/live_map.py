@@ -23,6 +23,7 @@ from app.db.session import get_db
 from app.services.live_map_service import LiveMapService
 from app.providers.map_provider import MapProvider
 from app.providers.traffic import TrafficProvider
+from app.repositories.disaster_report_repository import DisasterReportRepository
 from app.repositories.disaster_repository import DisasterRepository
 from cache.redis_client import get_redis_client
 from app.core.config import settings
@@ -93,10 +94,12 @@ async def get_live_map_service_dependency(
     - Redis client (caching)
     """
     disaster_repo = DisasterRepository(db_session=db)
+    disaster_report_repo = DisasterReportRepository(db_session=db)
     redis_client = await get_redis_client()
 
     service = LiveMapService(
         disaster_repo=disaster_repo,
+        disaster_report_repo = disaster_report_repo,
         cache=redis_client,
         map_provider=_map_provider,
         traffic_provider=_traffic_provider,
@@ -548,6 +551,7 @@ async def get_live_map_data(
     ),
 )
 async def get_pending_disasters(
+    limit: int = Query(50, ge=1, le=100, description = "Maximum number of reports"),
     service: LiveMapService = Depends(get_live_map_service_dependency),
 ):
     """
@@ -557,7 +561,7 @@ async def get_pending_disasters(
     These do NOT appear on the public live map until verified.
     """
     try:
-        pending = await service.disaster_repo.list_pending_disasters()
+        pending = await service.disaster_report_repo.list_pending_disasters(limit = limit)
 
         return PendingDisastersResponse(
             pending_disasters=pending,

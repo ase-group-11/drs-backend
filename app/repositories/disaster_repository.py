@@ -1,46 +1,40 @@
+
 # File: app/repositories/disaster_repository.py
 """
-Disaster Repository - Database access layer for disaster data.
+Disaster Repository - Database access layer for VERIFIED disaster data.
 
-COMPLETE IMPLEMENTATION with:
-- PostGIS spatial queries for efficient geospatial filtering
-- Verification status filtering (security - only verified disasters on public map)
-- User-reported disaster support
-- Pending verification queries for emergency teams
-- Spatial proximity searches
-- Database session management
+IMPORTANT: This repository queries the 'disasters' table which contains
+ONLY verified disasters (created by emergency team). 
 
-Updated to support:
-- Use Case 3: Disaster Reporting (user-submitted disasters)
-- Use Case 4: Live Map (real-time disaster visualization)
-
-Requires: PostgreSQL with PostGIS extension
+For unverified user reports, use DisasterReportRepository instead.
 """
 
 import logging
-
+import json
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
 from sqlalchemy import select, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
-from geoalchemy2 import Geometry
-from geoalchemy2.functions import ST_MakeEnvelope, ST_Within, ST_Distance, ST_AsGeoJSON, ST_Point, ST_DWithin
+from geoalchemy2.functions import (
+    ST_MakeEnvelope, ST_Within, ST_Distance, 
+    ST_AsGeoJSON, ST_Point, ST_DWithin, ST_X, ST_Y
+)
 
 from app.db.models.disaster import Disaster
-from app.db.models.enums import DisasterType, DisasterSeverity, DisasterStatus, DisasterReportStatus
+from app.db.models.enums import DisasterType, DisasterSeverity, DisasterStatus
 
 logger = logging.getLogger(__name__)
 
 
 class DisasterRepository:
     """
-    Repository for accessing disaster data with geospatial queries.
+    Repository for accessing VERIFIED disaster data.
+    
+    All disasters in this table have been verified by emergency teams.
+    For unverified user reports, use DisasterReportRepository.
     
     Provides methods to query disasters within bounding boxes, near points,
-    and with various filters (type, severity, status, verification, time range).
-    
-    CRITICAL SECURITY: By default, only returns VERIFIED disasters to prevent
-    false alarms and unconfirmed incidents from appearing on the public map.
+    and with various filters (type, severity, status, time range).
     """
     
     def __init__(self, db_session: AsyncSession):
@@ -57,41 +51,31 @@ class DisasterRepository:
         bounds: str,
         disaster_types: Optional[List[str]] = None,
         min_severity: Optional[str] = None,
-        max_age_hours: Optional[int] = None,
-        include_unverified: bool = False
+        max_age_hours: Optional[int] = None
     ) -> List[Dict[str, Any]]:
         """
-        Query active disasters within a bounding box.
+        Query active VERIFIED disasters within a bounding box.
+        
+        **NOTE:** All disasters in the 'disasters' table are already verified.
+        This table only contains disasters created/verified by emergency teams.
         
         Uses PostGIS spatial queries for efficient geospatial filtering.
-        Returns disasters as dictionaries (not ORM objects) for easy JSON serialization.
-        
-        **IMPORTANT SECURITY:** By default, only shows VERIFIED disasters on the public live map.
-        User-reported disasters that haven't been verified by emergency teams are hidden
-        to prevent false alarms, spam, and unconfirmed incidents.
+        Returns disasters as dictionaries for easy JSON serialization.
         
         Args:
             bounds: Bounding box string "south,west,north,east"
-            disaster_types: Optional filter by disaster types (flood, fire, earthquake, etc.)
-            min_severity: Optional minimum severity (low, medium, high, critical)
+            disaster_types: Optional filter by disaster types
+            min_severity: Optional minimum severity
             max_age_hours: Optional filter disasters newer than N hours
-            include_unverified: If True, include unverified user reports (admin/team only)
             
         Returns:
-            List of disaster dicts with all fields including geometry
+            List of verified disaster dicts with all fields including geometry
             
         Example:
-            # Public map - only verified disasters
             disasters = await repo.list_active_disasters(
                 bounds="53.30,-6.35,53.40,-6.20",
                 disaster_types=["flood", "fire"],
                 min_severity="medium"
-            )
-            
-            # Admin view - include unverified reports
-            all_reports = await repo.list_active_disasters(
-                bounds="53.30,-6.35,53.40,-6.20",
-                include_unverified=True
             )
         """
         logger.info(f"Querying active disasters for bounds: {bounds}")
@@ -100,10 +84,10 @@ class DisasterRepository:
             # Parse bounds
             south, west, north, east = map(float, bounds.split(','))
             
-            # Build the query with PostGIS spatial filter
+            # Build query with PostGIS spatial filter
             query = select(Disaster).where(
                 and_(
-                    Disaster.status == DisasterStatus.ACTIVE,
+                    Disaster.disaster_status == DisasterStatus.ACTIVE,
                     ST_Within(
                         Disaster.location,
                         ST_MakeEnvelope(west, south, east, north, 4326)
@@ -111,22 +95,12 @@ class DisasterRepository:
                 )
             )
             
-            # CRITICAL SECURITY: Only show verified disasters on public map
-            if not include_unverified:
-                query = query.where(
-                    Disaster.report_status == DisasterReportStatus.VERIFIED
-                )
-                logger.debug("Filtering to VERIFIED disasters only (public map)")
-            else:
-                logger.debug("Including unverified disasters (admin/team view)")
-            
             # Apply optional filters
             if disaster_types:
-                # Convert string types to enum types
                 type_enums = []
                 for dtype in disaster_types:
                     try:
-                        type_enums.append(DisasterType(dtype.lower()))
+                        type_enums.append(DisasterType(dtype.upper()))
                     except ValueError:
                         logger.warning(f"Invalid disaster type: {dtype}")
                 
@@ -143,10 +117,9 @@ class DisasterRepository:
                 }
                 
                 try:
-                    min_severity_enum = DisasterSeverity(min_severity.lower())
+                    min_severity_enum = DisasterSeverity(min_severity.upper())
                     min_value = severity_order.get(min_severity_enum, 0)
                     
-                    # Filter by severity level
                     severity_filters = []
                     for sev, value in severity_order.items():
                         if value >= min_value:
@@ -161,7 +134,7 @@ class DisasterRepository:
                 cutoff_time = datetime.utcnow() - timedelta(hours=max_age_hours)
                 query = query.where(Disaster.created_at >= cutoff_time)
             
-            # Order by severity (critical first) and then by creation time (newest first)
+            # Order by severity (critical first) then creation time (newest first)
             query = query.order_by(
                 Disaster.severity.desc(),
                 Disaster.created_at.desc()
@@ -177,10 +150,7 @@ class DisasterRepository:
                 disaster_dict = await self._disaster_to_dict(disaster)
                 disaster_list.append(disaster_dict)
             
-            logger.info(
-                f"Found {len(disaster_list)} active disasters in bounds "
-                f"(include_unverified={include_unverified})"
-            )
+            logger.info(f"Found {len(disaster_list)} active disasters in bounds")
             return disaster_list
             
         except Exception as e:
@@ -192,21 +162,18 @@ class DisasterRepository:
         lat: float,
         lon: float,
         radius_km: float = 10,
-        limit: int = 10,
-        include_unverified: bool = False
+        limit: int = 10
     ) -> List[Dict[str, Any]]:
         """
-        Find disasters near a specific point within a radius.
+        Find VERIFIED disasters near a specific point within a radius.
         
         Uses PostGIS distance calculation for efficient proximity search.
-        Only returns VERIFIED disasters by default for security.
         
         Args:
             lat: Latitude of the point
             lon: Longitude of the point
             radius_km: Search radius in kilometers
             limit: Maximum number of results
-            include_unverified: If True, include unverified reports (admin/team only)
             
         Returns:
             List of disasters ordered by distance (closest first)
@@ -215,28 +182,21 @@ class DisasterRepository:
         
         try:
             # Create point geometry (lon, lat order for PostGIS)
-            point = ST_Point(lon, lat, type_=Geometry)
+            point = ST_Point(lon, lat)
             
-            # Convert km to degrees (approximate)
-            # At equator: 1 degree ≈ 111 km
-            radius_degrees = radius_km / 111.0
+            # Convert km to meters for ST_DWithin
+            radius_meters = radius_km * 1000
             
             query = select(Disaster).where(
                 and_(
-                    Disaster.status == DisasterStatus.ACTIVE,
-                    ST_DWithin(Disaster.location, point, radius_degrees)
+                    Disaster.disaster_status == DisasterStatus.ACTIVE,
+                    ST_DWithin(Disaster.location, point, radius_meters, use_spheroid=True)
                 )
             )
             
-            # CRITICAL SECURITY: Only verified disasters by default
-            if not include_unverified:
-                query = query.where(
-                    Disaster.report_status == DisasterReportStatus.VERIFIED
-                )
-            
             # Order by distance (closest first)
             query = query.order_by(
-                ST_Distance(Disaster.location, point)
+                ST_Distance(Disaster.location, point, use_spheroid=True)
             ).limit(limit)
             
             result = await self.db.execute(query)
@@ -256,47 +216,6 @@ class DisasterRepository:
             
         except Exception as e:
             logger.error(f"Error querying disasters near point: {e}")
-            raise
-    
-    async def get_pending_verifications(
-        self,
-        limit: int = 50
-    ) -> List[Dict[str, Any]]:
-        """
-        Get user-reported disasters that are pending verification.
-        
-        Used by emergency team dashboard to review and verify/reject reports.
-        
-        **EMERGENCY TEAM ONLY** - Returns unverified user reports.
-        
-        Args:
-            limit: Maximum number of pending reports to return
-            
-        Returns:
-            List of disasters pending verification, ordered by creation time (oldest first)
-        """
-        logger.info(f"Querying pending disaster verifications (limit={limit})")
-        
-        try:
-            query = select(Disaster).where(
-                Disaster.report_status == DisasterReportStatus.PENDING
-            ).order_by(
-                Disaster.created_at.asc()  # Oldest first (FIFO)
-            ).limit(limit)
-            
-            result = await self.db.execute(query)
-            disasters = result.scalars().all()
-            
-            disaster_list = []
-            for disaster in disasters:
-                disaster_dict = await self._disaster_to_dict(disaster)
-                disaster_list.append(disaster_dict)
-            
-            logger.info(f"Found {len(disaster_list)} disasters pending verification")
-            return disaster_list
-            
-        except Exception as e:
-            logger.error(f"Error querying pending verifications: {e}")
             raise
     
     async def get_disaster_by_id(
@@ -332,8 +251,6 @@ class DisasterRepository:
         """
         Get a disaster by its tracking ID.
         
-        Used by users to track their reported disasters.
-        
         Args:
             tracking_id: Tracking ID (e.g., "DIS-2026-001234")
             
@@ -353,12 +270,54 @@ class DisasterRepository:
             logger.error(f"Error querying disaster by tracking ID: {e}")
             raise
     
+    async def create_disaster(
+        self,
+        disaster: Disaster
+    ) -> Disaster:
+        """
+        Create a new verified disaster record.
+        
+        Args:
+            disaster: Disaster object to create
+            
+        Returns:
+            Created disaster object
+        """
+        try:
+            self.db.add(disaster)
+            await self.db.flush()
+            await self.db.refresh(disaster)
+            return disaster
+        except Exception as e:
+            logger.error(f"Error creating disaster: {e}")
+            raise
+    
+    async def update_disaster(
+        self,
+        disaster: Disaster
+    ) -> Disaster:
+        """
+        Update an existing disaster record.
+        
+        Args:
+            disaster: Disaster object with updates
+            
+        Returns:
+            Updated disaster object
+        """
+        try:
+            await self.db.flush()
+            await self.db.refresh(disaster)
+            return disaster
+        except Exception as e:
+            logger.error(f"Error updating disaster: {e}")
+            raise
+    
     async def _disaster_to_dict(self, disaster: Disaster) -> Dict[str, Any]:
         """
         Convert a Disaster ORM object to a dictionary.
         
         Handles PostGIS geometry serialization to GeoJSON.
-        Includes new fields for user reporting workflow.
         
         Args:
             disaster: Disaster ORM object
@@ -371,7 +330,6 @@ class DisasterRepository:
             select(ST_AsGeoJSON(disaster.location))
         )
         
-        import json
         location_data = json.loads(location_geojson) if location_geojson else None
         
         # Extract lat/lon from GeoJSON
@@ -379,30 +337,45 @@ class DisasterRepository:
         if location_data and location_data.get("coordinates"):
             lon, lat = location_data["coordinates"]
         
+        # Alternatively, extract directly from geometry
+        if not (lat and lon):
+            lon = await self.db.scalar(select(ST_X(disaster.location.ST_Transform(4326))))
+            lat = await self.db.scalar(select(ST_Y(disaster.location.ST_Transform(4326))))
+        
         return {
             "id": str(disaster.id),
             "tracking_id": disaster.tracking_id,
             "type": disaster.type.value if hasattr(disaster.type, 'value') else str(disaster.type),
             "severity": disaster.severity.value if hasattr(disaster.severity, 'value') else str(disaster.severity),
-            "status": disaster.status.value if hasattr(disaster.status, 'value') else str(disaster.status),
-            "report_status": disaster.report_status.value if hasattr(disaster.report_status, 'value') else str(disaster.report_status),
+            "status": disaster.disaster_status.value if hasattr(disaster.disaster_status, 'value') else str(disaster.disaster_status),
             "location": {
                 "lat": lat,
                 "lon": lon,
                 "geojson": location_data
             },
+            "location_address": disaster.location_address,
             "affected_area": disaster.affected_area,
             "description": disaster.description,
             "created_at": disaster.created_at.isoformat() if disaster.created_at else None,
             "updated_at": disaster.updated_at.isoformat() if disaster.updated_at else None,
-            # User reporting information
-            "is_user_reported": disaster.is_user_reported,
-            "reporter_id": str(disaster.reporter_id) if disaster.reporter_id else None,
-            "verified_by_id": str(disaster.verified_by_id) if disaster.verified_by_id else None,
-            # Photo count (if photos relationship is loaded)
-            "photo_count": len(disaster.photos) if hasattr(disaster, "photos") and disaster.photos else 0,
-            # Optional metadata
-            "metadata": disaster.metadata if hasattr(disaster, "metadata") else None,
+            # Impact assessment
+            "people_affected": disaster.people_affected,
+            "multiple_casualties": disaster.multiple_casualties,
+            "structural_damage": disaster.structural_damage,
+            "road_blocked": disaster.road_blocked,
+            # Assignment
+            "assigned_to_id": str(disaster.assigned_to_id) if disaster.assigned_to_id else None,
+            "assigned_department": disaster.assigned_department.value if disaster.assigned_department else None,
+            # Timeline
+            "response_time": disaster.response_time.isoformat() if disaster.response_time else None,
+            "resolved_time": disaster.resolved_time.isoformat() if disaster.resolved_time else None,
+            "resolution_notes": disaster.resolution_notes,
+            # Creation info
+            "created_by_id": str(disaster.created_by_id) if disaster.created_by_id else None,
+            # Metadata
+            "disaster_metadata": disaster.disaster_metadata,
+            # Report count (if reports relationship is loaded)
+            "report_count": len(disaster.reports) if hasattr(disaster, "reports") and disaster.reports else 0,
         }
     
     async def _calculate_distance(
@@ -424,21 +397,18 @@ class DisasterRepository:
         """
         try:
             # Create point for target location
-            point = ST_Point(lon, lat, type_=Geometry)
+            point = ST_Point(lon, lat)
             
-            # Calculate distance in degrees
-            distance_degrees = await self.db.scalar(
-                select(ST_Distance(location_geom, point))
+            # Calculate distance in meters using spheroid
+            distance_meters = await self.db.scalar(
+                select(ST_Distance(location_geom, point, use_spheroid=True))
             )
             
-            # Convert degrees to km (approximate)
-            # At equator: 1 degree ≈ 111 km
-            distance_km = distance_degrees * 111.0
+            # Convert meters to km
+            distance_km = distance_meters / 1000.0 if distance_meters else 0.0
             
             return round(distance_km, 2)
             
         except Exception as e:
             logger.warning(f"Error calculating distance: {e}")
             return 0.0
-
-
