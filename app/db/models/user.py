@@ -77,11 +77,11 @@ class User(Base):
         lazy="select"
     )
 
-    reported_disasters: Mapped[List["Disaster"]] = relationship(
-        "Disaster",
-        back_populates = "reported_by",
-        foreign_keys = "Disaster.reported_by_user_id"
-    )
+    # reported_disasters: Mapped[List["Disaster"]] = relationship(
+    #     "Disaster",
+    #     back_populates = "reported_by",
+    #     foreign_keys = "Disaster.reported_by_user_id"
+    # )
     
     # Indexes for common queries
     __table_args__ = (
