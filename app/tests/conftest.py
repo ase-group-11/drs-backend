@@ -12,6 +12,7 @@ Provides:
 import pytest
 import os
 from unittest.mock import MagicMock, AsyncMock
+from httpx import AsyncClient
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -85,3 +86,16 @@ def mock_redis_client():
     client.setex = AsyncMock()
     
     return client
+
+
+@pytest.fixture
+def mock_traffic_provider():
+    """
+    Mock traffic provider [Traffic API adapter (TomTom)].
+    Map endpoint should call: provider.get_traffic(bbox: str, zoom: int) -> dict (GeoJSON)
+    """
+
+    provider = AsyncMock()
+    provider.get_traffic = AsyncMock()
+    return provider
+

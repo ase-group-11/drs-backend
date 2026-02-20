@@ -79,8 +79,11 @@ async def register_team_member(
     
     try:
         # Convert string enums to actual enum types
-        role = EmergencyTeamRole(request.role)
-        department = Department(request.department)
+        # role = EmergencyTeamRole(request.role)
+        # department = Department(request.department)
+        
+        role = EmergencyTeamRole(request.role.upper())
+        department = Department(request.department.upper())
         
         result = await service.register_team_member(
             phone_number=request.phone_number,

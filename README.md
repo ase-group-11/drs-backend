@@ -106,7 +106,8 @@ udocker run -p 5432:5432 \
 udocker run -p 6379:6379 redis-drs
 
 # to Run the Backend
-source venv/bin/activate  
+source venv/bin/activate 
+venv/Scripts/activate - for windows 
 uvicorn app.main:app --reload
 
 # Database Management
@@ -119,6 +120,7 @@ python scripts/manage_db.py downgrade 1   # Rollback
 python scripts/manage_db.py reset         # Reset DB (⚠️)
 python scripts/manage_db.py help          # Show help
 python3 scripts/manage_db.py create       # Create tables
+python3 scripts/manage_db.py cleanup      # Drop all tables AND enum types (complete cleanup)
 
 # Alembic (Direct)
 alembic revision --autogenerate -m "Message"

@@ -7,10 +7,14 @@ They have roles (Admin, Manager, Staff) and belong to departments.
 """
 
 from sqlalchemy import String, Enum as SQLEnum, Index
-from sqlalchemy.orm import Mapped, mapped_column
-from typing import Optional
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from typing import Optional, List, TYPE_CHECKING
 from app.db.models.base import Base
 from app.db.models.enums import UserStatus, EmergencyTeamRole, Department
+
+if TYPE_CHECKING:
+    from app.db.models.disaster_report import DisasterReport
+    from app.db.models.disaster import Disaster
 
 
 class EmergencyTeam(Base):
@@ -89,6 +93,31 @@ class EmergencyTeam(Base):
         nullable=False,
         index=True
     )
+
+    reviewed_reports: Mapped[List["DisasterReport"]] = relationship(
+        "DisasterReport",
+        foreign_keys = "DisasterReport.reviewed_by_id",
+        back_populates = "reviewed_by",
+        lazy = "select"
+    )
+
+
+    assigned_disasters: Mapped[List["Disaster"]] = relationship(
+        "Disaster",
+        foreign_keys = "Disaster.assigned_to_id",
+        back_populates = "created_by",
+        lazy = "select"
+    )
+
+    created_disasters: Mapped[List["Disaster"]] = relationship(
+        "Disaster",
+        foreign_keys = "Disaster.created_by_id",
+        back_populates = "created_by",
+        lazy = "select"
+    )
+    
+    
+
     
     # Indexes for common queries
     __table_args__ = (
@@ -134,3 +163,23 @@ class EmergencyTeam(Base):
     def can_manage_team(self) -> bool:
         """Check if team member can manage other team members."""
         return self.role in (EmergencyTeamRole.ADMIN, EmergencyTeamRole.MANAGER)
+    
+    @property
+    def reviewed_reports_count(self) -> int:
+        """Get count of reports reviewed by this team member."""
+        return len(self.reviewed_reports) if self.reviewed_reports else 0
+    
+    @property
+    def active_assignments_count(self) -> int:
+        """Get count of currently assigned active reports."""
+        from app.db.models.enums import ReportStatus
+        return sum(1 for r in self.assigned_reports if r.status in [
+            ReportStatus.ASSIGNED,
+            ReportStatus.IN_PROGRESS
+        ])
+    
+    @property
+    def total_resolved_count(self) -> int:
+        """Get count of total reports resolved by this team member."""
+        from app.db.models.enums import ReportStatus
+        return sum(1 for r in self.assigned_reports if r.status == ReportStatus.RESOLVED)# File: app/models/emergency_team.py

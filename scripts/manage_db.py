@@ -14,6 +14,7 @@ import asyncio
 import sys
 import subprocess
 from pathlib import Path
+from sqlalchemy import text  # Add this with other imports
 
 # Add project root to path
 project_root = Path(__file__).resolve().parent.parent
@@ -24,6 +25,7 @@ from app.core.config import settings
 from app.db.models.base import Base
 from app.db.models.emergency_team import EmergencyTeam
 from app.db.models.user import User
+from app.db.models.disaster_report import DisasterReport  # ✅ NEW: Added DisasterReport
 
 
 async def create_tables():
@@ -45,7 +47,7 @@ async def drop_tables():
     
     response = input("Are you sure? This will delete ALL data! (yes/no): ")
     if response.lower() != "yes":
-        print("Aborted")
+        print("❌ Aborted")
         return
     
     engine = create_async_engine(settings.DATABASE_URL, echo=True)
@@ -54,8 +56,39 @@ async def drop_tables():
         await conn.run_sync(Base.metadata.drop_all)
     
     await engine.dispose()
-    print("Tables dropped successfully!")
+    print("✅ Tables dropped successfully!")
 
+async def cleanup_database():
+    """Drop all tables and enum types completely."""
+    print("Cleaning up database (dropping tables and enums)...")
+    
+    response = input("Are you sure? This will delete ALL data and types! (yes/no): ")
+    if response.lower() != "yes":
+        print("❌ Aborted")
+        return
+    
+    engine = create_async_engine(settings.DATABASE_URL, echo=True)
+    
+    async with engine.begin() as conn:
+        # Drop all tables first
+        await conn.run_sync(Base.metadata.drop_all)
+        
+        # Drop enum types manually
+        await conn.execute(text("""
+            DROP TYPE IF EXISTS report_status CASCADE;
+            DROP TYPE IF EXISTS severity CASCADE;
+            DROP TYPE IF EXISTS disaster_type CASCADE;
+            DROP TYPE IF EXISTS department CASCADE;
+            DROP TYPE IF EXISTS emergency_team_role CASCADE;
+            DROP TYPE IF EXISTS user_role CASCADE;
+            DROP TYPE IF EXISTS user_status CASCADE;
+            DROP TYPE IF EXISTS otp_status CASCADE;
+            DROP TYPE IF EXISTS emergency_request_status CASCADE;
+            DROP TABLE IF EXISTS alembic_version CASCADE;
+        """))
+    
+    await engine.dispose()
+    print("✅ Database cleaned successfully!")
 
 async def check_connection():
     """Check database connection."""
@@ -69,20 +102,39 @@ async def check_connection():
             await result.fetchone()
         
         await engine.dispose()
-        print("Database connection successful!")
+        print("✅ Database connection successful!")
         print(f"   Connected to: {settings.DATABASE_URL.split('@')[1] if '@' in settings.DATABASE_URL else 'database'}")
         return True
         
     except Exception as e:
-        print(f"Database connection failed: {e}")
+        print(f"❌ Database connection failed: {e}")
         return False
 
+
+# def run_alembic_command(command: list):
+#     """Run alembic command."""
+#     try:
+#         result = subprocess.run(
+#             ["python", "-m", "alembic"] + command,
+#             capture_output=True,
+#             text=True,
+#             check=True
+#         )
+#         print(result.stdout)
+#         if result.stderr:
+#             print(result.stderr)
+#         return True
+#     except subprocess.CalledProcessError as e:
+#         print(f"❌ Command failed: {e}")
+#         print(e.stdout)
+#         print(e.stderr)
+#         return False
 
 def run_alembic_command(command: list):
     """Run alembic command."""
     try:
         result = subprocess.run(
-            ["python", "-m", "alembic"] + command,
+            ["alembic"] + command,  # Call alembic directly
             capture_output=True,
             text=True,
             check=True
@@ -92,11 +144,10 @@ def run_alembic_command(command: list):
             print(result.stderr)
         return True
     except subprocess.CalledProcessError as e:
-        print(f"Command failed: {e}")
+        print(f"❌ Command failed: {e}")
         print(e.stdout)
         print(e.stderr)
         return False
-
 
 def create_migration(message: str):
     """Create a new migration."""
@@ -130,26 +181,26 @@ def show_history():
 
 async def reset_database():
     """Reset database (drop all, create all, run migrations)."""
-    print("Resetting database...")
+    print("⚠️  Resetting database...")
     
     response = input("This will DELETE ALL DATA and recreate tables. Continue? (yes/no): ")
     if response.lower() != "yes":
-        print("Aborted")
+        print("❌ Aborted")
         return
     
     # Drop all tables
     await drop_tables()
     
     # Run migrations
-    print("\n Applying migrations...")
+    print("\n📝 Applying migrations...")
     apply_migrations()
     
-    print("\n Database reset complete!")
+    print("\n✅ Database reset complete!")
 
 
 def print_help():
     """Print help message."""
-    help_text = """
+    help_text = f"""
 Database Management Tool
 
 Usage: python manage_db.py <command>
@@ -196,10 +247,13 @@ async def main():
     
     elif command == "drop":
         await drop_tables()
+        
+    elif command == "cleanup":
+        await cleanup_database()
     
     elif command == "migrate":
         if len(sys.argv) < 3:
-            print("Please provide migration message")
+            print("❌ Please provide migration message")
             print('Example: python manage_db.py migrate "Add user table"')
             return
         message = " ".join(sys.argv[2:])
@@ -225,7 +279,7 @@ async def main():
         print_help()
     
     else:
-        print(f"Unknown command: {command}")
+        print(f"❌ Unknown command: {command}")
         print_help()
 
 
