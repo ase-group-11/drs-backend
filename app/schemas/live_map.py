@@ -108,6 +108,35 @@ class LocationResponse(BaseModel):
     lon: float
 
 
+class MapCameraConfig(BaseModel):
+    """3D camera configuration."""
+    center: LocationResponse
+    zoomLevel: int = Field(17, ge=1, le=22)
+    pitch: int = Field(65, ge=0, le=85, description="3D tilt angle")
+    bearing: int = Field(30, ge=0, le=360, description="3D rotation angle")
+
+
+class MapTerrainConfig(BaseModel):
+    """3D terrain configuration."""
+    enabled: bool = True
+    exaggeration: float = Field(1.5, ge=1.0, le=3.0)
+
+
+class MapBuildingsConfig(BaseModel):
+    """3D buildings configuration."""
+    enabled: bool = True
+    extrusion: bool = True
+
+
+class Map3DConfigResponse(BaseModel):
+    """Complete 3D map configuration response."""
+    styles: Dict[str, str]
+    defaultStyle: str
+    camera: MapCameraConfig
+    terrain: MapTerrainConfig
+    buildings: MapBuildingsConfig
+
+
 class BoundsResponse(BaseModel):
     """Bounding box coordinates."""
     south: float
@@ -222,24 +251,49 @@ class LiveMapDataResponse(BaseModel):
 
 
 class PendingDisasterResponse(BaseModel):
-    """Single pending disaster data."""
+    """Single pending disaster report (user submission awaiting verification)."""
     
+    # === BASIC INFO ===
     id: str
-    tracking_id: str
-    type: str
+    user_id: str 
+    disaster_type: str  
     severity: str
-    status: str
-    report_status: str
+    description: str
+    
+    # === LOCATION ===
     location: DisasterLocationResponse
-    affected_area: Optional[str] = None
-    description: Optional[str] = None
+    location_address: str  
+    
+    # === IMPACT ASSESSMENT ===
+    people_affected: int  
+    multiple_casualties: bool  
+    structural_damage: bool  
+    road_blocked: bool  
+    
+    # === STATUS ===
+    report_status: str  
+    
+    # === REVIEW INFO ===
+    disaster_id: Optional[str] = None  
+    reviewed_by_id: Optional[str] = None  
+    reviewed_at: Optional[str] = None  
+    rejection_reason: Optional[str] = None  
+    
+    # === TIMESTAMPS ===
     created_at: str
-    is_user_reported: bool
-    reporter_id: Optional[str] = None
+    
+    # === METADATA ===
     photo_count: int = 0
+    
 
 
 class PendingDisastersResponse(BaseModel):
+    """Response for pending disaster reports query."""
+    
+    pending_disasters: List[PendingDisasterResponse]
+    count: int
+    note: str = "These user-submitted reports require verification before becoming official disasters"
+    actions: Dict[str, str]
     """Response for pending disasters query."""
     
     pending_disasters: List[PendingDisasterResponse]

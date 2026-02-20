@@ -94,20 +94,30 @@ class EmergencyTeam(Base):
         index=True
     )
 
-    verified_disasters: Mapped[List["Disaster"]] = relationship(
-        "Disaster",
-        back_populates="verified_by",
-        foreign_keys="Disaster.verified_by_team_id"
-    )
-    
-    
-    # Relationships
-    assigned_reports: Mapped[List["DisasterReport"]] = relationship(
+    reviewed_reports: Mapped[List["DisasterReport"]] = relationship(
         "DisasterReport",
-        back_populates="assigned_to",
-        foreign_keys="[DisasterReport.assigned_to_id]",
-        lazy="select"
+        foreign_keys = "DisasterReport.reviewed_by_id",
+        back_populates = "reviewed_by",
+        lazy = "select"
     )
+
+
+    assigned_disasters: Mapped[List["Disaster"]] = relationship(
+        "Disaster",
+        foreign_keys = "Disaster.assigned_to_id",
+        back_populates = "created_by",
+        lazy = "select"
+    )
+
+    created_disasters: Mapped[List["Disaster"]] = relationship(
+        "Disaster",
+        foreign_keys = "Disaster.created_by_id",
+        back_populates = "created_by",
+        lazy = "select"
+    )
+    
+    
+
     
     # Indexes for common queries
     __table_args__ = (
@@ -153,6 +163,11 @@ class EmergencyTeam(Base):
     def can_manage_team(self) -> bool:
         """Check if team member can manage other team members."""
         return self.role in (EmergencyTeamRole.ADMIN, EmergencyTeamRole.MANAGER)
+    
+    @property
+    def reviewed_reports_count(self) -> int:
+        """Get count of reports reviewed by this team member."""
+        return len(self.reviewed_reports) if self.reviewed_reports else 0
     
     @property
     def active_assignments_count(self) -> int:
