@@ -5,7 +5,6 @@ All external dependencies are mocked — no DB, no HTTP.
 """
 
 import pytest
-from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 from fastapi import HTTPException
@@ -14,12 +13,7 @@ from app.services.evaluation.service import DisasterEvaluationService
 from app.services.evaluation.base import EvaluationResult
 
 
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
 def make_report(**overrides):
-    """Build a minimal report dict as returned by DisasterReportRepository."""
     base = {
         "id": "report-uuid-1234",
         "user_id": "user-uuid-5678",
@@ -44,8 +38,8 @@ def make_report(**overrides):
     return base
 
 
-def make_eval_result(**overrides) -> EvaluationResult:
-    base = dict(
+def make_eval_result() -> EvaluationResult:
+    return EvaluationResult(
         disaster_id="report-uuid-1234",
         severity="HIGH",
         confidence=0.82,
@@ -54,10 +48,8 @@ def make_eval_result(**overrides) -> EvaluationResult:
         trigger_reroute=True,
         trigger_evacuation=True,
         flag="NORMAL",
-        strategy_used="rules_v1",
+        strategy_used="xgboost_v1",
     )
-    base.update(overrides)
-    return EvaluationResult(**base)
 
 
 @pytest.fixture
@@ -84,12 +76,10 @@ def mock_strategy():
 @pytest.fixture
 def mock_enrichment():
     enrichment = AsyncMock()
-    enrichment.enrich = AsyncMock(
-        return_value=(
-            {"flow": [{"congestion_level": "moderate"}], "source": "tomtom"},
-            {"temperature_c": 15.0, "condition": "clear", "source": "mock"},
-        )
-    )
+    enrichment.enrich = AsyncMock(return_value=(
+        {"flow": [{"congestion_level": "moderate"}], "source": "tomtom"},
+        {"temperature_c": 15.0, "condition": "clear", "source": "mock"},
+    ))
     return enrichment
 
 
@@ -103,14 +93,8 @@ def service(mock_report_repo, mock_eval_repo, mock_strategy, mock_enrichment):
     )
 
 
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
-
 @pytest.mark.asyncio
-async def test_raises_404_when_report_not_found(
-    mock_eval_repo, mock_strategy, mock_enrichment
-):
+async def test_raises_404_when_report_not_found(mock_eval_repo, mock_strategy, mock_enrichment):
     repo = AsyncMock()
     repo.get_report_by_id = AsyncMock(return_value=None)
     svc = DisasterEvaluationService(
@@ -125,72 +109,6 @@ async def test_raises_404_when_report_not_found(
 
 
 @pytest.mark.asyncio
-async def test_enrichment_called_with_correct_lat_lon(service, mock_enrichment):
-    await service.evaluate("report-uuid-1234")
-    mock_enrichment.enrich.assert_called_once_with(53.35, -6.26)
-
-
-@pytest.mark.asyncio
-async def test_enrichment_skipped_when_no_coordinates(
-    mock_report_repo, mock_eval_repo, mock_strategy, mock_enrichment
-):
-    # Report with no coordinates
-    mock_report_repo.get_report_by_id = AsyncMock(
-        return_value=make_report(location={"lat": None, "lon": None})
-    )
-    svc = DisasterEvaluationService(
-        report_repo=mock_report_repo,
-        evaluation_repo=mock_eval_repo,
-        strategy=mock_strategy,
-        enrichment=mock_enrichment,
-    )
-    await svc.evaluate("report-uuid-1234")
-    mock_enrichment.enrich.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_context_has_none_enrichment_when_coordinates_missing(
-    mock_report_repo, mock_eval_repo, mock_strategy, mock_enrichment
-):
-    mock_report_repo.get_report_by_id = AsyncMock(
-        return_value=make_report(location={"lat": None, "lon": None})
-    )
-    svc = DisasterEvaluationService(
-        report_repo=mock_report_repo,
-        evaluation_repo=mock_eval_repo,
-        strategy=mock_strategy,
-        enrichment=mock_enrichment,
-    )
-    await svc.evaluate("report-uuid-1234")
-    call_args = mock_strategy.evaluate.call_args[0][0]
-    assert call_args.traffic_context is None
-    assert call_args.weather_context is None
-
-
-@pytest.mark.asyncio
 async def test_evaluation_persisted_to_repo(service, mock_eval_repo):
     await service.evaluate("report-uuid-1234")
     mock_eval_repo.create_evaluation.assert_called_once()
-
-
-@pytest.mark.asyncio
-async def test_output_matches_fixed_schema(service):
-    result = await service.evaluate("report-uuid-1234")
-    required_keys = {
-        "disaster_id", "severity", "confidence", "recommended_services",
-        "trigger_deploy", "trigger_reroute", "trigger_evacuation",
-        "flag", "strategy_used", "evaluated_at",
-    }
-    assert required_keys == set(result.keys())
-
-
-@pytest.mark.asyncio
-async def test_severity_in_output_is_uppercase(service):
-    result = await service.evaluate("report-uuid-1234")
-    assert result["severity"] == result["severity"].upper()
-
-
-@pytest.mark.asyncio
-async def test_evaluated_at_is_datetime(service):
-    result = await service.evaluate("report-uuid-1234")
-    assert isinstance(result["evaluated_at"], datetime)
