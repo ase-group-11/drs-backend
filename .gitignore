@@ -83,3 +83,7 @@ docker-compose.override.yml
 *.bak
 *.swp
 *.tmp
+
+# ML training artefacts (generated — do not commit)
+data/synthetic.csv
+models/*.joblib

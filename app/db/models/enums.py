@@ -180,9 +180,9 @@ class DisasterStatus(str, enum.Enum):
 class DisasterReportStatus(str, enum.Enum):
     """
     Validation status for disaster reports (especially user-reported).
-    
+
     Flow: PENDING → VERIFIED/REJECTED/DUPLICATE
-    
+
     States:
     - PENDING: Report submitted, awaiting verification
     - VERIFIED: Report verified by emergency team, disaster is legitimate
@@ -194,8 +194,8 @@ class DisasterReportStatus(str, enum.Enum):
     REJECTED = "rejected"
     DUPLICATE = "duplicate"
 
- 
- 
+
+
 
 class UnitType(str, enum.Enum):
     """
@@ -242,3 +242,32 @@ class UnitStatus(str, enum.Enum):
     RETURNING   = "returning"
     MAINTENANCE = "maintenance"
     OFFLINE     = "offline"
+
+
+class EvaluationFlag(str, enum.Enum):
+    """
+    Flag assigned to a disaster evaluation result.
+
+    States:
+    - NORMAL: Evaluation completed with sufficient data and no anomalies
+    - LIMITED_DATA: Missing enrichment context reduced confidence
+    - FALSE_ALARM: Low severity, no flags, zero casualties, low confidence
+    - PENDING_REVIEW: High/critical severity but missing supporting evidence
+    """
+    NORMAL = "normal"
+    LIMITED_DATA = "limited_data"
+    FALSE_ALARM = "false_alarm"
+    PENDING_REVIEW = "pending_review"
+
+
+class RecommendedService(str, enum.Enum):
+    """
+    Recommended emergency services for dispatch.
+
+    These are operational service categories, distinct from the
+    Department enum used for team assignment.
+    """
+    FIRE_BRIGADE = "fire_brigade"
+    AMBULANCE = "ambulance"
+    POLICE = "police"
+    RESCUE = "rescue"

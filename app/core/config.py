@@ -112,6 +112,11 @@ class Settings(BaseSettings):
         description="TomTom API key for traffic data"
     )
 
+    MODEL_PATH: str = Field(
+        default="models/severity_classifier_v1.joblib",
+        description="Path to the XGBoost severity classifier artifact"
+    )
+
     DISASTER_CACHE_TTL: int = Field(
         default=60,
         description="Cache TTL for disasters in seconds (default: 60s)"
