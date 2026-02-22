@@ -113,8 +113,13 @@ class Settings(BaseSettings):
     )
 
     MODEL_PATH: str = Field(
-        default="models/severity_classifier_v1.joblib",
+        default="models/severity_classifier_v2.joblib",
         description="Path to the XGBoost severity classifier artifact"
+    )
+
+    OPENWEATHER_API_KEY: str = Field(
+        default="",
+        description="OpenWeatherMap API key — if empty, MockWeatherProvider is used"
     )
 
     DISASTER_CACHE_TTL: int = Field(

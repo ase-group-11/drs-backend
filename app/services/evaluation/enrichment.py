@@ -55,7 +55,7 @@ class BaseWeatherProvider(ABC):
 
 class MockWeatherProvider(BaseWeatherProvider):
     """
-    Static mock weather provider for Phase 1.
+    Static mock weather provider for tests and local runs without an API key.
 
     Returns deterministic data so unit tests are hermetic and the
     evaluation service works end-to-end without a live weather API.
@@ -70,6 +70,71 @@ class MockWeatherProvider(BaseWeatherProvider):
             wind_speed_kmh=10.0,
             source="mock",
         )
+
+
+class OpenWeatherMapProvider(BaseWeatherProvider):
+    """
+    Live weather provider using the OpenWeatherMap Current Weather API.
+
+    Requires OPENWEATHER_API_KEY to be set in the environment / .env file.
+    Falls back gracefully — if the request fails the EnrichmentPipeline
+    catches the exception and continues with weather_context=None.
+
+    API used: https://api.openweathermap.org/data/2.5/weather
+    """
+
+    _BASE_URL = "https://api.openweathermap.org/data/2.5/weather"
+
+    # OWM condition codes → normalised condition strings used by the feature builder
+    _CONDITION_MAP = {
+        range(200, 300): "storm",     # Thunderstorm
+        range(300, 400): "rain",      # Drizzle
+        range(500, 600): "rain",      # Rain
+        range(600, 700): "storm",     # Snow (treat as severe)
+        range(700, 800): "cloudy",    # Atmosphere (mist, fog, etc.)
+        range(800, 801): "clear",     # Clear sky
+        range(801, 900): "cloudy",    # Clouds
+    }
+
+    def __init__(self, api_key: str) -> None:
+        self._api_key = api_key
+
+    async def get_weather_at_point(
+        self, lat: float, lon: float
+    ) -> WeatherContext:
+        params = {
+            "lat": lat,
+            "lon": lon,
+            "appid": self._api_key,
+            "units": "metric",  # °C and m/s
+        }
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                self._BASE_URL, params=params, timeout=aiohttp.ClientTimeout(total=5)
+            ) as resp:
+                resp.raise_for_status()
+                data = await resp.json()
+
+        condition_id = data["weather"][0]["id"]
+        condition = self._map_condition(condition_id)
+
+        # OWM returns wind speed in m/s — convert to km/h
+        wind_ms = data.get("wind", {}).get("speed", 0.0)
+        wind_kmh = wind_ms * 3.6
+
+        return WeatherContext(
+            temperature_c=data["main"]["temp"],
+            condition=condition,
+            wind_speed_kmh=round(wind_kmh, 1),
+            source="openweathermap",
+        )
+
+    def _map_condition(self, code: int) -> str:
+        for r, label in self._CONDITION_MAP.items():
+            if code in r:
+                return label
+        return "clear"
 
 
 # ---------------------------------------------------------------------------

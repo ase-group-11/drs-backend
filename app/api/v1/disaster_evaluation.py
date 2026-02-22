@@ -22,7 +22,11 @@ from app.providers.traffic import TrafficProvider
 from app.repositories.disaster_report_repository import DisasterReportRepository
 from app.repositories.disaster_evaluation_repository import DisasterEvaluationRepository
 from app.schemas.disaster_evaluation_schemas import EvaluationResponse
-from app.services.evaluation.enrichment import EnrichmentPipeline, MockWeatherProvider
+from app.services.evaluation.enrichment import (
+    EnrichmentPipeline,
+    MockWeatherProvider,
+    OpenWeatherMapProvider,
+)
 from app.services.evaluation.xgboost_strategy import XGBoostStrategy
 from app.services.evaluation.service import DisasterEvaluationService
 
@@ -89,13 +93,18 @@ def get_evaluation_service_dependency(
             detail="Evaluation service unavailable: XGBoost model not loaded",
         )
 
+    if settings.OPENWEATHER_API_KEY:
+        weather_provider = OpenWeatherMapProvider(api_key=settings.OPENWEATHER_API_KEY)
+    else:
+        weather_provider = MockWeatherProvider()
+
     return DisasterEvaluationService(
         report_repo=DisasterReportRepository(db),
         evaluation_repo=DisasterEvaluationRepository(db),
         strategy=_xgboost_strategy,
         enrichment=EnrichmentPipeline(
             traffic_provider=_traffic_provider,
-            weather_provider=MockWeatherProvider(),
+            weather_provider=weather_provider,
         ),
     )
 
