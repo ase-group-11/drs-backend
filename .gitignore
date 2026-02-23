@@ -89,8 +89,5 @@ data/synthetic.csv
 models/*.joblib
 
 # Local dev / evaluation scripts
-docs/
-evaluate.sh
-run_evaluation.sh
 scripts/demo_evaluation.py
 scripts/evaluate.py
