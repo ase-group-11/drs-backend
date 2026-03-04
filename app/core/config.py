@@ -121,6 +121,16 @@ class Settings(BaseSettings):
         description="Cache TTL for traffic data in seconds (default: 30s)"
     )
     
+    # Azure Blob Storage
+    AZURE_STORAGE_CONNECTION_STRING: str = Field(
+        default="",
+        description="Azure Blob Storage connection string"
+    )
+    AZURE_CONTAINER_NAME: str = Field(
+        default="disaster-images",
+        description="Azure Blob container name for disaster photos/videos"
+    )
+    
     # Map Defaults (Dublin, Ireland)
     DEFAULT_LOCATION_LAT: float = Field(
         default=53.3498,

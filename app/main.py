@@ -19,6 +19,8 @@ from app.core.logging_config import setup_logging
 from app.api.v1 import user_auth
 from app.api.v1 import emergency_team_auth
 from app.api.v1 import live_map
+from app.api.v1 import disaster_report
+from app.api.v1.disaster import router as disaster_router
 
 from cache.redis_client import close_redis_connection
 from app.providers.map_provider import MapProvider
@@ -135,6 +137,8 @@ async def global_exception_handler(request: Request, exc: Exception):
 app.include_router(user_auth.router, prefix="/api/v1")
 app.include_router(emergency_team_auth.router, prefix="/api/v1")
 app.include_router(live_map.router, prefix="/api/v1")
+app.include_router(disaster_report.router, prefix="/api/v1")
+app.include_router(disaster_router, prefix="/api/v1")
 
 
 
