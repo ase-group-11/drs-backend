@@ -32,10 +32,11 @@ EXCHANGE_NAME = "disaster_events"
 
 # Queue → Routing key bindings
 QUEUE_BINDINGS = {
-    "evaluation_queue": ["disaster.reported"],
-    "coordination_queue": ["disaster.reported", "disaster.evaluated"],
-    "notification_queue": ["disaster.reported", "disaster.updated", "disaster.resolved"],
-    "reroute_queue": ["disaster.evaluated", "disaster.resolved"],
+    "evaluation_queue": ["disaster.verified"],
+    "coordination_queue": ["disaster.verified", "disaster.backup_requested"],
+    "notification_queue": ["disaster.dispatched", "disaster.verified", "disaster.updated",
+                           "disaster.resolved", "disaster.backup_requested", "disaster.unit_completed"],
+    "reroute_queue": ["disaster.verified", "disaster.resolved", "disaster.unit_completed"],
 }
 
 
