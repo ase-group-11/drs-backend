@@ -5,6 +5,7 @@
 fastapi==0.109.0
 uvicorn[standard]==0.27.0
 python-multipart==0.0.6
+python-socketio==5.11.0
 
 # Database
 sqlalchemy[asyncio]==2.0.25
@@ -14,11 +15,17 @@ greenlet==3.0.3  # Required for SQLAlchemy async
 
 # Redis
 redis[hiredis]==5.0.1
+celery==5.4.0
 
 # Authentication & Security
 python-jose[cryptography]==3.3.0
 passlib[argon2]==1.7.4
 argon2-cffi==23.1.0
+
+# Resilience
+tenacity==9.0.0
+pybreaker==1.2.0
+
 
 # Twilio SMS
 twilio==8.12.0
@@ -38,3 +45,6 @@ faker==22.0.0
 
 # Utilities
 python-dotenv==1.0.0
+
+#load testing
+locust==2.31.4
