@@ -195,3 +195,50 @@ class DisasterReportStatus(str, enum.Enum):
     DUPLICATE = "duplicate"
 
  
+ 
+
+class UnitType(str, enum.Enum):
+    """
+    Type of emergency unit / vehicle.
+
+    Types:
+    - AMBULANCE:       Medical response vehicle
+    - FIRE_ENGINE:     Fire suppression truck
+    - PATROL_CAR:      Police patrol vehicle
+    - RAPID_RESPONSE:  Fast-response unit (any department)
+    - HAZMAT:          Hazardous materials response unit
+    - RESCUE:          Technical rescue unit (water, confined space, etc.)
+    - COMMAND:         Mobile command / coordination vehicle
+    """
+    AMBULANCE       = "ambulance"
+    FIRE_ENGINE     = "fire_engine"
+    PATROL_CAR      = "patrol_car"
+    RAPID_RESPONSE  = "rapid_response"
+    HAZMAT          = "hazmat"
+    RESCUE          = "rescue"
+    COMMAND         = "command"
+
+
+class UnitStatus(str, enum.Enum):
+    """
+    Operational status of an emergency unit.
+
+    Lifecycle:
+        AVAILABLE → DEPLOYED → ON_SCENE → RETURNING → AVAILABLE
+                                                    ↘ MAINTENANCE
+                                                    ↘ OFFLINE
+
+    States:
+    - AVAILABLE:    Ready to be dispatched
+    - DEPLOYED:     Dispatched, en route to incident
+    - ON_SCENE:     Actively working at the incident site
+    - RETURNING:    Returning to base after an incident
+    - MAINTENANCE:  Vehicle / equipment under maintenance
+    - OFFLINE:      Unit decommissioned or out of service
+    """
+    AVAILABLE   = "available"
+    DEPLOYED    = "deployed"
+    ON_SCENE    = "on_scene"
+    RETURNING   = "returning"
+    MAINTENANCE = "maintenance"
+    OFFLINE     = "offline"

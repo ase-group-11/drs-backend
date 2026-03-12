@@ -13,12 +13,13 @@ import logging
 import json
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
-from sqlalchemy import select, and_, or_
+from sqlalchemy import select, and_, or_, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from geoalchemy2.functions import (
     ST_MakeEnvelope, ST_Within, ST_Distance, 
     ST_AsGeoJSON, ST_Point, ST_DWithin, ST_X, ST_Y
 )
+from geoalchemy2 import Geography
 
 from app.db.models.disaster import Disaster
 from app.db.models.enums import DisasterType, DisasterSeverity, DisasterStatus
@@ -83,14 +84,24 @@ class DisasterRepository:
         try:
             # Parse bounds
             south, west, north, east = map(float, bounds.split(','))
+
+            # Calculate center and radius for geography-based query
+
+            center_lat = (north + south) / 2
+            center_lon = (east + west) / 2
             
+            # Approximate radius in meters (very rough estimate)
+            lat_diff = north - south
+            lon_diff = east - west
+            radius_meters = max(lat_diff, lon_diff) * 111000  # 1 degree ≈ 111km
+                
             # Build query with PostGIS spatial filter
             query = select(Disaster).where(
                 and_(
                     Disaster.disaster_status == DisasterStatus.ACTIVE,
                     ST_Within(
-                        Disaster.location,
-                        ST_MakeEnvelope(west, south, east, north, 4326)
+                        func.ST_GeomFromText(func.ST_AsText(Disaster.location), 4326), ST_MakeEnvelope(west, south, east, north, 4326)
+            
                     )
                 )
             )

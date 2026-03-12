@@ -12,6 +12,7 @@ asyncpg==0.29.0
 alembic==1.13.1
 greenlet==3.0.3  # Required for SQLAlchemy async
 geoalchemy2==0.14.3
+psycopg2-binary==2.9.9
 
 # Redis
 redis[hiredis]==5.0.1

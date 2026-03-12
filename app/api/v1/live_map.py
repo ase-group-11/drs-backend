@@ -42,6 +42,10 @@ from app.schemas.live_map import (
     PendingDisasterResponse,
     LocationResponse,
     BoundsResponse,
+    Map3DConfigResponse, 
+    MapCameraConfig, 
+    MapTerrainConfig, 
+    MapBuildingsConfig
 )
 from app.schemas.common import ResponseBase
 
@@ -168,6 +172,66 @@ async def initialize_map(
         ),
     )
 
+@router.get(
+    "/map-config",
+    response_model = Map3DConfigResponse,
+    status_code = status.HTTP_200_OK,
+    summary = "Get complete map configuration for 3D rendering",
+    description = "Returns Mapbox styles and camera settings for Mapbox GL Js"
+)
+async def get_map_config(
+    style: Optional[str] = Query("dark-v11", description = "Mapbox style (light, dark, streets, satellite, outdoors)")
+):
+    """
+    
+        Get complete map configurations for 3D rendering.
+
+        Returns:
+        - Style URLs
+        - Default camera settings
+        - Available styles
+    
+    """
+
+    if _map_provider is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail = "Map provider is not configured",
+        )
+    
+    available_styles = {
+        "light": "mapbox://styles/mapbox/light-v11",
+        "dark": "mapbox://styles/mapbox/dark-v11",
+        "streets": "mapbox://styles/mapbox/streets-v12",
+        "satellite": "mapbox://styles/mapbox/satellite-v9",
+        "outdoors": "mapbox://styles/mapbox/outdoors-v12",
+    }
+
+    selected_style = available_styles.get(style, available_styles["dark"])
+
+    return Map3DConfigResponse(
+
+        styles = available_styles, 
+        defaultStyle = selected_style, 
+        camera = MapCameraConfig(
+            center = LocationResponse(
+                lat = settings.DEFAULT_LOCATION_LAT,
+                lon = settings.DEFAULT_LOCATION_LON
+            ),
+            zoomLevel = 17, 
+            pitch = 65, 
+            bearing = 30
+        ), 
+        terrain = MapTerrainConfig(
+            enabled = True, 
+            exaggeration = 1.5
+        ), 
+        buildings = MapBuildingsConfig (
+            enabled = True, 
+            extrusion = True
+        )
+
+    )
 
 @router.get(
     "/tiles",
@@ -511,9 +575,32 @@ async def get_live_map_data(
                 message="Traffic data temporarily unavailable",
             )
         else:
+            flow_list = traffic_raw.get("flow", [])
+            flow_models = []
+
+            for item in flow_list:
+                flow_models.append(
+                    TrafficFlowResponse(
+                        current_speed = item.get("current_speed"),
+                        free_flow_speed = item.get("free_flow_speed"),
+                        confidence = item.get("confidence"),
+                        congestion_level = item["congestion_level"],
+                        coordinates = item["coordinates"],
+                        road_name = item["road_name"]
+                    )
+                )
+
+            traffic_data_model = TrafficDataResponse(
+                source = traffic_raw["source"],
+                style = traffic_raw["style"],
+                flow = flow_models,
+                sample_count = len(flow_models),
+                timestamp = traffic_raw["timestamp"]
+            )
+
             traffic_resp = TrafficResponse(
                 available=True,
-                traffic=traffic_raw,
+                traffic=traffic_data_model,
                 cache_status=result.get("metadata", {})
                 .get("cache_status", {})
                 .get("traffic", "unknown"),
@@ -561,7 +648,7 @@ async def get_pending_disasters(
     These do NOT appear on the public live map until verified.
     """
     try:
-        pending = await service.disaster_report_repo.list_pending_disasters(limit = limit)
+        pending = await service.disaster_report_repo.get_pending_reports(limit = limit)
 
         return PendingDisastersResponse(
             pending_disasters=pending,

@@ -48,19 +48,88 @@ class DisasterReportRepository:
         logger.info(f"Querying pending disaster reports (limit={limit})")
         
         try:
-            query = select(DisasterReport).where(
+            # Select individual columns instead of the whole model
+            query = select(
+                DisasterReport.id,
+                DisasterReport.user_id,
+                DisasterReport.disaster_type,
+                DisasterReport.severity,
+                DisasterReport.description,
+                DisasterReport.location_address,
+                DisasterReport.people_affected,
+                DisasterReport.multiple_casualties,
+                DisasterReport.structural_damage,
+                DisasterReport.road_blocked,
+                DisasterReport.report_status,
+                DisasterReport.disaster_id,
+                DisasterReport.reviewed_by_id,
+                DisasterReport.reviewed_at,
+                DisasterReport.rejection_reason,
+                DisasterReport.created_at,
+                ST_AsGeoJSON(DisasterReport.location).label('location_geojson')
+            ).where(
                 DisasterReport.report_status == DisasterReportStatus.PENDING
             ).order_by(
-                DisasterReport.created_at.asc()  # Oldest first (FIFO)
+                DisasterReport.created_at.asc()
             ).limit(limit)
             
             result = await self.db.execute(query)
-            reports = result.scalars().all()
+            reports = result.all()
             
             report_list = []
             for report in reports:
-                report_dict = await self._report_to_dict(report)
-                report_list.append(report_dict)
+                try:
+                    # Parse location with error handling
+                    location_geojson = report.location_geojson
+                    location_data = None
+                    lat, lon = None, None
+                    
+                    if location_geojson:
+                        try:
+                            # Strip any whitespace and validate JSON
+                            location_geojson_str = str(location_geojson).strip()
+                            if location_geojson_str:
+                                location_data = json.loads(location_geojson_str)
+                                if location_data and location_data.get("coordinates"):
+                                    coords = location_data["coordinates"]
+                                    if isinstance(coords, list) and len(coords) >= 2:
+                                        lon, lat = coords[0], coords[1]
+                        except json.JSONDecodeError as je:
+                            logger.warning(f"Failed to parse location JSON for report {report.id}: {je}")
+                            logger.warning(f"Raw JSON: {repr(location_geojson)}")
+                        except Exception as e:
+                            logger.warning(f"Error extracting coordinates for report {report.id}: {e}")
+                
+                    report_dict = {
+                        "id": str(report.id),
+                        "user_id": str(report.user_id),
+                        "disaster_type": report.disaster_type.value, 
+                        "severity": report.severity.value, 
+                        "description": report.description,
+                        "location": {
+                            "lat": lat, 
+                            "lon": lon, 
+                            "geojson": location_data
+                        },
+
+                        "location_address": report.location_address,
+                        "people_affected": report.people_affected, 
+                        "multiple_casualties": report.multiple_casualties, 
+                        "structural_damage": report.structural_damage, 
+                        "road_blocked": report.road_blocked,
+                        "report_status": report.report_status.value, 
+                        "disaster_id": str(report.disaster_id) if report.disaster_id else None,
+                        "reviewed_by_id": str(report.reviewed_by_id) if report.reviewed_by_id else None,
+                        "reviewed_at": report.reviewed_at.isoformat() if report.reviewed_at else None,
+                        "rejection_reason": report.rejection_reason,
+                        "created_at": report.created_at.isoformat() if report.created_at else None,
+                        "photo_count": 0,
+                    }
+                    report_list.append(report_dict)
+                except Exception as e:
+                    logger.error(f"Error processing report row: {e}")
+                    logger.error(f"row data: id = {report.id if hasattr(report, 'id') else 'unknown'}")
+                    continue
             
             logger.info(f"Found {len(report_list)} pending reports")
             return report_list
@@ -75,7 +144,27 @@ class DisasterReportRepository:
     ) -> Optional[Dict[str, Any]]:
         """Get a report by ID."""
         try:
-            query = select(DisasterReport).where(DisasterReport.id == report_id)
+            query = select(
+                DisasterReport.id,
+                DisasterReport.user_id,
+                DisasterReport.disaster_type,
+                DisasterReport.severity,
+                DisasterReport.description,
+                DisasterReport.location_address,
+                DisasterReport.people_affected,
+                DisasterReport.multiple_casualties,
+                DisasterReport.structural_damage,
+                DisasterReport.road_blocked,
+                DisasterReport.report_status,
+                DisasterReport.disaster_id,
+                DisasterReport.reviewed_by_id,
+                DisasterReport.reviewed_at,
+                DisasterReport.rejection_reason,
+                DisasterReport.created_at,
+                ST_AsGeoJSON(DisasterReport.location).label('location_geojson')
+            ).where(
+                DisasterReport.id == report_id
+            )
             result = await self.db.execute(query)
             report = result.scalar_one_or_none()
             
