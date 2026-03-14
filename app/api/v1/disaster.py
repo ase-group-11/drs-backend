@@ -1,96 +1,73 @@
 # File: app/api/v1/disaster.py
 """
-Disaster Management API endpoints.
+Disaster Management API — with Bearer token auth.
 
-Handles disaster lifecycle AFTER approval:
-  - Assign emergency team + department
-  - Record response time (team arrived on scene)
-  - Resolve disaster with notes
-  - Get full disaster details
+All endpoints require emergency team Bearer token.
 """
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, Dict, Any
 
 from app.db.session import get_db
+from app.auth.dependencies import get_current_user, get_current_team_member
 from app.services.disaster_service import DisasterService
-
-import logging
-logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/disasters", tags=["Disaster Management"])
 
 
-# ── Request Models ──
-
 class ResolveDisasterRequest(BaseModel):
-    """Mark disaster as resolved."""
-    resolution_notes: str = Field(..., description="Notes about how the disaster was resolved")
+    resolution_notes: str = Field(...)
 
 
 class EscalateDisasterRequest(BaseModel):
-    """Escalate disaster severity."""
-    new_severity: str = Field(..., description="New severity: LOW, MEDIUM, HIGH, CRITICAL")
-    reason: Optional[str] = Field(None, description="Reason for escalation")
+    new_severity: str = Field(..., description="LOW, MEDIUM, HIGH, CRITICAL")
+    reason: Optional[str] = None
 
 
 # ══════════════════════════════════════════════
 # STATIC ROUTES FIRST
 # ══════════════════════════════════════════════
 
-@router.get(
-    "/unverified",
-    summary="List UNVERIFIED disasters",
-    description="Admin panel: disasters awaiting field verification."
-)
+@router.get("/unverified", summary="List UNVERIFIED disasters (Admin)")
 async def list_unverified(
     limit: int = 50,
     db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_team_member),
 ):
     service = DisasterService(db)
     return await service.list_disasters(disaster_status="UNVERIFIED", limit=limit)
 
 
-@router.get(
-    "/active",
-    summary="List ACTIVE disasters",
-    description="Admin panel: confirmed active disasters."
-)
+@router.get("/active", summary="List ACTIVE disasters (Admin)")
 async def list_active(
     severity: Optional[str] = None,
     disaster_type: Optional[str] = None,
     limit: int = 50,
     db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_team_member),
 ):
     service = DisasterService(db)
     return await service.list_disasters(
-        disaster_status="ACTIVE",
-        severity=severity,
-        disaster_type=disaster_type,
-        limit=limit,
+        disaster_status="ACTIVE", severity=severity,
+        disaster_type=disaster_type, limit=limit,
     )
 
 
-@router.get(
-    "/all",
-    summary="List all disasters",
-    description="Admin panel: all disasters with optional filters."
-)
+@router.get("/all", summary="List all disasters (Admin)")
 async def list_all(
     disaster_status: Optional[str] = None,
     severity: Optional[str] = None,
     disaster_type: Optional[str] = None,
     limit: int = 50,
     db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_team_member),
 ):
     service = DisasterService(db)
     return await service.list_disasters(
-        disaster_status=disaster_status,
-        severity=severity,
-        disaster_type=disaster_type,
-        limit=limit,
+        disaster_status=disaster_status, severity=severity,
+        disaster_type=disaster_type, limit=limit,
     )
 
 
@@ -98,85 +75,56 @@ async def list_all(
 # DYNAMIC ROUTES LAST
 # ══════════════════════════════════════════════
 
-
-# ──────────────────────────────────────────────
-# GET: Disaster details
-# ──────────────────────────────────────────────
-@router.get(
-    "/{disaster_id}",
-    summary="Get disaster details",
-    description="Fetch full disaster details including assignment, response time, and resolution info."
-)
+@router.get("/{disaster_id}", summary="Get disaster details")
 async def get_disaster(
     disaster_id: str,
     db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user),
 ):
-    """Get full disaster details by ID."""
     service = DisasterService(db)
     return await service.get_disaster(disaster_id)
 
 
-@router.post(
-    "/{disaster_id}/resolve",
-    summary="Mark disaster as resolved",
-    description="Mark an active disaster as resolved with resolution notes."
-)
+@router.post("/{disaster_id}/resolve", summary="Resolve disaster (Admin)")
 async def resolve_disaster(
     disaster_id: str,
     data: ResolveDisasterRequest,
     db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_team_member),
 ):
-    """Mark disaster as resolved."""
     service = DisasterService(db)
-    return await service.resolve_disaster(
-        disaster_id=disaster_id,
-        resolution_notes=data.resolution_notes,
-    )
+    return await service.resolve_disaster(disaster_id=disaster_id, resolution_notes=data.resolution_notes)
 
 
-@router.post(
-    "/{disaster_id}/escalate",
-    summary="Escalate disaster priority",
-    description="Update severity level of an active disaster."
-)
+@router.post("/{disaster_id}/escalate", summary="Escalate priority (Admin)")
 async def escalate_disaster(
     disaster_id: str,
     data: EscalateDisasterRequest,
     db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_team_member),
 ):
-    """Escalate disaster severity."""
     service = DisasterService(db)
     return await service.escalate_disaster(
-        disaster_id=disaster_id,
-        new_severity=data.new_severity,
-        reason=data.reason,
+        disaster_id=disaster_id, new_severity=data.new_severity, reason=data.reason,
     )
 
 
-@router.get(
-    "/{disaster_id}/photos",
-    summary="Get disaster photos",
-    description="Get all photos from reports linked to this disaster."
-)
+@router.get("/{disaster_id}/photos", summary="Get disaster photos")
 async def get_disaster_photos(
     disaster_id: str,
     db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user),
 ):
-    """Get photos for a disaster from linked reports."""
     service = DisasterService(db)
     photos = await service.get_disaster_photos(disaster_id)
     return {"photos": photos, "count": len(photos)}
 
 
-@router.get(
-    "/{disaster_id}/deployments",
-    summary="Get disaster deployments",
-    description="Get all units deployed to this disaster with status summary."
-)
+@router.get("/{disaster_id}/deployments", summary="Get disaster deployments (Admin)")
 async def get_disaster_deployments(
     disaster_id: str,
     db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_team_member),
 ):
-    """Get deployment summary for a disaster."""
     service = DisasterService(db)
     return await service.get_disaster_deployments(disaster_id)
