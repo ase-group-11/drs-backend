@@ -151,7 +151,8 @@ Sections:
 
 import asyncio
 import uuid
-from datetime import datetime, UTC
+from datetime import datetime, timezone
+UTC = timezone.utc
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -429,11 +430,14 @@ def mock_db_repository():
 def mock_external_integration_service():
     """Async mock for the External Integration Service (TomTom facade)."""
     svc = AsyncMock()
-    svc.fetch_traffic_data = AsyncMock()
+    svc.fetch_traffic_data = AsyncMock(return_value={"segments": [], "mode": "mock"})
     svc.get_traffic_conditions = AsyncMock()
-    svc.get_directions = AsyncMock()
-    svc.recompute_multi_incident_detours = AsyncMock()
-    svc.recompute_with_overrides = AsyncMock()
+    svc.get_directions = AsyncMock(return_value={"routes": []})
+    svc.recompute_multi_incident_detours = AsyncMock(return_value={"routes": []})
+    svc.recompute_with_overrides = AsyncMock(return_value={"routes": []})
+    svc.health_check = AsyncMock(return_value={"mode": "mock", "circuit_breaker_state": "closed", "api_key_configured": False})
+    svc.is_mock = True
+    svc.mode = "mock"
     return svc
 
 
@@ -443,14 +447,26 @@ def mock_mapping_service():
     svc = AsyncMock()
     svc.highlight_alternative_routes = AsyncMock(return_value={"status": "displayed"})
     svc.clear_detours = AsyncMock(return_value={"status": "cleared"})
+    svc.send_updated_routes = AsyncMock(return_value={"status": "updated"})
     return svc
 
 
 @pytest.fixture
 def mock_notification_service():
-    """Async mock for the Notification Service (Socket.IO push)."""
+    """Async mock for the Notification Service (kept for backward compat)."""
     svc = AsyncMock()
     svc.send_traffic_alerts = AsyncMock(return_value={"status": "sent"})
     svc.send_updated_reroute_recommendation = AsyncMock(return_value={"status": "sent"})
     svc.send_all_clear = AsyncMock(return_value={"status": "sent"})
     return svc
+
+
+@pytest.fixture
+def mock_publisher():
+    """Async mock for the RabbitMQ ReroutePublisher."""
+    pub = AsyncMock()
+    pub.publish_reroute_triggered = AsyncMock(return_value=True)
+    pub.publish_route_updated = AsyncMock(return_value=True)
+    pub.publish_all_clear = AsyncMock(return_value=True)
+    pub.is_connected = True
+    return pub

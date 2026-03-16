@@ -19,11 +19,15 @@ from app.core.logging_config import setup_logging
 from app.api.v1 import user_auth
 from app.api.v1 import emergency_team_auth
 from app.api.v1 import live_map
-
+from app.api.v1 import scenario_engine
+from app.api.v1 import reroute
 from cache.redis_client import close_redis_connection
 from app.providers.map_provider import MapProvider
 from app.providers.traffic import TrafficProvider
 from app.api.v1.live_map import set_live_map_providers
+from app.socket.manager import sio
+from app.workers.reroute_publisher import get_publisher
+import socketio
 
 # Setup logging FIRST
 setup_logging()
@@ -51,14 +55,23 @@ async def lifespan(app: FastAPI):
     traffic_provider = TrafficProvider(api_key=settings.TRAFFIC_API_KEY)
     set_live_map_providers(map_provider, traffic_provider)
     logger.info("🗺️  Map and traffic providers initialized")
-    
+
+    # Connect RabbitMQ publisher
+    publisher = get_publisher()
+    await publisher.connect()
+    if publisher.is_connected:
+        logger.info("🐇 RabbitMQ publisher connected")
+    else:
+        logger.warning("⚠️  RabbitMQ publisher not connected — running in degraded mode (notifications disabled)")
+
     yield
-    
+
     # Shutdown
     logger.info("=" * 70)
     logger.info("Shutting down...")
     await close_redis_connection()
     await traffic_provider.close()
+    await publisher.close()
     logger.info("Cleanup complete")
     logger.info("=" * 70)
 
@@ -135,9 +148,21 @@ async def global_exception_handler(request: Request, exc: Exception):
 app.include_router(user_auth.router, prefix="/api/v1")
 app.include_router(emergency_team_auth.router, prefix="/api/v1")
 app.include_router(live_map.router, prefix="/api/v1")
+app.include_router(scenario_engine.router, prefix="/api/v1")
+app.include_router(reroute.router, prefix="/api/v1")
 
 
 
+
+# Serve demo page
+from fastapi.responses import FileResponse
+from pathlib import Path
+
+@app.get("/demo", include_in_schema=False)
+async def demo_page():
+    """Serve the reroute live demo page."""
+    demo_path = Path(__file__).parent.parent / "demo.html"
+    return FileResponse(str(demo_path))
 
 # Root endpoints
 @app.get(
@@ -188,12 +213,20 @@ async def health_check():
     }
 
 
+# ---------------------------------------------------------------------------
+# Mount Socket.IO as ASGI middleware
+# ---------------------------------------------------------------------------
+# Wrap FastAPI app with Socket.IO so both share the same port.
+# HTTP requests → FastAPI, WebSocket requests → Socket.IO
+socket_app = socketio.ASGIApp(sio, other_asgi_app=app)
+
+
 # Development server runner
 if __name__ == "__main__":
     import uvicorn
-    
+
     uvicorn.run(
-        "app.main:app",
+        "app.main:socket_app",  # Run socket_app, not app
         host="0.0.0.0",
         port=8000,
         reload=settings.DEBUG,

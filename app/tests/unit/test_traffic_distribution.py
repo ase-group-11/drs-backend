@@ -15,7 +15,7 @@ from app.services.traffic_distribution import (
     analyze_route_capacity,
     optimize_traffic_distribution,
     score_route,
-    ReroutePlan,
+    DistributionPlan as ReroutePlan,
 )
 
 

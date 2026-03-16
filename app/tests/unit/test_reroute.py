@@ -22,13 +22,13 @@ def reroute_service(
     mock_db_repository,
     mock_external_integration_service,
     mock_mapping_service,
-    mock_notification_service,
+    mock_publisher,
 ):
     return RerouteService(
         db=mock_db_repository,
         external=mock_external_integration_service,
         mapping=mock_mapping_service,
-        notifications=mock_notification_service,
+        publisher=mock_publisher,
     )
 
 
@@ -313,16 +313,14 @@ class TestOperatorOverride:
         mock_mapping_service.highlight_alternative_routes.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_notifies_users_after_override(
-        self, reroute_service, mock_notification_service,
-        mock_external_integration_service, sample_tomtom_routing_response
+    async def test_publishes_event_after_override(
+        self, reroute_service, mock_publisher,
+        mock_external_integration_service,
     ):
-        mock_external_integration_service.recompute_with_overrides.return_value = (
-            sample_tomtom_routing_response
-        )
+        mock_external_integration_service.recompute_with_overrides.return_value = {"routes": []}
         override = {"type": "open_lane", "segment_id": "seg-Y", "operator_id": "op-004"}
         await reroute_service.receive_override(override)
-        mock_notification_service.send_traffic_alerts.assert_called_once()
+        mock_publisher.publish_route_updated.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
