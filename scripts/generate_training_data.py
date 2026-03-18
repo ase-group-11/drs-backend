@@ -5,7 +5,7 @@ Usage:
     python scripts/generate_training_data.py
 
 Output:
-    data/synthetic.csv  — 10,000 rows, 24 feature columns + label
+    data/synthetic.csv  — 10,000 rows, 29 feature columns + label
 
 This script is standalone (no FastAPI imports). It constructs
 EvaluationContext objects, runs them through RulesEngineStrategy to get
@@ -109,6 +109,28 @@ def _build_context(rng: random.Random, row_id: int) -> EvaluationContext:
             "source": "synthetic",
         }
 
+    # [24] nearby_report_count — 0 most of the time, occasionally corroborated
+    nearby_report_count = 0
+    if rng.random() < 0.25:
+        nearby_report_count = rng.randint(1, 6)   # features.py caps at 5
+
+    # [25] historical_false_alarm_rate — area credibility, mostly low
+    false_alarm_rate = round(rng.betavariate(1.5, 8.0), 3)  # skewed toward 0
+
+    # [26] camera_count_nearby — surveillance coverage
+    camera_count = 0
+    if rng.random() < 0.60:
+        camera_count = rng.randint(0, 7)  # features.py caps at 5
+
+    # [27] photo_count — evidence quality, ~40% of reports have photos
+    photo_count = 0
+    if rng.random() < 0.40:
+        photo_count = rng.randint(1, 6)   # features.py caps at 5
+
+    # [28] description_length — 0–400 chars, realistic reporter effort distribution
+    description_length = int(rng.expovariate(1 / 120))  # mean ~120 chars
+    description_length = min(500, description_length)
+
     return EvaluationContext(
         report_id=f"syn-{row_id:06d}",
         disaster_type=disaster_type,
@@ -123,6 +145,11 @@ def _build_context(rng: random.Random, row_id: int) -> EvaluationContext:
         hour_of_day=rng.randint(0, 23),
         traffic_context=traffic_ctx,
         weather_context=weather_ctx,
+        nearby_report_count=nearby_report_count,
+        historical_context={"false_alarm_rate": false_alarm_rate},
+        surveillance_context={"camera_count": camera_count},
+        photo_count=photo_count,
+        description_length=description_length,
     )
 
 

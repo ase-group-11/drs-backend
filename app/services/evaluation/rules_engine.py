@@ -23,17 +23,17 @@ STRATEGY_ID = "rules_v1"
 # Service mapping by disaster type
 # ---------------------------------------------------------------------------
 _SERVICE_MAP: dict[str, List[str]] = {
-    DisasterType.FIRE.value:       ["fire_brigade", "ambulance", "police"],
-    DisasterType.FLOOD.value:      ["rescue", "police", "ambulance"],
-    DisasterType.EARTHQUAKE.value: ["rescue", "ambulance", "fire_brigade", "police"],
-    DisasterType.HURRICANE.value:  ["rescue", "police", "ambulance"],
-    DisasterType.TORNADO.value:    ["rescue", "ambulance", "police"],
-    DisasterType.TSUNAMI.value:    ["rescue", "police", "ambulance"],
-    DisasterType.DROUGHT.value:    ["ambulance"],
-    DisasterType.HEATWAVE.value:   ["ambulance", "police"],
-    DisasterType.COLDWAVE.value:   ["ambulance", "police"],
-    DisasterType.STORM.value:      ["rescue", "police", "ambulance"],
-    DisasterType.OTHER.value:      ["police", "ambulance"],
+    DisasterType.FIRE.value:       ["fire", "medical", "police"],
+    DisasterType.FLOOD.value:      ["medical", "police"],
+    DisasterType.EARTHQUAKE.value: ["medical", "fire", "police"],
+    DisasterType.HURRICANE.value:  ["medical", "police"],
+    DisasterType.TORNADO.value:    ["medical", "police"],
+    DisasterType.TSUNAMI.value:    ["medical", "police"],
+    DisasterType.DROUGHT.value:    ["medical"],
+    DisasterType.HEATWAVE.value:   ["medical", "police"],
+    DisasterType.COLDWAVE.value:   ["medical", "police"],
+    DisasterType.STORM.value:      ["medical", "police"],
+    DisasterType.OTHER.value:      ["police", "medical"],
 }
 
 # Base confidence by severity
@@ -96,11 +96,11 @@ class RulesEngineStrategy(BaseEvaluationStrategy):
         )
 
         # Augmentation rules (maintain order, prepend if missing)
-        if ctx.structural_damage and "fire_brigade" not in services:
-            services.insert(0, "fire_brigade")
+        if ctx.structural_damage and "fire" not in services:
+            services.insert(0, "fire")
 
-        if ctx.multiple_casualties and "rescue" not in services:
-            services.insert(0, "rescue")
+        if ctx.multiple_casualties and "medical" not in services:
+            services.insert(0, "medical")
 
         if ctx.road_blocked and "police" not in services:
             services.append("police")
@@ -123,10 +123,34 @@ class RulesEngineStrategy(BaseEvaluationStrategy):
         if ctx.people_affected > 50:
             score += 0.03  # cumulative with the >10 bonus
 
+        # Evidence quality boosts
+        if ctx.photo_count > 0:
+            score += 0.03
+        if ctx.description_length > 100:
+            score += 0.02
+
         # Traffic context boost
         traffic_congestion = self._get_congestion_level(ctx.traffic_context)
         if traffic_congestion in ("heavy", "severe"):
             score += 0.04
+
+        # Surveillance proximity boost — more cameras near the incident
+        # means the area is monitored and the report is harder to fabricate
+        camera_count = (ctx.surveillance_context or {}).get("camera_count", 0)
+        if camera_count >= 3:
+            score += 0.04
+        elif camera_count >= 1:
+            score += 0.02
+
+        # Historical outcomes adjustment
+        # High false alarm rate in this area → penalise; high verification rate → boost
+        hist = ctx.historical_context or {}
+        if hist.get("total", 0) >= 3:
+            false_alarm_rate = hist.get("false_alarm_rate", 0.0)
+            if false_alarm_rate >= 0.5:
+                score -= 0.05  # this area has a history of false alarms
+            elif false_alarm_rate <= 0.1:
+                score += 0.03  # this area has a strong verification history
 
         # Night-time penalty
         if ctx.hour_of_day >= 22 or ctx.hour_of_day < 6:
@@ -169,12 +193,22 @@ class RulesEngineStrategy(BaseEvaluationStrategy):
         ):
             return EvaluationFlag.FALSE_ALARM.name
 
-        # LIMITED_DATA: no enrichment at all and low confidence
-        if (
-            ctx.traffic_context is None
-            and ctx.weather_context is None
-            and confidence < 0.70
-        ):
+        # ESCALATED: severity is higher than anything seen in the window
+        if ctx.max_nearby_severity is not None:
+            max_nearby = DisasterSeverity(ctx.max_nearby_severity)
+            if _severity_gte(sev, DisasterSeverity.MEDIUM) and _SEVERITY_ORDER.index(sev) > _SEVERITY_ORDER.index(max_nearby):
+                return EvaluationFlag.ESCALATED.name
+
+        # CORROBORATED: 2+ independent reports confirm the same event
+        if ctx.nearby_report_count >= 2:
+            return EvaluationFlag.CORROBORATED.name
+
+        # DUPLICATE: a report of the same type exists nearby within the consolidation window
+        if ctx.nearby_report_count >= 1 and ctx.report_age_minutes < 15:
+            return EvaluationFlag.DUPLICATE.name
+
+        # LIMITED_DATA: either enrichment source unavailable
+        if ctx.traffic_context is None or ctx.weather_context is None:
             return EvaluationFlag.LIMITED_DATA.name
 
         # PENDING_REVIEW: high/critical but no supporting evidence

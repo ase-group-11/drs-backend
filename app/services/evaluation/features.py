@@ -4,27 +4,32 @@ Feature engineering for the XGBoost severity classifier.
 Single public API:
     build_feature_vector(context: EvaluationContext) -> list[float]
 
-Also exports FEATURE_NAMES: list[str] — 24 human-readable names in the
+Also exports FEATURE_NAMES: list[str] — 29 human-readable names in the
 same fixed order as the feature vector. Consumed by train_model.py and
 SHAP analysis.
 
-Feature vector layout (24 features, order is fixed — changing it
+Feature vector layout (29 features, order is fixed — changing it
 invalidates any trained artifact):
 
   [0..10]   disaster_type one-hot (11 types, alphabetical per plan)
-  [11]      severity_ordinal   LOW=1, MEDIUM=2, HIGH=3, CRITICAL=4
-  [12]      multiple_casualties  0/1
-  [13]      structural_damage    0/1
-  [14]      road_blocked         0/1
-  [15]      people_affected_log  log1p(people_affected)
-  [16]      hour_sin             sin(2π * hour / 24)
-  [17]      hour_cos             cos(2π * hour / 24)
+  [11]      severity_ordinal         LOW=1, MEDIUM=2, HIGH=3, CRITICAL=4
+  [12]      multiple_casualties      0/1
+  [13]      structural_damage        0/1
+  [14]      road_blocked             0/1
+  [15]      people_affected_log      log1p(people_affected)
+  [16]      hour_sin                 sin(2π * hour / 24)
+  [17]      hour_cos                 cos(2π * hour / 24)
   [18]      traffic_congestion_score
   [19]      temperature_c
   [20]      wind_speed_kmh
   [21]      weather_condition_score
   [22]      population_density_tier
-  [23]      reporter_credibility  (hardcoded 1.0)
+  [23]      reporter_credibility     (hardcoded 1.0)
+  [24]      nearby_report_count      capped at 5 — sliding window signal
+  [25]      historical_false_alarm_rate  0.0–1.0 — area credibility
+  [26]      camera_count_nearby      capped at 5 — surveillance signal
+  [27]      photo_count              capped at 5 — evidence quality
+  [28]      description_length_tier  0 (<20 chars), 1 (<100), 2 (<300), 3 (300+)
 """
 
 from __future__ import annotations
@@ -117,9 +122,14 @@ FEATURE_NAMES: List[str] = [
     "weather_condition_score",
     "population_density_tier",
     "reporter_credibility",
+    "nearby_report_count",
+    "historical_false_alarm_rate",
+    "camera_count_nearby",
+    "photo_count",
+    "description_length_tier",
 ]
 
-assert len(FEATURE_NAMES) == 24, "FEATURE_NAMES must have exactly 24 entries"
+assert len(FEATURE_NAMES) == 29, "FEATURE_NAMES must have exactly 29 entries"
 
 
 # ---------------------------------------------------------------------------
@@ -173,7 +183,33 @@ def build_feature_vector(context: EvaluationContext) -> List[float]:
     # [23] reporter_credibility
     vec.append(1.0)
 
-    assert len(vec) == 24, f"Feature vector has {len(vec)} elements, expected 24"
+    # [24] nearby_report_count — sliding window signal, capped at 5
+    vec.append(min(float(context.nearby_report_count or 0), 5.0))
+
+    # [25] historical_false_alarm_rate — area credibility signal
+    hist = context.historical_context or {}
+    vec.append(float(hist.get("false_alarm_rate", 0.0)))
+
+    # [26] camera_count_nearby — surveillance signal, capped at 5
+    surv = context.surveillance_context or {}
+    vec.append(min(float(surv.get("camera_count", 0)), 5.0))
+
+    # [27] photo_count — evidence quality, capped at 5
+    vec.append(min(float(context.photo_count or 0), 5.0))
+
+    # [28] description_length_tier
+    dl = context.description_length or 0
+    if dl >= 300:
+        tier = 3.0
+    elif dl >= 100:
+        tier = 2.0
+    elif dl >= 20:
+        tier = 1.0
+    else:
+        tier = 0.0
+    vec.append(tier)
+
+    assert len(vec) == 29, f"Feature vector has {len(vec)} elements, expected 29"
     return vec
 
 
@@ -230,3 +266,6 @@ def _population_density_tier(lat: float | None, lon: float | None) -> float:
         return 1.0
 
     return 0.0
+
+
+

@@ -18,12 +18,12 @@ _VALID_EVAL_RESPONSE = {
     "disaster_id": VALID_REPORT_ID,
     "severity": "HIGH",
     "confidence": 0.82,
-    "recommended_services": ["fire_brigade", "ambulance", "police"],
+    "recommended_services": ["fire", "medical", "police"],
     "trigger_deploy": True,
     "trigger_reroute": True,
     "trigger_evacuation": False,
     "flag": "NORMAL",
-    "strategy_used": "xgboost_v1",
+    "strategy_used": "rules_v1",
     "evaluated_at": datetime.now(timezone.utc),
 }
 
@@ -37,7 +37,7 @@ async def async_client():
     )
     import app.api.v1.disaster_evaluation as eval_module
 
-    set_evaluation_providers(MagicMock())
+    set_evaluation_providers(MagicMock(), MagicMock())
 
     mock_service = AsyncMock()
     mock_service.evaluate = AsyncMock(return_value=_VALID_EVAL_RESPONSE)
@@ -47,7 +47,9 @@ async def async_client():
         yield client
 
     app.dependency_overrides.clear()
+    eval_module._map_provider = None
     eval_module._traffic_provider = None
+    eval_module._strategy = None
 
 
 @pytest_asyncio.fixture
@@ -60,7 +62,7 @@ async def async_client_404():
     import app.api.v1.disaster_evaluation as eval_module
     from fastapi import HTTPException
 
-    set_evaluation_providers(MagicMock())
+    set_evaluation_providers(MagicMock(), MagicMock())
 
     not_found_service = AsyncMock()
     not_found_service.evaluate = AsyncMock(
@@ -72,7 +74,9 @@ async def async_client_404():
         yield client
 
     app.dependency_overrides.clear()
+    eval_module._map_provider = None
     eval_module._traffic_provider = None
+    eval_module._strategy = None
 
 
 @pytest.mark.asyncio

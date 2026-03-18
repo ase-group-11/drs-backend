@@ -14,11 +14,14 @@ import asyncio
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import aiohttp
 
-from app.providers.traffic import TrafficProvider
+from app.providers.infrastructure import InfrastructureProvider
+from app.providers.population_density import BasePopulationProvider
+from app.providers.surveillance import SurveillanceProvider
+from app.services.live_map_service import LiveMapService
 
 logger = logging.getLogger(__name__)
 
@@ -152,43 +155,111 @@ class EnrichmentPipeline:
 
     def __init__(
         self,
-        traffic_provider: TrafficProvider,
+        live_map_service: LiveMapService,
         weather_provider: BaseWeatherProvider,
+        surveillance_provider: SurveillanceProvider,
+        population_provider: BasePopulationProvider,
+        infrastructure_provider: Optional[InfrastructureProvider] = None,
     ) -> None:
-        self._traffic = traffic_provider
+        self._live_map = live_map_service
         self._weather = weather_provider
+        self._surveillance = surveillance_provider
+        self._population = population_provider
+        self._infrastructure = infrastructure_provider or InfrastructureProvider()
 
     async def enrich(
         self, lat: float, lon: float
-    ) -> Tuple[Optional[dict], Optional[dict]]:
+    ) -> Tuple[Optional[dict], Optional[dict], Optional[dict], Optional[dict], Optional[dict]]:
         """
-        Fetch traffic and weather data for the given coordinates.
+        Fetch traffic, weather, surveillance, population, and infrastructure
+        data in parallel.
+
+        Any failure returns None for that source — evaluation continues
+        with reduced information rather than failing entirely.
 
         Returns:
-            (traffic_context, weather_context) — either may be None on failure.
+            (traffic_context, weather_context, surveillance_context,
+             population_context, infrastructure_context)
+            — any element may be None on failure.
         """
-        traffic_task = self._fetch_traffic(lat, lon)
-        weather_task = self._fetch_weather(lat, lon)
-
-        traffic_result, weather_result = await asyncio.gather(
-            traffic_task, weather_task, return_exceptions=True
+        (
+            traffic_result,
+            weather_result,
+            surveillance_result,
+            population_result,
+            infrastructure_result,
+        ) = await asyncio.gather(
+            self._fetch_traffic(lat, lon),
+            self._fetch_weather(lat, lon),
+            self._fetch_surveillance(lat, lon),
+            self._fetch_population(lat, lon),
+            self._fetch_infrastructure(lat, lon),
+            return_exceptions=True,
         )
 
         traffic_ctx = traffic_result if not isinstance(traffic_result, Exception) else None
         weather_ctx = weather_result if not isinstance(weather_result, Exception) else None
+        surveillance_ctx = surveillance_result if not isinstance(surveillance_result, Exception) else None
+        population_ctx = population_result if not isinstance(population_result, Exception) else None
+        infrastructure_ctx = infrastructure_result if not isinstance(infrastructure_result, Exception) else None
 
         if isinstance(traffic_result, Exception):
             logger.warning("Traffic enrichment failed: %s", traffic_result)
         if isinstance(weather_result, Exception):
             logger.warning("Weather enrichment failed: %s", weather_result)
+        if isinstance(surveillance_result, Exception):
+            logger.warning("Surveillance enrichment failed: %s", surveillance_result)
+        if isinstance(population_result, Exception):
+            logger.warning("Population enrichment failed: %s", population_result)
+        if isinstance(infrastructure_result, Exception):
+            logger.warning("Infrastructure enrichment failed: %s", infrastructure_result)
 
-        return traffic_ctx, weather_ctx
+        return traffic_ctx, weather_ctx, surveillance_ctx, population_ctx, infrastructure_ctx
 
-    async def _fetch_traffic(self, lat: float, lon: float) -> dict:
-        """Fetch traffic flow data for a single point."""
-        session = await self._traffic.get_session()
-        segments = await self._traffic.fetch_flow_at_point(session, lat, lon)
-        return {"flow": segments, "source": "tomtom"}
+    async def _fetch_traffic(self, lat: float, lon: float) -> Optional[dict]:
+        """Fetch traffic flow data for a point via LiveMapService (zoom=12 bounds)."""
+        delta_lat = 180 / (2 ** 12)  # ~0.044 degrees
+        delta_lon = 360 / (2 ** 12)  # ~0.088 degrees
+        bounds = f"{lat - delta_lat},{lon - delta_lon},{lat + delta_lat},{lon + delta_lon}"
+        return await self._live_map.get_traffic(bounds=bounds)
+
+    def identify_affected_roads(
+        self,
+        traffic_context: Optional[dict],
+        lat: float,
+        lon: float,
+    ) -> List[str]:
+        """
+        Extract affected road names from already-fetched traffic context.
+
+        No extra HTTP call — uses the traffic data gathered during enrichment.
+        Falls back to a location descriptor when traffic data is unavailable.
+
+        Args:
+            traffic_context: Dict from _fetch_traffic (may be None)
+            lat: Disaster latitude (used in fallback descriptor)
+            lon: Disaster longitude (used in fallback descriptor)
+
+        Returns:
+            Deduplicated list of affected road name strings (non-empty).
+        """
+        if not traffic_context:
+            return [f"area near ({lat:.4f}, {lon:.4f})"]
+
+        flow = traffic_context.get("flow", [])
+        seen: set[str] = set()
+        roads: List[str] = []
+        for segment in flow:
+            road_name = (
+                segment.get("road_name")
+                or segment.get("street")
+                or segment.get("id")
+            )
+            if road_name and str(road_name) not in seen:
+                seen.add(str(road_name))
+                roads.append(str(road_name))
+
+        return roads if roads else [f"area near ({lat:.4f}, {lon:.4f})"]
 
     async def _fetch_weather(self, lat: float, lon: float) -> dict:
         """Fetch weather data and serialise to a plain dict."""
@@ -199,3 +270,15 @@ class EnrichmentPipeline:
             "wind_speed_kmh": ctx.wind_speed_kmh,
             "source": ctx.source,
         }
+
+    async def _fetch_surveillance(self, lat: float, lon: float) -> dict:
+        """Fetch nearby surveillance camera data from OpenStreetMap Overpass API."""
+        return await self._surveillance.get_cameras_near(lat, lon)
+
+    async def _fetch_population(self, lat: float, lon: float) -> dict:
+        """Fetch population data for the nearest populated place via GeoNames."""
+        return await self._population.get_population_near(lat, lon)
+
+    async def _fetch_infrastructure(self, lat: float, lon: float) -> dict:
+        """Fetch nearby critical facilities (hospitals, fire stations, schools, police) from OSM."""
+        return await self._infrastructure.get_facilities_near(lat, lon)

@@ -56,13 +56,27 @@ def make_eval_result() -> EvaluationResult:
 def mock_report_repo():
     repo = AsyncMock()
     repo.get_report_by_id = AsyncMock(return_value=make_report())
+    repo.get_recent_reports_near = AsyncMock(return_value=[])
     return repo
 
 
 @pytest.fixture
-def mock_eval_repo():
+def mock_disaster_repo():
     repo = AsyncMock()
-    repo.create_evaluation = AsyncMock(return_value=MagicMock())
+    created = MagicMock()
+    created.id = "disaster-uuid-9999"
+    repo.create_disaster = AsyncMock(return_value=created)
+    repo.get_active_disaster_near = AsyncMock(return_value=None)
+    repo.get_reports_by_disaster_id = AsyncMock(return_value=[])
+    repo.update_evaluation_metadata = AsyncMock()
+    repo.get_historical_outcomes = AsyncMock(return_value={
+        "total": 5,
+        "verified_count": 4,
+        "false_alarm_count": 1,
+        "false_alarm_rate": 0.2,
+        "avg_confidence": 0.81,
+        "source": "historical_db",
+    })
     return repo
 
 
@@ -77,31 +91,46 @@ def mock_strategy():
 def mock_enrichment():
     enrichment = AsyncMock()
     enrichment.enrich = AsyncMock(return_value=(
-        {"flow": [{"congestion_level": "moderate"}], "source": "tomtom"},
-        {"temperature_c": 15.0, "condition": "clear", "source": "mock"},
+        {"flow": [{"congestion_level": "moderate"}], "source": "livemap"},
+        {"temperature_c": 15.0, "condition": "clear", "source": "openweathermap"},
+        {"camera_count": 2, "cameras": [], "radius_m": 500, "source": "openstreetmap"},
+        {"nearest_place": "Dublin", "population": 553165, "distance_km": 1.2, "source": "geonames"},
+        {"facilities": [{"name": "St James's Hospital", "amenity": "hospital"}], "count": 1, "radius_m": 1000, "source": "openstreetmap"},
     ))
     return enrichment
 
 
 @pytest.fixture
-def service(mock_report_repo, mock_eval_repo, mock_strategy, mock_enrichment):
+def mock_user_repo():
+    repo = AsyncMock()
+    user = MagicMock()
+    user.phone_number = "+353871234567"
+    repo.get_by_id = AsyncMock(return_value=user)
+    return repo
+
+
+@pytest.fixture
+def service(mock_report_repo, mock_disaster_repo, mock_strategy, mock_enrichment, mock_user_repo):
     return DisasterEvaluationService(
         report_repo=mock_report_repo,
-        evaluation_repo=mock_eval_repo,
+        disaster_repo=mock_disaster_repo,
         strategy=mock_strategy,
         enrichment=mock_enrichment,
+        user_repo=mock_user_repo,
     )
 
 
 @pytest.mark.asyncio
-async def test_raises_404_when_report_not_found(mock_eval_repo, mock_strategy, mock_enrichment):
+async def test_raises_404_when_report_not_found(mock_disaster_repo, mock_strategy, mock_enrichment, mock_user_repo):
     repo = AsyncMock()
     repo.get_report_by_id = AsyncMock(return_value=None)
+    repo.get_recent_reports_near = AsyncMock(return_value=[])
     svc = DisasterEvaluationService(
         report_repo=repo,
-        evaluation_repo=mock_eval_repo,
+        disaster_repo=mock_disaster_repo,
         strategy=mock_strategy,
         enrichment=mock_enrichment,
+        user_repo=mock_user_repo,
     )
     with pytest.raises(HTTPException) as exc_info:
         await svc.evaluate("nonexistent-id")
@@ -109,6 +138,6 @@ async def test_raises_404_when_report_not_found(mock_eval_repo, mock_strategy, m
 
 
 @pytest.mark.asyncio
-async def test_evaluation_persisted_to_repo(service, mock_eval_repo):
+async def test_evaluation_creates_disaster_record(service, mock_disaster_repo):
     await service.evaluate("report-uuid-1234")
-    mock_eval_repo.create_evaluation.assert_called_once()
+    mock_disaster_repo.create_disaster.assert_called_once()
