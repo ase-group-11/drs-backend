@@ -8,7 +8,9 @@ UPDATED:
 - 1 year access tokens
 """
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Depends
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.db.session import get_db
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
@@ -206,3 +208,5 @@ if __name__ == "__main__":
         reload=settings.DEBUG,
         log_level="info" if not settings.DEBUG else "debug"
     )
+    
+    
