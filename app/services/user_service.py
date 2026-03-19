@@ -255,29 +255,29 @@ class UserService:
         
         Enhanced with detailed logging.
         """
-        logger.info(f"🔐 Starting login verification for {phone_number}")
+        logger.info(f"Starting login verification for {phone_number}")
         
         try:
             # Verify OTP
-            logger.debug("🔍 Verifying OTP...")
+            logger.debug("Verifying OTP...")
             is_valid = await verify_otp(phone_number, otp)
             
             if not is_valid:
-                logger.warning(f"❌ Invalid or expired OTP")
+                logger.warning(f"Invalid or expired OTP")
                 raise ValueError("Invalid or expired OTP")
-            logger.debug("✅ OTP verified")
+            logger.debug("OTP verified")
             
             # Get active user
-            logger.debug("🔍 Getting user...")
+            logger.debug("Getting user...")
             user = await self.user_repo.get_active_user_by_phone(phone_number)
             
             if not user:
-                logger.error(f"❌ User not found: {phone_number}")
+                logger.error(f"User not found: {phone_number}")
                 raise ValueError("User not found or account is not active")
-            logger.debug(f"✅ User found: {user.full_name}")
+            logger.debug(f"User found: {user.full_name}")
             
             # Generate JWT tokens
-            logger.debug("🔑 Generating tokens...")
+            logger.debug("Generating tokens...")
             access_token = create_access_token(
                 user_id=user.id,
                 user_type="user"
