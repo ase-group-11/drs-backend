@@ -176,7 +176,8 @@ class UserService:
                 user_id=user.id,
                 user_type="user"
             )
-            refresh_token = create_refresh_token(user_id=user.id)
+            # refresh_token = create_refresh_token(user_id=user.id)
+            refresh_token = create_refresh_token(user_id=user.id, user_type="user")
             logger.debug("✅ Tokens generated")
             
             logger.info(f"✅ Registration completed for {phone_number}")
@@ -282,7 +283,8 @@ class UserService:
                 user_id=user.id,
                 user_type="user"
             )
-            refresh_token = create_refresh_token(user_id=user.id)
+            # refresh_token = create_refresh_token(user_id=user.id)
+            refresh_token = create_refresh_token(user_id=user.id, user_type="user")
             logger.debug("✅ Tokens generated")
             
             logger.info(f"✅ Login completed for {phone_number}")
