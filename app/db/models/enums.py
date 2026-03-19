@@ -56,9 +56,9 @@ class EmergencyTeamRole(str, enum.Enum):
     - MANAGER: Can manage team members and view all data
     - STAFF: Standard emergency responder access
     """
-    ADMIN = "admin"
-    MANAGER = "manager"
-    STAFF = "staff"
+    ADMIN = "ADMIN"
+    MANAGER = "MANAGER"
+    STAFF = "STAFF"
 
 
 class Department(str, enum.Enum):
@@ -71,10 +71,10 @@ class Department(str, enum.Enum):
     - FIRE: Fire department
     - IT: Technical support and system administration
     """
-    MEDICAL = "medical"
-    POLICE = "police"
-    FIRE = "fire"
-    IT = "it"
+    MEDICAL = "MEDICAL"
+    POLICE = "POLICE"
+    FIRE = "FIRE"
+    IT = "IT"
 
 
 class OTPStatus(str, enum.Enum):
