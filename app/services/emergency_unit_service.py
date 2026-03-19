@@ -650,6 +650,7 @@ class EmergencyUnitService:
             "department": str(row["department"]),
             "unit_status": str(row["unit_status"]),
             "station_name": row["station_name"],
+            "station_address": row["station_address"],
             "crew_count": row["crew_count"],
             "capacity": row["capacity"],
             "commander_name": row["commander_name"],

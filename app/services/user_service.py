@@ -80,7 +80,7 @@ class UserService:
                 # )
                 logger.info("✅ Registration data cached successfully")
             except Exception as cache_error:
-                logger.error(f"❌ Failed to cache registration data: {cache_error}")
+                logger.error(f"Failed to cache registration data: {cache_error}")
                 raise Exception(f"Cache error: {str(cache_error)}")
             
             # Step 4: Generate and send OTP
@@ -306,7 +306,7 @@ class UserService:
         except ValueError as e:
             raise
         except Exception as e:
-            logger.exception(f"❌ Login verification failed")
+            logger.exception(f"Login verification failed")
             raise
     
     async def get_user_by_id(self, user_id: str) -> Optional[User]:
