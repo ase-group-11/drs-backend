@@ -1,4 +1,3 @@
-
 # File: app/repositories/disaster_repository.py
 """
 Disaster Repository - Database access layer for VERIFIED disaster data.
@@ -13,7 +12,7 @@ import logging
 import json
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
-from sqlalchemy import select, and_, or_, func
+from sqlalchemy import select, and_, or_, func, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from geoalchemy2.functions import (
     ST_MakeEnvelope, ST_Within, ST_Distance, 
@@ -80,87 +79,66 @@ class DisasterRepository:
             )
         """
         logger.info(f"Querying active disasters for bounds: {bounds}")
-        
+
         try:
-            # Parse bounds
             south, west, north, east = map(float, bounds.split(','))
 
-            # Calculate center and radius for geography-based query
+            conditions = [
+                "d.disaster_status = CAST('ACTIVE' AS disaster_status)",
+                "d.deleted_at IS NULL",
+                "ST_Within(d.location::geometry, ST_MakeEnvelope(:west, :south, :east, :north, 4326))",
+            ]
+            params: dict = {
+                "south": south, "west": west, "north": north, "east": east,
+            }
 
-            center_lat = (north + south) / 2
-            center_lon = (east + west) / 2
-            
-            # Approximate radius in meters (very rough estimate)
-            lat_diff = north - south
-            lon_diff = east - west
-            radius_meters = max(lat_diff, lon_diff) * 111000  # 1 degree ≈ 111km
-                
-            # Build query with PostGIS spatial filter
-            query = select(Disaster).where(
-                and_(
-                    Disaster.disaster_status == DisasterStatus.ACTIVE,
-                    ST_Within(
-                        func.ST_GeomFromText(func.ST_AsText(Disaster.location), 4326), ST_MakeEnvelope(west, south, east, north, 4326)
-            
-                    )
-                )
-            )
-            
-            # Apply optional filters
             if disaster_types:
-                type_enums = []
-                for dtype in disaster_types:
-                    try:
-                        type_enums.append(DisasterType(dtype.upper()))
-                    except ValueError:
-                        logger.warning(f"Invalid disaster type: {dtype}")
-                
-                if type_enums:
-                    query = query.where(Disaster.type.in_(type_enums))
-            
-            if min_severity:
-                # Severity ordering: low < medium < high < critical
-                severity_order = {
-                    DisasterSeverity.LOW: 0,
-                    DisasterSeverity.MEDIUM: 1,
-                    DisasterSeverity.HIGH: 2,
-                    DisasterSeverity.CRITICAL: 3
-                }
-                
-                try:
-                    min_severity_enum = DisasterSeverity(min_severity.upper())
-                    min_value = severity_order.get(min_severity_enum, 0)
-                    
-                    severity_filters = []
-                    for sev, value in severity_order.items():
-                        if value >= min_value:
-                            severity_filters.append(Disaster.severity == sev)
-                    
-                    if severity_filters:
-                        query = query.where(or_(*severity_filters))
-                except ValueError:
-                    logger.warning(f"Invalid severity level: {min_severity}")
-            
+                valid = [t.upper() for t in disaster_types]
+                conditions.append("d.type::text = ANY(:disaster_types)")
+                params["disaster_types"] = valid
+
+            severity_rank = {"LOW": 0, "MEDIUM": 1, "HIGH": 2, "CRITICAL": 3}
+            if min_severity and min_severity.upper() in severity_rank:
+                min_rank = severity_rank[min_severity.upper()]
+                allowed = [s for s, r in severity_rank.items() if r >= min_rank]
+                conditions.append("d.severity::text = ANY(:severities)")
+                params["severities"] = allowed
+
             if max_age_hours:
-                cutoff_time = datetime.utcnow() - timedelta(hours=max_age_hours)
-                query = query.where(Disaster.created_at >= cutoff_time)
-            
-            # Order by severity (critical first) then creation time (newest first)
-            query = query.order_by(
-                Disaster.severity.desc(),
-                Disaster.created_at.desc()
-            )
-            
-            # Execute query
-            result = await self.db.execute(query)
-            disasters = result.scalars().all()
-            
-            # Convert to dictionaries
-            disaster_list = []
-            for disaster in disasters:
-                disaster_dict = await self._disaster_to_dict(disaster)
-                disaster_list.append(disaster_dict)
-            
+                conditions.append("d.created_at >= NOW() - INTERVAL ':hours hours'")
+                params["hours"] = max_age_hours
+
+            where_clause = " AND ".join(conditions)
+
+            sql = text(f"""
+                SELECT
+                    d.id, d.tracking_id, d.type, d.severity, d.disaster_status,
+                    d.location_address, d.affected_area, d.description,
+                    d.people_affected, d.multiple_casualties,
+                    d.structural_damage, d.road_blocked,
+                    d.assigned_to_id, d.assigned_department, d.assigned_unit_id,
+                    d.response_time, d.resolved_time, d.resolution_notes,
+                    d.created_by_id, d.disaster_metadata,
+                    d.created_at, d.updated_at,
+                    ST_Y(d.location::geometry) AS lat,
+                    ST_X(d.location::geometry) AS lon
+                FROM disasters d
+                WHERE {where_clause}
+                ORDER BY
+                    CASE d.severity
+                        WHEN CAST('CRITICAL' AS disaster_severity) THEN 1
+                        WHEN CAST('HIGH' AS disaster_severity) THEN 2
+                        WHEN CAST('MEDIUM' AS disaster_severity) THEN 3
+                        ELSE 4
+                    END,
+                    d.created_at DESC
+            """)
+
+            result = await self.db.execute(sql, params)
+            rows = result.mappings().all()
+
+            disaster_list = [self._row_to_dict(row) for row in rows]
+
             logger.info(f"Found {len(disaster_list)} active disasters in bounds")
             return disaster_list
             
@@ -324,6 +302,40 @@ class DisasterRepository:
             logger.error(f"Error updating disaster: {e}")
             raise
     
+    def _row_to_dict(self, row) -> Dict[str, Any]:
+        """Convert a raw SQL row (from text() queries) to a dictionary."""
+        return {
+            "id": str(row["id"]),
+            "tracking_id": row["tracking_id"],
+            "type": str(row["type"]),
+            "severity": str(row["severity"]),
+            "status": str(row["disaster_status"]),
+            "location": {
+                "lat": float(row["lat"]) if row["lat"] else None,
+                "lon": float(row["lon"]) if row["lon"] else None,
+            },
+            "location_address": row["location_address"],
+            "affected_area": row["affected_area"],
+            "description": row["description"],
+            "people_affected": row["people_affected"],
+            "multiple_casualties": row["multiple_casualties"],
+            "structural_damage": row["structural_damage"],
+            "road_blocked": row["road_blocked"],
+            "assigned_to_id": str(row["assigned_to_id"]) if row["assigned_to_id"] else None,
+            "assigned_department": str(row["assigned_department"]) if row["assigned_department"] else None,
+            "assigned_unit_id": str(row["assigned_unit_id"]) if row["assigned_unit_id"] else None,
+            "response_time": row["response_time"].isoformat() if row["response_time"] else None,
+            "resolved_time": row["resolved_time"].isoformat() if row["resolved_time"] else None,
+            "resolution_notes": row["resolution_notes"],
+            "created_by_id": str(row["created_by_id"]) if row["created_by_id"] else None,
+            "disaster_metadata": row["disaster_metadata"],
+            "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+            "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
+            "report_count": 0,
+            "report_status": "verified",
+            "is_user_reported": False,
+        }
+
     async def _disaster_to_dict(self, disaster: Disaster) -> Dict[str, Any]:
         """
         Convert a Disaster ORM object to a dictionary.
