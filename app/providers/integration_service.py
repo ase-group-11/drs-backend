@@ -17,6 +17,8 @@ Architecture note (Section 3.1):
   calls TrafficProvider or the Routing API directly.
 """
 
+import json
+import hashlib
 import logging
 import asyncio
 import aiohttp
@@ -152,6 +154,10 @@ class IntegrationService:
 
     ROUTING_BASE_URL = "https://api.tomtom.com/routing/1/calculateRoute"
 
+    # Cache TTLs (seconds)
+    TRAFFIC_CACHE_TTL = 30   # traffic flow changes slowly — serve from cache
+    ROUTING_CACHE_TTL = 60   # routes rarely change within a minute
+
     def __init__(
         self,
         api_key: Optional[str] = None,
@@ -167,6 +173,7 @@ class IntegrationService:
         self.api_key = api_key or settings.TRAFFIC_API_KEY
         self.timeout = timeout
         self._session: Optional[aiohttp.ClientSession] = None
+        self._redis = None  # Lazily initialised on first cache call
 
         # Auto-switch to mock if no API key or testing environment
         if not self.api_key or settings.ENVIRONMENT == "testing":
@@ -181,6 +188,66 @@ class IntegrationService:
             api_key=self.api_key,
             timeout=timeout,
         )
+
+    # -------------------------------------------------------------------------
+    # Redis cache helpers — silent fail, never block pipeline
+    # -------------------------------------------------------------------------
+
+    async def _get_redis(self):
+        """Lazily initialise Redis. Returns None if unavailable."""
+        if self._redis is not None:
+            return self._redis
+        try:
+            import aioredis
+            self._redis = await aioredis.from_url(
+                settings.REDIS_URL,
+                encoding="utf-8",
+                decode_responses=True,
+                socket_connect_timeout=2,
+            )
+            return self._redis
+        except Exception as e:
+            logger.warning(f"IntegrationService: Redis unavailable — caching disabled ({e})")
+            return None
+
+    async def _cache_get(self, key: str) -> Optional[Dict]:
+        """Cache read. Returns None on miss or error."""
+        try:
+            redis = await self._get_redis()
+            if redis is None:
+                return None
+            raw = await redis.get(key)
+            if raw:
+                logger.debug(f"Cache HIT: {key}")
+                return json.loads(raw)
+        except Exception as e:
+            logger.warning(f"Cache GET failed for {key}: {e}")
+        return None
+
+    async def _cache_set(self, key: str, value: Dict, ttl: int) -> None:
+        """Cache write. Silently ignores errors."""
+        try:
+            redis = await self._get_redis()
+            if redis is None:
+                return
+            await redis.setex(key, ttl, json.dumps(value))
+            logger.debug(f"Cache SET: {key} (TTL={ttl}s)")
+        except Exception as e:
+            logger.warning(f"Cache SET failed for {key}: {e}")
+
+    @staticmethod
+    def _routing_cache_key(
+        origin: Dict[str, float],
+        destination: Dict[str, float],
+        avoid: List,
+    ) -> str:
+        """Stable cache key for a routing request."""
+        payload = (
+            f"{origin['lat']:.4f},{origin['lng']:.4f}:"
+            f"{destination['lat']:.4f},{destination['lng']:.4f}:"
+            f"{len(avoid)}"
+        )
+        return f"integration:routing:{hashlib.md5(payload.encode()).hexdigest()[:12]}"
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -236,8 +303,16 @@ class IntegrationService:
                 "mode": "mock",
             }
 
+        # Cache-first — monitoring loop serves from cache, no TomTom wait
+        cache_key = f"integration:traffic:{region_id}"
+        cached = await self._cache_get(cache_key)
+        if cached:
+            return cached
+
         try:
-            return await self._fetch_traffic_with_breaker(region_id)
+            result = await self._fetch_traffic_with_breaker(region_id)
+            await self._cache_set(cache_key, result, self.TRAFFIC_CACHE_TTL)
+            return result
         except pybreaker.CircuitBreakerError:
             logger.warning("fetch_traffic_data: circuit breaker open — degraded mode")
             return self._degraded_traffic_response()
@@ -310,10 +385,18 @@ class IntegrationService:
             logger.debug("get_directions: mock mode")
             return {"routes": parse_routing_response(MOCK_ROUTING_RESPONSE)}
 
+        # Cache-first — routes rarely change within 60s
+        cache_key = self._routing_cache_key(origin, destination, avoid or [])
+        cached = await self._cache_get(cache_key)
+        if cached:
+            return cached
+
         try:
-            return await self._get_directions_with_breaker(
+            result = await self._get_directions_with_breaker(
                 origin, destination, avoid or [], alternatives, max_alternatives
             )
+            await self._cache_set(cache_key, result, self.ROUTING_CACHE_TTL)
+            return result
         except pybreaker.CircuitBreakerError:
             logger.warning("get_directions: circuit breaker open — returning mock routes")
             return {"routes": parse_routing_response(MOCK_ROUTING_RESPONSE), "mode": "degraded"}

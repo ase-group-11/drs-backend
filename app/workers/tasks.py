@@ -157,6 +157,55 @@ async def _check_region(
 
 
 @celery_app.task(
+    name="app.workers.tasks.warm_traffic_cache",
+    bind=True,
+)
+def warm_traffic_cache(self):
+    """
+    Pre-warm Redis traffic cache for all active regions every 25s.
+
+    Runs slightly faster than TRAFFIC_CACHE_TTL (30s) so the monitoring
+    loop always finds warm cache — zero cold starts, no TomTom wait.
+    """
+    if not _active_reroute_regions:
+        return {"status": "idle", "regions_warmed": 0}
+
+    regions = list({
+        data["region_id"]
+        for data in _active_reroute_regions.values()
+    })
+
+    try:
+        asyncio.run(_warm_regions(regions))
+    except Exception as e:
+        logger.warning(f"warm_traffic_cache: failed — {e}")
+
+    logger.info(f"warm_traffic_cache: warmed {len(regions)} regions")
+    return {"status": "ok", "regions_warmed": len(regions)}
+
+
+async def _warm_regions(region_ids: list) -> None:
+    """Fetch traffic for all active regions in parallel to prime cache."""
+    from app.providers.integration_service import get_integration_service
+    external = get_integration_service()
+
+    # Bypass cache check — go straight to TomTom to refresh
+    tasks = [
+        external._fetch_traffic_with_breaker(region_id)
+        for region_id in region_ids
+    ]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    for region_id, result in zip(region_ids, results):
+        if isinstance(result, Exception):
+            logger.warning(f"_warm_regions: failed for {region_id} — {result}")
+            continue
+        cache_key = f"integration:traffic:{region_id}"
+        await external._cache_set(cache_key, result, external.TRAFFIC_CACHE_TTL)
+        logger.debug(f"_warm_regions: warmed {region_id}")
+
+
+@celery_app.task(
     name="app.workers.tasks.recalculate_routes",
     bind=True,
     max_retries=2,

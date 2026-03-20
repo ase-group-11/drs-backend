@@ -33,11 +33,19 @@ celery_app.conf.update(
     task_reject_on_worker_lost=True,
     task_track_started=True,
 
-    # Beat schedule — monitoring loop runs every 30 seconds (Phase 4a)
+    # Beat schedule
     beat_schedule={
+        # Congestion monitoring every 30s (Phase 4a)
         "monitor-traffic-conditions": {
             "task": "app.workers.tasks.monitor_traffic_conditions",
-            "schedule": 30.0,  # seconds — matches Section 6.4 polling guidance
+            "schedule": 30.0,
+            "args": [],
+        },
+        # Cache pre-warmer every 25s — keeps traffic cache fresh before
+        # the 30s TTL expires so monitoring loop never waits for TomTom
+        "warm-traffic-cache": {
+            "task": "app.workers.tasks.warm_traffic_cache",
+            "schedule": 25.0,
             "args": [],
         },
     },

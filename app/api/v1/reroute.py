@@ -15,7 +15,7 @@ import logging
 from typing import Dict, Any, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
@@ -60,9 +60,17 @@ class RoadSegmentInput(BaseModel):
     start_lng: float
     end_lat: float
     end_lng: float
-    status: Optional[RoadSegmentStatus] = RoadSegmentStatus.CLOSED
+    status: Optional[str] = "closed"
     reason: Optional[str] = "disaster"
     capacity: Optional[int] = 300
+
+    @field_validator("status", mode="before")
+    @classmethod
+    def normalise_status(cls, v):
+        if v is None:
+            return "closed"
+        from app.utils.enum_utils import normalize_enum_value
+        return normalize_enum_value(RoadSegmentStatus, str(v))
 
 
 class TriggerRerouteRequest(BaseModel):
@@ -83,11 +91,25 @@ class RestoreFlowRequest(BaseModel):
 
 class OverrideRequest(BaseModel):
     disaster_id: str
-    type: OverrideType = Field(..., description="Type of operator override")
+    type: str = Field(..., description="Override type: close_lane, open_lane, pin_detour, corridor_priority (case-insensitive)")
     operator_id: str
     segment_id: Optional[str] = None
     route_id: Optional[str] = None
-    priority: Optional[OverridePriority] = None
+    priority: Optional[str] = None
+
+    @field_validator("type", mode="before")
+    @classmethod
+    def normalise_type(cls, v):
+        from app.utils.enum_utils import normalize_enum_value
+        return normalize_enum_value(OverrideType, str(v))
+
+    @field_validator("priority", mode="before")
+    @classmethod
+    def normalise_priority(cls, v):
+        if v is None:
+            return v
+        from app.utils.enum_utils import normalize_enum_value
+        return normalize_enum_value(OverridePriority, str(v))
 
 
 # ---------------------------------------------------------------------------

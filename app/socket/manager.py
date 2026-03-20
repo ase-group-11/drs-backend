@@ -127,8 +127,14 @@ async def connect(sid: str, environ: dict, auth: Optional[dict] = None):
     user_id = _extract_user_id(environ)
 
     if not user_id:
-        logger.warning(f"Socket.IO: rejected unauthenticated connection sid={sid}")
-        return False  # Reject connection
+        # Allow anonymous connections in non-production (demo page, load tests)
+        from app.core.config import settings
+        if settings.ENVIRONMENT == "production":
+            logger.warning(f"Socket.IO: rejected unauthenticated connection sid={sid}")
+            return False
+        # Assign generated ID for dev/testing clients
+        user_id = f"anon-{sid[:8]}"
+        logger.debug(f"Socket.IO: anonymous connection allowed in {settings.ENVIRONMENT} mode")
 
     _connected_clients[sid] = {"user_id": user_id, "region_id": None}
 

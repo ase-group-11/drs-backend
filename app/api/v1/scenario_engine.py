@@ -23,7 +23,7 @@ import uuid
 from typing import Dict, Any, List, Optional
 
 from fastapi import APIRouter, HTTPException, Depends, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
 
@@ -181,6 +181,20 @@ class ScenarioActivateRequest(BaseModel):
         None,
         description="Provide custom road segments instead of the template defaults"
     )
+
+    @field_validator("severity", mode="before")
+    @classmethod
+    def normalise_severity(cls, v):
+        """Normalise severity to UPPERCASE to match DisasterSeverity enum."""
+        if v is None:
+            return v
+        from app.utils.enum_utils import normalize_enum_value
+        from app.db.models.enums import DisasterSeverity
+        try:
+            return normalize_enum_value(DisasterSeverity, str(v))
+        except ValueError:
+            valid = [m.value for m in DisasterSeverity]
+            raise ValueError(f"Severity must be one of: {valid} (case-insensitive)")
 
 
 class ScenarioResponse(BaseModel):
