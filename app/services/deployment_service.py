@@ -70,7 +70,7 @@ class DeploymentService:
                 raise HTTPException(status_code=404, detail="Disaster not found.")
 
             ds = str(disaster["disaster_status"])
-            if ds not in ("UNVERIFIED", "ACTIVE"):
+            if ds not in ("MONITORING", "ACTIVE"):
                 raise HTTPException(
                     status_code=400,
                     detail=f"Can only dispatch to UNVERIFIED or ACTIVE disasters. Current: {ds}"
