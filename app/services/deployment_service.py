@@ -743,7 +743,7 @@ class DeploymentService:
             if ds not in ("MONITORING", "ACTIVE"):
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Can only dispatch to UNVERIFIED or ACTIVE disasters. Current: {ds}"
+                    detail=f"Can only dispatch to ACTIVE disasters. Current: {ds}"
                 )
 
             now = datetime.utcnow()
@@ -1040,47 +1040,37 @@ class DeploymentService:
                     "updated_at": now,
                 })
 
+
             # If ON_SCENE and disaster is UNVERIFIED → make it ACTIVE (verified by field team)
-            disaster_activated = new_status == "ON_SCENE" and str(dep["disaster_status"]).upper() == "UNVERIFIED"
-            if disaster_activated:
-                activate_sql = text("""
-                    UPDATE disasters
-                    SET disaster_status = CAST('ACTIVE' AS disaster_status),
-                        response_time = :response_time,
-                        updated_at = :updated_at
-                    WHERE id = :disaster_id
-                """)
-                await self.db.execute(activate_sql, {
-                    "disaster_id": disaster_id,
-                    "response_time": now,
-                    "updated_at": now,
-                })
+            # If COMPLETED → publish
+            if new_status == "COMPLETED":
+                try:
+                    from app.services.rabbitmq_service import get_rabbitmq_service
+                    svc = get_rabbitmq_service()
+                    svc.publish("disaster.unit_completed", {
+                        "disaster_id": disaster_id,
+                        "tracking_id": str(dep["tracking_id"]),
+                        "unit_id": unit_id,
+                    })
+                except Exception:
+                    pass
+
+            # If backup requested → publish
+            if request_immediate_backup:
+                try:
+                    from app.services.rabbitmq_service import get_rabbitmq_service
+                    svc = get_rabbitmq_service()
+                    svc.publish("disaster.backup_requested", {
+                        "disaster_id": disaster_id,
+                        "tracking_id": str(dep["tracking_id"]),
+                        "requesting_unit": unit_id,
+                        "resources_needed": additional_resources,
+                    })
+                except Exception:
+                    pass
 
             await self.db.flush()
 
-            # FIX #8: Collect all events to publish AFTER commit — not before.
-            # The API layer reads _pending_events and publishes them as a background task.
-            pending_events = []
-            if disaster_activated:
-                pending_events.append(("disaster.verified", {
-                    "disaster_id": disaster_id,
-                    "tracking_id": str(dep["tracking_id"]),
-                    "verified_by_unit": unit_id,
-                    "situation_report": situation_report,
-                }))
-            if new_status == "COMPLETED":
-                pending_events.append(("disaster.unit_completed", {
-                    "disaster_id": disaster_id,
-                    "tracking_id": str(dep["tracking_id"]),
-                    "unit_id": unit_id,
-                }))
-            if request_immediate_backup:
-                pending_events.append(("disaster.backup_requested", {
-                    "disaster_id": disaster_id,
-                    "tracking_id": str(dep["tracking_id"]),
-                    "requesting_unit": unit_id,
-                    "resources_needed": additional_resources,
-                }))
 
             return {
                 "deployment_id": deployment_id,
@@ -1089,7 +1079,7 @@ class DeploymentService:
                 "previous_status": current,
                 "new_status": new_status,
                 "updated_at": now.isoformat(),
-                "disaster_activated": disaster_activated,
+
                 "backup_requested": request_immediate_backup,
                 "message": f"Deployment updated: {current} → {new_status}",
                 "_pending_events": pending_events,

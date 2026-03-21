@@ -181,16 +181,6 @@ class EscalateDisasterRequest(BaseModel):
 # STATIC ROUTES FIRST
 # ══════════════════════════════════════════════
 
-@router.get("/unverified", summary="List UNVERIFIED disasters (Admin)")
-async def list_unverified(
-    limit: int = 50,
-    db: AsyncSession = Depends(get_db),
-    current_user: Dict[str, Any] = Depends(get_current_team_member),
-):
-    service = DisasterService(db)
-    return await service.list_disasters(disaster_status="UNVERIFIED", limit=limit)
-
-
 @router.get("/active", summary="List ACTIVE disasters (Admin)")
 async def list_active(
     severity: Optional[str] = None,

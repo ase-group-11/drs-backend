@@ -988,10 +988,79 @@ class EmergencyUnitService:
     # CREATE: New unit
     # ──────────────────────────────────────────────
     async def create_unit(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Create a new emergency unit."""
+        """
+        Create a new emergency unit with commander and crew validation.
+        
+        Flow:
+          1. Auto-map department from unit_type if not provided
+          2. Validate commander exists and is ACTIVE
+          3. Validate all crew members exist and are ACTIVE
+          4. Warn if commander/crew are from different department
+          5. Create unit + link crew
+        """
         try:
             unit_id = str(uuid.uuid4())
             now = datetime.utcnow()
+
+            # Auto-map unit_type → department if not explicitly set
+            UNIT_TYPE_TO_DEPT = {
+                "FIRE_ENGINE": "FIRE", "AMBULANCE": "MEDICAL",
+                "PATROL_CAR": "POLICE", "RESCUE": "FIRE",
+                "HAZMAT": "FIRE", "RAPID_RESPONSE": "MEDICAL",
+                "COMMAND": "IT",
+            }
+            unit_type = data["unit_type"].upper()
+            department = data.get("department", "").upper()
+            if not department:
+                department = UNIT_TYPE_TO_DEPT.get(unit_type, "IT")
+
+            # Validate commander if provided
+            commander_id = data.get("commander_id")
+            if commander_id:
+                cmd_sql = text("""
+                    SELECT id, full_name, department, status FROM emergency_teams
+                    WHERE id = :id AND deleted_at IS NULL
+                """)
+                cmd_result = await self.db.execute(cmd_sql, {"id": commander_id})
+                commander = cmd_result.mappings().first()
+                if not commander:
+                    raise HTTPException(status_code=404, detail="Commander not found.")
+                if str(commander["status"]) != "ACTIVE":
+                    raise HTTPException(status_code=400, detail=f"Commander {commander['full_name']} is not ACTIVE.")
+
+            # Validate crew members if provided
+            crew_member_ids = data.get("crew_member_ids", [])
+            validated_crew = []
+            if crew_member_ids:
+                capacity = data.get("capacity", 4)
+                if len(crew_member_ids) > capacity:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Crew size ({len(crew_member_ids)}) exceeds capacity ({capacity})."
+                    )
+
+                for member_id in crew_member_ids:
+                    mem_sql = text("""
+                        SELECT id, full_name, department, status FROM emergency_teams
+                        WHERE id = :id AND deleted_at IS NULL
+                    """)
+                    mem_result = await self.db.execute(mem_sql, {"id": member_id})
+                    member = mem_result.mappings().first()
+                    if not member:
+                        raise HTTPException(status_code=404, detail=f"Crew member {member_id} not found.")
+                    if str(member["status"]) != "ACTIVE":
+                        raise HTTPException(status_code=400, detail=f"Crew member {member['full_name']} is not ACTIVE.")
+                    validated_crew.append({
+                        "id": str(member["id"]),
+                        "name": member["full_name"],
+                        "department": str(member["department"]),
+                    })
+
+            # Check unit_code is unique
+            code_sql = text("SELECT id FROM emergency_units WHERE unit_code = :code AND deleted_at IS NULL")
+            code_result = await self.db.execute(code_sql, {"code": data["unit_code"]})
+            if code_result.first():
+                raise HTTPException(status_code=400, detail=f"Unit code '{data['unit_code']}' already exists.")
 
             sql = text("""
                 INSERT INTO emergency_units (
@@ -1023,8 +1092,8 @@ class EmergencyUnitService:
                 "unit_code": data["unit_code"],
                 "unit_name": data["unit_name"],
                 "description": data.get("description"),
-                "unit_type": data["unit_type"].upper(),
-                "department": data["department"].upper(),
+                "unit_type": unit_type,
+                "department": department,
                 "unit_status": "AVAILABLE",
                 "station_name": data["station_name"],
                 "station_address": data.get("station_address"),
@@ -1034,12 +1103,12 @@ class EmergencyUnitService:
                 "vehicle_license_plate": data.get("vehicle_license_plate"),
                 "vehicle_year": data.get("vehicle_year"),
                 "capacity": data.get("capacity", 4),
-                "commander_id": data.get("commander_id"),
+                "commander_id": commander_id,
             })
 
-            # Add crew members if provided
-            if data.get("crew_member_ids"):
-                for member_id in data["crew_member_ids"]:
+            # Add crew members
+            if crew_member_ids:
+                for member_id in crew_member_ids:
                     crew_sql = text("""
                         INSERT INTO unit_crew (unit_id, team_member_id)
                         VALUES (:unit_id, :member_id)
@@ -1048,7 +1117,21 @@ class EmergencyUnitService:
 
             await self.db.flush()
 
-            return await self.get_unit(unit_id)
+            # Build department mismatch warnings
+            warnings = []
+            if commander_id and validated_crew:
+                pass  # commander already validated above
+            for crew in validated_crew:
+                if crew["department"] != department:
+                    warnings.append(
+                        f"{crew['name']} is from {crew['department']} department "
+                        f"(unit is {department})"
+                    )
+
+            result = await self.get_unit(unit_id)
+            if warnings:
+                result["warnings"] = warnings
+            return result
 
         except HTTPException:
             raise

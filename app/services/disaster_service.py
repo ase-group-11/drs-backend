@@ -798,6 +798,7 @@ class DisasterService:
                     "resolved": counts["resolved_count"],
                     "monitoring": counts["monitoring_count"],
                     "archived": counts["archived_count"]
+
                 },
             }
 

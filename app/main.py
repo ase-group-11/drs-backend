@@ -30,6 +30,7 @@ from app.providers.traffic import TrafficProvider
 from app.api.v1.live_map import set_live_map_providers
 from app.api.v1.emergency_unit import router as emergency_unit_router
 from app.api.v1.deployment import router as deployment_router
+from app.api.v1.user_management import router as user_management_router
 
 # Setup logging FIRST
 setup_logging()
@@ -146,7 +147,7 @@ app.include_router(disaster_router, prefix="/api/v1")
 
 app.include_router(emergency_unit_router, prefix="/api/v1")
 app.include_router(deployment_router, prefix="/api/v1")
-
+app.include_router(user_management_router, prefix="/api/v1")
 
 # Root endpoints
 @app.get(
