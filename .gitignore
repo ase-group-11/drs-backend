@@ -95,6 +95,6 @@ data/kaggle_disaster_images/
 data/*.zip
 
 # Local dev / evaluation scripts
-docs/
 scripts/demo_evaluation.py
 scripts/evaluate.py
+evaluation-demo/

@@ -173,7 +173,7 @@ class DisasterEvaluationService:
             if photo_urls:
                 image_analysis_ctx = await self._enrichment._fetch_image_analysis(photo_urls)
 
-        # 4. Sliding window + historical outcomes — both are DB queries, run in parallel
+        # 4. Nearby incident check + historical outcomes — both are DB queries, run in parallel
         nearby_reports: list = []
         historical_ctx: Optional[dict] = None
 
@@ -233,28 +233,36 @@ class DisasterEvaluationService:
         )
 
         # 9. Publish evaluation result to message queue — fire-and-forget
-        try:
-            publish_disaster_evaluated({
-                "disaster_id": result.disaster_id,
-                "tracking_id": tracking_id,
-                "severity": result.severity,
-                "confidence": result.confidence,
-                "recommended_services": result.recommended_services,
-                "trigger_deploy": result.trigger_deploy,
-                "trigger_reroute": result.trigger_reroute,
-                "trigger_evacuation": result.trigger_evacuation,
-                "flag": result.flag,
-                "strategy_used": result.strategy_used,
-                "evaluated_at": evaluated_at.isoformat(),
-                "impact_radius_km": impact_radius_km,
-                "estimated_population": estimated_population,
-                "affected_roads": affected_roads or [],
-                "affected_facilities": affected_facilities or [],
-            })
-        except Exception:
-            logger.exception(
-                "Failed to publish evaluation to queue for report %s", report_id
-            )
+        #    FALSE_ALARM and DUPLICATE don't create new disasters, so skip the queue.
+        _SKIP_QUEUE_FLAGS = {EvaluationFlag.FALSE_ALARM.name, EvaluationFlag.DUPLICATE.name}
+        if result.flag not in _SKIP_QUEUE_FLAGS and tracking_id is not None:
+            try:
+                publish_disaster_evaluated({
+                    "disaster_id": result.disaster_id,
+                    "tracking_id": tracking_id,
+                    "severity": result.severity,
+                    "confidence": result.confidence,
+                    "status": "active" if result.flag in (
+                        EvaluationFlag.NORMAL.name,
+                        EvaluationFlag.CORROBORATED.name,
+                        EvaluationFlag.ESCALATED.name,
+                    ) else "monitoring",
+                    "recommended_services": result.recommended_services,
+                    "trigger_deploy": result.trigger_deploy,
+                    "trigger_reroute": result.trigger_reroute,
+                    "trigger_evacuation": result.trigger_evacuation,
+                    "flag": result.flag,
+                    "strategy_used": result.strategy_used,
+                    "evaluated_at": evaluated_at.isoformat(),
+                    "impact_radius_km": impact_radius_km,
+                    "estimated_population": estimated_population,
+                    "affected_roads": affected_roads or [],
+                    "affected_facilities": affected_facilities or [],
+                })
+            except Exception:
+                logger.exception(
+                    "Failed to publish evaluation to queue for report %s", report_id
+                )
 
         # 10. Fire downstream triggers — fire-and-forget; never blocks the response
         await self._dispatch_downstream(
@@ -323,7 +331,7 @@ class DisasterEvaluationService:
             (now - created_at).total_seconds() / 60 if created_at else 0.0
         )
 
-        # Sliding window — derive summary stats from nearby reports
+        # Nearby incident check — derive summary stats from nearby reports
         nearby_count = len(nearby_reports)
         max_nearby_severity: Optional[str] = None
         if nearby_reports:
@@ -507,11 +515,21 @@ class DisasterEvaluationService:
 
         tracking_id = _generate_tracking_id()
 
+        # Map evaluation flag → disaster status
+        _FLAG_TO_STATUS = {
+            EvaluationFlag.NORMAL.name:         DisasterStatus.ACTIVE,
+            EvaluationFlag.CORROBORATED.name:   DisasterStatus.ACTIVE,
+            EvaluationFlag.ESCALATED.name:      DisasterStatus.ACTIVE,
+            EvaluationFlag.LIMITED_DATA.name:    DisasterStatus.MONITORING,
+            EvaluationFlag.PENDING_REVIEW.name:  DisasterStatus.MONITORING,
+        }
+        initial_status = _FLAG_TO_STATUS.get(flag, DisasterStatus.MONITORING)
+
         disaster = Disaster(
             tracking_id=tracking_id,
             type=DisasterType(report["disaster_type"]),
             severity=DisasterSeverity(result.severity.lower()),
-            disaster_status=DisasterStatus.MONITORING,
+            disaster_status=initial_status,
             location=WKTElement(f"POINT({lon} {lat})", srid=4326),
             location_address=report.get("location_address"),
             description=report.get("description", ""),
@@ -649,7 +667,7 @@ class DisasterEvaluationService:
                 detail=f"No reports linked to disaster '{disaster_id}'",
             )
 
-        # Enrichment + sliding window data — run in parallel where possible
+        # Enrichment + nearby incident check — run in parallel where possible
         traffic_ctx: Optional[dict] = None
         weather_ctx: Optional[dict] = None
         surveillance_ctx: Optional[dict] = None

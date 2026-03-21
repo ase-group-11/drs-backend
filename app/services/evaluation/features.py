@@ -25,7 +25,7 @@ invalidates any trained artifact):
   [21]      weather_condition_score
   [22]      population_density_tier
   [23]      reporter_credibility     (hardcoded 1.0)
-  [24]      nearby_report_count      capped at 5 — sliding window signal
+  [24]      nearby_report_count      capped at 5 — nearby incident check
   [25]      historical_false_alarm_rate  0.0–1.0 — area credibility
   [26]      camera_count_nearby      capped at 5 — surveillance signal
   [27]      photo_count              capped at 5 — evidence quality
@@ -185,7 +185,7 @@ def build_feature_vector(context: EvaluationContext) -> List[float]:
     # [23] reporter_credibility
     vec.append(1.0)
 
-    # [24] nearby_report_count — sliding window signal, capped at 5
+    # [24] nearby_report_count — nearby incident check, capped at 5
     vec.append(min(float(context.nearby_report_count or 0), 5.0))
 
     # [25] historical_false_alarm_rate — area credibility signal

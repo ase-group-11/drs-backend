@@ -260,7 +260,7 @@ class DisasterReportRepository:
         """
         Get recent reports of the same disaster type within a geographic radius.
 
-        Used by the sliding window evaluation to detect DUPLICATE, ESCALATED,
+        Used by the nearby incident check to detect DUPLICATE, ESCALATED,
         and CORROBORATED patterns.
 
         Args:
