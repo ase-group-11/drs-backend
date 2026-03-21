@@ -15,9 +15,12 @@ Provides:
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
+from pydantic import BaseModel
 
 from app.db.session import get_db
 from app.services.user_service import UserService
+from app.auth.jwt_handler import decode_token, create_access_token
+from app.core.config import settings
 from app.schemas.auth import (
     UserRegisterRequest,
     OTPVerifyRequest,
@@ -32,6 +35,17 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
+
+class TokenRefreshRequest(BaseModel):
+    """Request body for refreshing an access token."""
+    refresh_token: str
+
+
+class TokenRefreshResponse(BaseModel):
+    """Response body after a successful token refresh."""
+    access_token: str
+    token_type: str
+    expires_in: int  # seconds
 
 @router.post(
     "/register",
@@ -213,6 +227,94 @@ async def verify_login(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)
         )
+        
+        
+
+@router.post(
+    "/token/refresh",
+    response_model=TokenRefreshResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Refresh access token",
+    description="Exchange a valid refresh token for a new access token"
+)
+async def refresh_access_token(
+    body: TokenRefreshRequest
+):
+    """
+    Get a new access token using a refresh token.
+
+    Call this when the frontend receives a 401 Unauthorized response,
+    which means the access token has expired.
+
+    Steps:
+    1. Decode and validate the refresh token
+    2. Confirm it is a refresh token (not an access token)
+    3. Extract user_id and user_type from the payload
+    4. Issue a brand new access token with the same identity
+    5. Return the new access token
+
+    NOTE: The refresh token itself is NOT rotated here — the same
+    refresh token remains valid until its own expiry (7 days per .env).
+    The frontend should store and reuse it until then.
+
+    Request body:
+        { "refresh_token": "<your refresh token>" }
+
+    Returns:
+        {
+            "access_token": "<new JWT>",
+            "token_type": "bearer",
+            "expires_in": 86400   ← seconds (matches ACCESS_TOKEN_EXPIRE_MINUTES * 60)
+        }
+
+    Errors:
+        401 — if token is invalid, expired, or not a refresh token
+    """
+    # Step 1: Decode the token
+    payload = decode_token(body.refresh_token)
+
+    if not payload:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token is invalid or has expired. Please log in again.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    # Step 2: Confirm it's actually a refresh token, not an access token
+    if payload.get("type") != "refresh":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token type. A refresh token is required.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    # Step 3: Extract identity from payload
+    user_id = payload.get("sub")
+    user_type = payload.get("user_type")  # "user" or "emergency_team"
+
+    # Guard: user_type must exist — means old tokens without user_type are rejected
+    if not user_id or not user_type:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token payload is incomplete. Please log in again.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    # Step 4: Issue a new access token with the same identity
+    new_access_token = create_access_token(
+        user_id=user_id,
+        user_type=user_type
+    )
+
+    logger.info(f"Access token refreshed for user_id={user_id}, user_type={user_type}")
+
+    # Step 5: Return it
+    return TokenRefreshResponse(
+        access_token=new_access_token,
+        token_type="bearer",
+        expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
+    )
+
 
 
 @router.get(

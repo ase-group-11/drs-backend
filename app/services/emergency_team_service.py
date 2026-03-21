@@ -775,7 +775,8 @@ class EmergencyTeamService:
                 user_id=team_member.id,
                 user_type="emergency_team"
             )
-            refresh_token = create_refresh_token(user_id=team_member.id)
+            # refresh_token = create_refresh_token(user_id=team_member.id)
+            refresh_token = create_refresh_token(user_id=team_member.id, user_type="emergency_team")
             logger.debug("✅ Tokens generated")
             
             logger.info(f"✅ Emergency team registration completed for {phone_number}")
@@ -859,7 +860,8 @@ class EmergencyTeamService:
                 user_id=team_member.id,
                 user_type="emergency_team"
             )
-            refresh_token = create_refresh_token(user_id=team_member.id)
+            # refresh_token = create_refresh_token(user_id=team_member.id)
+            refresh_token = create_refresh_token(user_id=team_member.id, user_type="emergency_team")
             logger.debug("✅ Tokens generated")
             
             logger.info(f"✅ Emergency team login successful for {email}")
@@ -924,7 +926,8 @@ class EmergencyTeamService:
                 user_type="emergency_team"
             )
             
-            refresh_token = create_refresh_token(user_id=team_member.id)
+            # refresh_token = create_refresh_token(user_id=team_member.id)
+            refresh_token = create_refresh_token(user_id=team_member.id, user_type="emergency_team")
             
             return {
                 "team_member": {

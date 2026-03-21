@@ -7,7 +7,7 @@ UPDATED:
 - Redis fallback support
 - 1 year access tokens
 """
-
+import asyncio  
 from fastapi import FastAPI, Request, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_db
@@ -38,6 +38,9 @@ from app.api.v1.emergency_unit import router as emergency_unit_router
 from app.api.v1.deployment import router as deployment_router
 from app.api.v1.disaster_evaluation import set_evaluation_providers
 from app.api.v1.user_management import router as user_management_router
+
+from app.api.v1.notifications_ws import router as notifications_router
+from app.api.v1.notifications_ws import redis_listener                  
 
 # Setup logging FIRST
 setup_logging()
@@ -169,6 +172,8 @@ app.include_router(emergency_unit_router, prefix="/api/v1")
 app.include_router(deployment_router, prefix="/api/v1")
 app.include_router(user_management_router, prefix="/api/v1")
 
+# ── Notification router ─────────────────────────────────
+app.include_router(notifications_router,prefix="/api/v1")  
 # Serve demo page
 from fastapi.responses import FileResponse
 from pathlib import Path
