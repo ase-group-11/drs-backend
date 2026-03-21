@@ -194,11 +194,11 @@ class IntegrationService:
     # -------------------------------------------------------------------------
 
     async def _get_redis(self):
-        """Lazily initialise Redis. Returns None if unavailable."""
+        """Lazily initialise Redis using the existing redis.asyncio client."""
         if self._redis is not None:
             return self._redis
         try:
-            import aioredis
+            import redis.asyncio as aioredis
             self._redis = await aioredis.from_url(
                 settings.REDIS_URL,
                 encoding="utf-8",

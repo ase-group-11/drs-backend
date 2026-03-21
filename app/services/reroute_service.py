@@ -248,9 +248,13 @@ class RerouteService:
         blocked_roads: List[Dict[str, Any]],
         destinations: List[Dict[str, float]],
     ) -> List[Dict[str, Any]]:
+        # Origin: south of M50 J6 — vehicles coming from southwest Dublin
+        # heading north through the M50. When flooded, routes detour around it.
+        REROUTE_ORIGIN = {"lat": 53.2900, "lng": -6.3800}
+
         tasks = [
             self.external.get_directions(
-                origin={"lat": 53.3498, "lng": -6.2603},
+                origin=REROUTE_ORIGIN,
                 destination=dest,
                 avoid=blocked_roads,
                 alternatives=True,

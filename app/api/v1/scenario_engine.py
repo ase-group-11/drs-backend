@@ -612,3 +612,59 @@ async def trigger_monitoring_cycle(
         "regions_checked": len(results),
         "results": results,
     }
+
+@router.get(
+    "/vehicles",
+    summary="List all seeded vehicles",
+    response_model=Dict[str, Any],
+)
+async def list_vehicles():
+    """
+    Return all vehicles currently in the simulator pool.
+    Useful for tracking specific user_ids before triggering a reroute.
+    """
+    from app.services.user_simulator import user_simulator
+    vehicles = user_simulator.get_all_users()
+    return {
+        "total": len(vehicles),
+        "vehicles": vehicles,
+    }
+
+
+@router.post(
+    "/register-vehicle",
+    summary="Register a specific test vehicle",
+    response_model=Dict[str, Any],
+)
+async def register_vehicle(
+    user_id: str,
+    lat: float = 53.295,
+    lng: float = -6.380,
+    dest_lat: float = 53.390,
+    dest_lng: float = -6.320,
+    vehicle_type: str = "general",
+):
+    """
+    Register a single vehicle with a known user_id and location.
+    Use this instead of seed-vehicles when you want to track specific users.
+
+    Args:
+        user_id:      ID to assign (e.g. test-user-001)
+        lat/lng:      Current location (default: south of M50)
+        dest_lat/lng: Destination (default: north of M50)
+        vehicle_type: general | public_transport | emergency
+    """
+    from app.services.user_simulator import user_simulator
+    vehicle = user_simulator.register_user(
+        user_id=user_id,
+        lat=lat,
+        lng=lng,
+        dest_lat=dest_lat,
+        dest_lng=dest_lng,
+        vehicle_type=vehicle_type,
+    )
+    return {
+        "registered": True,
+        "vehicle": vehicle,
+        "message": f"Vehicle {user_id} registered. Now trigger a reroute to see it assigned to a route.",
+    }

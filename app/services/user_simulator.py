@@ -118,13 +118,13 @@ class UserSimulator:
         for vtype, weight in distribution.items():
             types.extend([vtype] * int(weight * 1000))
 
-        # Fixed destination clusters — prevents N unique TomTom routing calls
-        # All vehicles share one of these 3 destinations so we make at most
-        # 3 parallel routing API calls regardless of vehicle count
+        # Spread destinations across Dublin so routes visually diverge on the map.
+        # Vehicles come from south/southwest, M50 is blocked, routes fan out to
+        # different parts of the city showing the real detour diversity.
         COMMON_DESTINATIONS = [
-            {"lat": 53.3498, "lng": -6.2603},  # Dublin city centre
-            {"lat": 53.4000, "lng": -6.2000},  # Dublin north
-            {"lat": 53.2900, "lng": -6.1800},  # Dublin south
+            {"lat": 53.3498, "lng": -6.2603},  # Dublin City Centre
+            {"lat": 53.3800, "lng": -6.4400},  # Blanchardstown (northwest)
+            {"lat": 53.4200, "lng": -6.2700},  # Dublin Airport area (north)
         ]
 
         registered = []
