@@ -1,4 +1,4 @@
-# File: app/models/enums.py
+
 """
 
 Enumerations for the ASE Emergency Services system.
@@ -118,63 +118,41 @@ class EmergencyRequestStatus(str, enum.Enum):
 class DisasterType(str, enum.Enum):
     """
     Types of disasters tracked in the live map system.
-    
-    Types:
-    - FLOOD: Flooding events
-    - FIRE: Fire emergencies
-    - EARTHQUAKE: Seismic events
-    - HURRICANE: Hurricane/cyclone
-    - TORNADO: Tornado events
-    - TSUNAMI: Tsunami warnings/events
-    - DROUGHT: Drought conditions
-    - HEATWAVE: Extreme heat
-    - COLDWAVE: Extreme cold
-    - STORM: Storm events
-    - OTHER: Other disaster types
+    Values must match PostgreSQL enum exactly (uppercase).
     """
-    FLOOD = "flood"
-    FIRE = "fire"
-    EARTHQUAKE = "earthquake"
-    HURRICANE = "hurricane"
-    TORNADO = "tornado"
-    TSUNAMI = "tsunami"
-    DROUGHT = "drought"
-    HEATWAVE = "heatwave"
-    COLDWAVE = "coldwave"
-    STORM = "storm"
-    OTHER = "other"
+    FLOOD = "FLOOD"
+    FIRE = "FIRE"
+    EARTHQUAKE = "EARTHQUAKE"
+    HURRICANE = "HURRICANE"
+    TORNADO = "TORNADO"
+    TSUNAMI = "TSUNAMI"
+    DROUGHT = "DROUGHT"
+    HEATWAVE = "HEATWAVE"
+    COLDWAVE = "COLDWAVE"
+    STORM = "STORM"
+    OTHER = "OTHER"
 
 
 class DisasterSeverity(str, enum.Enum):
     """
     Severity levels for disasters.
-    
-    Levels:
-    - LOW: Minor impact, limited response needed
-    - MEDIUM: Moderate impact, standard response
-    - HIGH: Significant impact, elevated response
-    - CRITICAL: Severe impact, maximum response
+    Values must match PostgreSQL enum exactly (uppercase).
     """
-    LOW = "low"
-    MEDIUM = "medium"
-    HIGH = "high"
-    CRITICAL = "critical"
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
+    CRITICAL = "CRITICAL"
 
 
 class DisasterStatus(str, enum.Enum):
     """
     Status of disaster tracking and response.
-    
-    States:
-    - ACTIVE: Disaster is currently ongoing
-    - MONITORING: Situation being monitored
-    - RESOLVED: Disaster resolved/contained
-    - ARCHIVED: Historical record (no longer relevant)
+    Values must match PostgreSQL enum exactly (uppercase).
     """
-    ACTIVE = "active"
-    MONITORING = "monitoring"
-    RESOLVED = "resolved"
-    ARCHIVED = "archived"
+    ACTIVE = "ACTIVE"
+    MONITORING = "MONITORING"
+    RESOLVED = "RESOLVED"
+    ARCHIVED = "ARCHIVED"
 
 
 class DisasterReportStatus(str, enum.Enum):
@@ -194,6 +172,64 @@ class DisasterReportStatus(str, enum.Enum):
     REJECTED = "rejected"
     DUPLICATE = "duplicate"
 
+class OverrideType(str, enum.Enum):
+    """
+    Operator override types for manual traffic control.
+
+    Types:
+    - CLOSE_LANE:         Force a road segment closed
+    - OPEN_LANE:          Force a road segment open (overrides auto-close)
+    - PIN_DETOUR:         Lock a specific route as the preferred detour
+    - CORRIDOR_PRIORITY:  Reserve a corridor for emergency vehicles only
+    """
+    CLOSE_LANE = "close_lane"
+    OPEN_LANE = "open_lane"
+    PIN_DETOUR = "pin_detour"
+    CORRIDOR_PRIORITY = "corridor_priority"
+
+
+class RoadSegmentStatus(str, enum.Enum):
+    """
+    Operational status of a road segment.
+
+    States:
+    - OPEN:       Normal traffic flow
+    - CLOSED:     Road blocked, no traffic permitted
+    - RESTRICTED: Limited access (emergency vehicles only, reduced lanes)
+    """
+    OPEN = "open"
+    CLOSED = "closed"
+    RESTRICTED = "restricted"
+
+
+class ReroutePlanStatus(str, enum.Enum):
+    """
+    Lifecycle status of a reroute plan.
+
+    States:
+    - ACTIVE:      Currently in effect
+    - SUPERSEDED:  Replaced by a newer plan (congestion recalc / override)
+    - CLEARED:     Disaster resolved, plan retired
+    """
+    ACTIVE = "active"
+    SUPERSEDED = "superseded"
+    CLEARED = "cleared"
+
+
+class OverridePriority(str, enum.Enum):
+    """
+    Priority level for operator overrides.
+
+    Levels:
+    - LOW:      Advisory only
+    - MEDIUM:   Standard operator instruction
+    - HIGH:     Urgent, takes precedence over auto-routing
+    - CRITICAL: Emergency corridor, overrides all other routing
+    """
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    CRITICAL = "critical"
 
 
 

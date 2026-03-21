@@ -102,22 +102,26 @@ class EmergencyTeamRegisterRequest(BaseModel):
     @field_validator("role")
     @classmethod
     def validate_role(cls, v: str) -> str:
-        """Validate role is valid."""
-        valid_roles = ["admin", "manager", "staff"]
-        if v.lower() not in valid_roles:
-            raise ValueError(f"Role must be one of: {', '.join(valid_roles)}")
-        return v.lower()
-    
+        """Validate role case-insensitively and return canonical enum value."""
+        from app.utils.enum_utils import normalize_enum_value
+        from app.db.models.enums import EmergencyTeamRole
+        try:
+            return normalize_enum_value(EmergencyTeamRole, v)
+        except ValueError:
+            valid = [m.value for m in EmergencyTeamRole]
+            raise ValueError(f"Role must be one of: {valid} (case-insensitive)")
+
     @field_validator("department")
     @classmethod
     def validate_department(cls, v: str) -> str:
-        """Validate department is valid."""
-        valid_departments = ["medical", "police", "fire", "it"]
-        if v.lower() not in valid_departments:
-            raise ValueError(
-                f"Department must be one of: {', '.join(valid_departments)}"
-            )
-        return v.lower()
+        """Validate department case-insensitively and return canonical enum value."""
+        from app.utils.enum_utils import normalize_enum_value
+        from app.db.models.enums import Department
+        try:
+            return normalize_enum_value(Department, v)
+        except ValueError:
+            valid = [m.value for m in Department]
+            raise ValueError(f"Department must be one of: {valid} (case-insensitive)")
     
     model_config = {
         "json_schema_extra": {
