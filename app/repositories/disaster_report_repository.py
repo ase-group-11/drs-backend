@@ -244,6 +244,7 @@ class DisasterReportRepository:
             "rejection_reason": report.rejection_reason,
             "created_at": report.created_at.isoformat() if report.created_at else None,
             "photo_count": len(report.photos) if hasattr(report, "photos") and report.photos else 0,
+            "photo_urls": [p.image_url for p in report.photos] if hasattr(report, "photos") and report.photos else [],
         }
 
     async def get_recent_reports_near(
@@ -365,7 +366,7 @@ class DisasterReportRepository:
         """
         values: Dict[str, Any] = {
             "report_status": status,
-            "reviewed_at": datetime.now(timezone.utc),
+            "reviewed_at": datetime.now(timezone.utc).replace(tzinfo=None),
         }
         if disaster_id is not None:
             values["disaster_id"] = disaster_id

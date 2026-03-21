@@ -8,7 +8,7 @@ Also exports FEATURE_NAMES: list[str] — 29 human-readable names in the
 same fixed order as the feature vector. Consumed by train_model.py and
 SHAP analysis.
 
-Feature vector layout (29 features, order is fixed — changing it
+Feature vector layout (30 features, order is fixed — changing it
 invalidates any trained artifact):
 
   [0..10]   disaster_type one-hot (11 types, alphabetical per plan)
@@ -30,6 +30,7 @@ invalidates any trained artifact):
   [26]      camera_count_nearby      capped at 5 — surveillance signal
   [27]      photo_count              capped at 5 — evidence quality
   [28]      description_length_tier  0 (<20 chars), 1 (<100), 2 (<300), 3 (300+)
+  [29]      surveillance_quality_score  0.0–1.0 — composite camera quality
 """
 
 from __future__ import annotations
@@ -127,9 +128,10 @@ FEATURE_NAMES: List[str] = [
     "camera_count_nearby",
     "photo_count",
     "description_length_tier",
+    "surveillance_quality_score",
 ]
 
-assert len(FEATURE_NAMES) == 29, "FEATURE_NAMES must have exactly 29 entries"
+assert len(FEATURE_NAMES) == 30, "FEATURE_NAMES must have exactly 30 entries"
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +143,7 @@ def build_feature_vector(context: EvaluationContext) -> List[float]:
     """
     Convert an EvaluationContext into a fixed-length numeric feature vector.
 
-    The vector always has exactly 24 elements in the order documented above.
+    The vector always has exactly 30 elements in the order documented above.
     This function is pure (no I/O, no side effects) so it can be unit-tested
     in isolation.
     """
@@ -209,7 +211,11 @@ def build_feature_vector(context: EvaluationContext) -> List[float]:
         tier = 0.0
     vec.append(tier)
 
-    assert len(vec) == 29, f"Feature vector has {len(vec)} elements, expected 29"
+    # [29] surveillance_quality_score — composite camera quality (0.0–1.0)
+    surv = context.surveillance_context or {}
+    vec.append(float(surv.get("surveillance_quality_score", 0.0)))
+
+    assert len(vec) == 30, f"Feature vector has {len(vec)} elements, expected 30"
     return vec
 
 

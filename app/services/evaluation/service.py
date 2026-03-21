@@ -42,7 +42,7 @@ from app.services.evaluation.downstream import (
 )
 from app.services.evaluation.enrichment import EnrichmentPipeline
 from app.services.evaluation.impact import determine_impact_radius, estimate_affected_population
-from app.services.twilio_service import send_sms
+from app.services.rabbitmq_service import publish_disaster_evaluated
 
 logger = logging.getLogger(__name__)
 
@@ -157,16 +157,21 @@ class DisasterEvaluationService:
         weather_ctx: Optional[dict] = None
         surveillance_ctx: Optional[dict] = None
         population_ctx: Optional[dict] = None
+        image_analysis_ctx: Optional[dict] = None
+        photo_urls: list = report.get("photo_urls", [])
 
         if lat is not None and lon is not None:
-            traffic_ctx, weather_ctx, surveillance_ctx, population_ctx, infrastructure_ctx = (
-                await self._enrichment.enrich(lat, lon)
+            traffic_ctx, weather_ctx, surveillance_ctx, population_ctx, infrastructure_ctx, image_analysis_ctx = (
+                await self._enrichment.enrich(lat, lon, photo_urls=photo_urls)
             )
         else:
             logger.info(
-                "Report %s has no coordinates; skipping enrichment", report_id
+                "Report %s has no coordinates; skipping geo-enrichment", report_id
             )
             infrastructure_ctx: Optional[dict] = None
+            # Image analysis can still run without coordinates
+            if photo_urls:
+                image_analysis_ctx = await self._enrichment._fetch_image_analysis(photo_urls)
 
         # 4. Sliding window + historical outcomes — both are DB queries, run in parallel
         nearby_reports: list = []
@@ -192,10 +197,18 @@ class DisasterEvaluationService:
         context = self._build_context(
             report, traffic_ctx, weather_ctx, surveillance_ctx,
             population_ctx, infrastructure_ctx, historical_ctx, nearby_reports,
+            image_analysis_ctx,
         )
 
         # 6. Run strategy
         result = await self._strategy.evaluate(context)
+
+        # 6b. Blend image analysis score into confidence
+        #     With photos: 50% rules + 20% XGBoost + 30% CLIP (via 70/30 engine/clip cascade)
+        #     Without photos: 100% engine (unchanged)
+        result.confidence = _blend_confidence(
+            result.confidence, image_analysis_ctx
+        )
 
         # 7. Impact assessment (determineImpactRadius / estimateAffectedPopulation /
         #    identifyAffectedRoads) — runs after strategy so severity is known
@@ -216,9 +229,34 @@ class DisasterEvaluationService:
             report, result, traffic_ctx, weather_ctx, surveillance_ctx,
             population_ctx, infrastructure_ctx, historical_ctx, evaluated_at,
             impact_radius_km, estimated_population, affected_roads, affected_facilities,
+            image_analysis_ctx,
         )
 
-        # 9. Fire downstream triggers — fire-and-forget; never blocks the response
+        # 9. Publish evaluation result to message queue — fire-and-forget
+        try:
+            publish_disaster_evaluated({
+                "disaster_id": result.disaster_id,
+                "tracking_id": tracking_id,
+                "severity": result.severity,
+                "confidence": result.confidence,
+                "recommended_services": result.recommended_services,
+                "trigger_deploy": result.trigger_deploy,
+                "trigger_reroute": result.trigger_reroute,
+                "trigger_evacuation": result.trigger_evacuation,
+                "flag": result.flag,
+                "strategy_used": result.strategy_used,
+                "evaluated_at": evaluated_at.isoformat(),
+                "impact_radius_km": impact_radius_km,
+                "estimated_population": estimated_population,
+                "affected_roads": affected_roads or [],
+                "affected_facilities": affected_facilities or [],
+            })
+        except Exception:
+            logger.exception(
+                "Failed to publish evaluation to queue for report %s", report_id
+            )
+
+        # 10. Fire downstream triggers — fire-and-forget; never blocks the response
         await self._dispatch_downstream(
             disaster_id=result.disaster_id,
             result=result,
@@ -227,11 +265,7 @@ class DisasterEvaluationService:
             affected_roads=affected_roads,
         )
 
-        # 10. Notify reporter — spec step 10: "System gives confirmation to the
-        #    user who reported it."  Fire-and-forget; SMS failure never blocks.
-        await self._notify_reporter(report, result, tracking_id)
-
-        # 11. Return response dict (matches EvaluationResponse schema)
+        # 10. Return response dict (matches EvaluationResponse schema)
         return {
             "disaster_id": result.disaster_id,
             "severity": result.severity,
@@ -263,6 +297,7 @@ class DisasterEvaluationService:
         infrastructure_ctx: Optional[dict],
         historical_ctx: Optional[dict],
         nearby_reports: list,
+        image_analysis_ctx: Optional[dict] = None,
     ) -> EvaluationContext:
         """Convert a report dict + enrichment + window into an EvaluationContext."""
         severity_value: str = report["severity"]
@@ -317,6 +352,7 @@ class DisasterEvaluationService:
             population_context=population_ctx,
             infrastructure_context=infrastructure_ctx,
             historical_context=historical_ctx,
+            image_analysis_context=image_analysis_ctx,
             user_id=report.get("user_id"),
             photo_count=report.get("photo_count", 0),
             description_length=len(description),
@@ -341,6 +377,7 @@ class DisasterEvaluationService:
         estimated_population: int = 0,
         affected_roads: Optional[list] = None,
         affected_facilities: Optional[list] = None,
+        image_analysis_ctx: Optional[dict] = None,
     ) -> Optional[str]:
         """
         Write evaluation outcome to the disasters table and update the report status.
@@ -474,7 +511,7 @@ class DisasterEvaluationService:
             tracking_id=tracking_id,
             type=DisasterType(report["disaster_type"]),
             severity=DisasterSeverity(result.severity.lower()),
-            disaster_status=DisasterStatus.ACTIVE,
+            disaster_status=DisasterStatus.MONITORING,
             location=WKTElement(f"POINT({lon} {lat})", srid=4326),
             location_address=report.get("location_address"),
             description=report.get("description", ""),
@@ -505,6 +542,7 @@ class DisasterEvaluationService:
                     "population": population_ctx,
                     "infrastructure": infrastructure_ctx,
                     "historical": historical_ctx,
+                    "image_analysis": image_analysis_ctx,
                 },
             },
         )
@@ -617,17 +655,23 @@ class DisasterEvaluationService:
         surveillance_ctx: Optional[dict] = None
         population_ctx: Optional[dict] = None
         historical_ctx: Optional[dict] = None
+        image_analysis_ctx: Optional[dict] = None
         nearby_reports: list = []
+
+        # Collect photo URLs from all linked reports for image analysis
+        all_photo_urls: list = []
+        for r in linked_reports:
+            all_photo_urls.extend(r.get("photo_urls", []))
 
         if lat is not None and lon is not None:
             (
                 traffic_ctx, weather_ctx, surveillance_ctx,
-                population_ctx, infrastructure_ctx,
+                population_ctx, infrastructure_ctx, image_analysis_ctx,
             ), (
                 historical_ctx,
                 nearby_reports,
             ) = await asyncio.gather(
-                self._enrichment.enrich(lat, lon),
+                self._enrichment.enrich(lat, lon, photo_urls=all_photo_urls),
                 asyncio.gather(
                     self._disaster_repo.get_historical_outcomes(
                         lat=lat, lon=lon, disaster_type=disaster_type
@@ -656,9 +700,15 @@ class DisasterEvaluationService:
         context = self._build_context(
             merged_report, traffic_ctx, weather_ctx, surveillance_ctx,
             population_ctx, infrastructure_ctx, historical_ctx, nearby_reports,
+            image_analysis_ctx,
         )
 
         result = await self._strategy.evaluate(context)
+
+        # Blend image analysis score into confidence
+        result.confidence = _blend_confidence(
+            result.confidence, image_analysis_ctx
+        )
 
         impact_radius_km = determine_impact_radius(disaster_type, result.severity.lower())
         estimated_population = estimate_affected_population(
@@ -767,99 +817,6 @@ class DisasterEvaluationService:
 
         return ranked
 
-    async def _notify_reporter(
-        self,
-        report: Dict[str, Any],
-        result,
-        tracking_id: Optional[str],
-    ) -> None:
-        """
-        Send an SMS confirmation to the citizen who submitted the report.
-
-        Implements spec step 10: "System gives confirmation to the user who
-        reported it." Also covers notifyFalseAlarmReporter() from the
-        architecture API spec.
-
-        Fire-and-forget — any exception is caught and logged so the
-        evaluation result is never blocked by an SMS failure.
-        """
-        user_id = report.get("user_id")
-        if not user_id:
-            logger.warning("Report %s has no user_id; skipping reporter notification", report["id"])
-            return
-
-        try:
-            user = await self._user_repo.get_by_id(user_id)
-            if user is None:
-                logger.warning("User %s not found; skipping reporter notification", user_id)
-                return
-
-            phone_number = user.phone_number
-            message = self._build_reporter_message(result, tracking_id)
-
-            sent = await send_sms(phone_number, message)
-            if sent:
-                logger.info(
-                    "Reporter notification sent to %s (flag=%s, report=%s)",
-                    phone_number,
-                    result.flag,
-                    report["id"],
-                )
-            else:
-                logger.warning(
-                    "Reporter notification failed (flag=%s, report=%s)",
-                    result.flag,
-                    report["id"],
-                )
-        except Exception:
-            logger.exception(
-                "Unexpected error sending reporter notification for report %s",
-                report["id"],
-            )
-
-    @staticmethod
-    def _build_reporter_message(result, tracking_id: Optional[str]) -> str:
-        """Build the SMS body appropriate for the evaluation outcome."""
-        ref = f" (Ref: {tracking_id})" if tracking_id else ""
-
-        if result.flag == EvaluationFlag.FALSE_ALARM.name:
-            return (
-                f"Dublin City Emergency Services{ref}: Your disaster report has been "
-                f"reviewed. After cross-referencing live data, it has been classified "
-                f"as a false alarm. No emergency response will be deployed. "
-                f"Thank you for your vigilance."
-            )
-
-        if result.flag == EvaluationFlag.DUPLICATE.name:
-            return (
-                f"Dublin City Emergency Services{ref}: Your disaster report has been "
-                f"received. It matches an existing incident already being addressed "
-                f"by emergency services. No additional action is required from you."
-            )
-
-        # Verified outcomes: NORMAL, LIMITED_DATA, PENDING_REVIEW, CORROBORATED, ESCALATED
-        parts = [
-            f"Dublin City Emergency Services{ref}: Your disaster report "
-            f"(severity: {result.severity}) has been verified and is being actioned."
-        ]
-
-        if result.trigger_deploy and result.recommended_services:
-            services_str = ", ".join(s.capitalize() for s in result.recommended_services)
-            parts.append(f"Dispatching: {services_str}.")
-
-        if result.trigger_reroute:
-            parts.append("Traffic is being rerouted around the affected area.")
-
-        if result.trigger_evacuation:
-            parts.append(
-                "An evacuation advisory may be issued for your area. "
-                "Follow instructions from emergency personnel."
-            )
-
-        parts.append("Stay safe and away from the affected area.")
-        return " ".join(parts)
-
-
     async def review(
         self,
         disaster_id: str,
@@ -870,10 +827,8 @@ class DisasterEvaluationService:
         """
         Record an ERT approval or rejection for a PENDING_REVIEW disaster.
 
-        Approved  → triggers deployment (flag→NORMAL, trigger_deploy=True)
+        Approved  → triggers deployment (flag→NORMAL, trigger_deploy=True, status→ACTIVE)
         Rejected  → archives the disaster (flag→FALSE_ALARM, status→ARCHIVED)
-
-        Notifies the original reporter by SMS after the decision.
 
         Raises:
             HTTPException 404 if disaster not found
@@ -947,6 +902,33 @@ def _generate_tracking_id() -> str:
     year = datetime.now(timezone.utc).year
     short = uuid.uuid4().hex[:8].upper()
     return f"DIS-{year}-{short}"
+
+
+def _blend_confidence(
+    engine_confidence: float,
+    image_analysis_ctx: Optional[dict],
+) -> float:
+    """
+    Blend the evaluation engine confidence with the CLIP image analysis score.
+
+    When photo analysis is available:
+        final = 0.70 * engine + 0.30 * image_disaster_score
+
+    The engine confidence itself is a blend of rules (5/7) + XGBoost (2/7),
+    so the effective three-way split is:
+        50% rules engine + 20% XGBoost ML + 30% CLIP image analysis
+
+    When no photos were analysed:
+        final = engine confidence unchanged
+
+    The blended result is clamped to [0.0, 1.0].
+    """
+    if not image_analysis_ctx or image_analysis_ctx.get("analysed_count", 0) == 0:
+        return engine_confidence
+
+    image_score = image_analysis_ctx.get("disaster_score", 0.0)
+    blended = 0.70 * engine_confidence + 0.30 * image_score
+    return max(0.0, min(1.0, round(blended, 4)))
 
 
 def _extract_facility_names(infrastructure_ctx: Optional[dict]) -> list:

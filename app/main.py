@@ -58,7 +58,7 @@ async def lifespan(app: FastAPI):
     map_provider = MapProvider(api_key=settings.MAPBOX_API_KEY)
     traffic_provider = TrafficProvider(api_key=settings.TRAFFIC_API_KEY)
     set_live_map_providers(map_provider, traffic_provider)
-    set_evaluation_providers(traffic_provider)
+    set_evaluation_providers(map_provider, traffic_provider)
     logger.info("🗺️  Map and traffic providers initialized")
     
     yield

@@ -5,7 +5,7 @@ Usage:
     python scripts/generate_training_data.py
 
 Output:
-    data/synthetic.csv  — 10,000 rows, 29 feature columns + label
+    data/synthetic.csv  — 10,000 rows, 30 feature columns + label
 
 This script is standalone (no FastAPI imports). It constructs
 EvaluationContext objects, runs them through RulesEngineStrategy to get
@@ -118,9 +118,15 @@ def _build_context(rng: random.Random, row_id: int) -> EvaluationContext:
     false_alarm_rate = round(rng.betavariate(1.5, 8.0), 3)  # skewed toward 0
 
     # [26] camera_count_nearby — surveillance coverage
+    # [29] surveillance_quality_score — composite camera quality
     camera_count = 0
+    surveillance_quality = 0.0
     if rng.random() < 0.60:
         camera_count = rng.randint(0, 7)  # features.py caps at 5
+        if camera_count > 0:
+            # Quality correlated with count but with variance
+            base_quality = min(1.0, camera_count / 5.0) * 0.4 + 0.3
+            surveillance_quality = round(min(1.0, base_quality + rng.uniform(-0.15, 0.20)), 4)
 
     # [27] photo_count — evidence quality, ~40% of reports have photos
     photo_count = 0
@@ -147,7 +153,7 @@ def _build_context(rng: random.Random, row_id: int) -> EvaluationContext:
         weather_context=weather_ctx,
         nearby_report_count=nearby_report_count,
         historical_context={"false_alarm_rate": false_alarm_rate},
-        surveillance_context={"camera_count": camera_count},
+        surveillance_context={"camera_count": camera_count, "surveillance_quality_score": surveillance_quality},
         photo_count=photo_count,
         description_length=description_length,
     )

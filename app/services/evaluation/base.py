@@ -45,6 +45,7 @@ class EvaluationContext:
     population_context: Optional[dict] = None    # nearest place population from GeoNames
     infrastructure_context: Optional[dict] = None  # hospitals, fire stations, schools, police
     historical_context: Optional[dict] = None   # past outcomes of similar incidents from DB
+    image_analysis_context: Optional[dict] = None  # CLIP disaster classification scores
     user_id: Optional[str] = None           # reporter's user_id — credibility signal
     photo_count: int = 0                    # number of photos attached — evidence quality
     description_length: int = 0            # len(description) — reporter effort signal

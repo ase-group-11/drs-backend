@@ -29,4 +29,4 @@ def make_context(**overrides) -> EvaluationContext:
 
 def test_vector_length():
     vec = build_feature_vector(make_context())
-    assert len(vec) == 29
+    assert len(vec) == 30

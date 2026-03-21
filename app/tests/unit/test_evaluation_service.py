@@ -33,6 +33,7 @@ def make_report(**overrides):
         "rejection_reason": None,
         "created_at": "2026-02-22T10:00:00",
         "photo_count": 0,
+        "photo_urls": [],
     }
     base.update(overrides)
     return base
@@ -96,6 +97,7 @@ def mock_enrichment():
         {"camera_count": 2, "cameras": [], "radius_m": 500, "source": "openstreetmap"},
         {"nearest_place": "Dublin", "population": 553165, "distance_km": 1.2, "source": "geonames"},
         {"facilities": [{"name": "St James's Hospital", "amenity": "hospital"}], "count": 1, "radius_m": 1000, "source": "openstreetmap"},
+        None,  # image_analysis_context
     ))
     return enrichment
 

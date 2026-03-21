@@ -18,6 +18,7 @@ from typing import List, Optional, Tuple
 
 import aiohttp
 
+from app.providers.image_analysis import CLIPImageAnalysisProvider
 from app.providers.infrastructure import InfrastructureProvider
 from app.providers.population_density import BasePopulationProvider
 from app.providers.surveillance import SurveillanceProvider
@@ -160,26 +161,31 @@ class EnrichmentPipeline:
         surveillance_provider: SurveillanceProvider,
         population_provider: BasePopulationProvider,
         infrastructure_provider: Optional[InfrastructureProvider] = None,
+        image_analysis_provider: Optional[CLIPImageAnalysisProvider] = None,
     ) -> None:
         self._live_map = live_map_service
         self._weather = weather_provider
         self._surveillance = surveillance_provider
         self._population = population_provider
         self._infrastructure = infrastructure_provider or InfrastructureProvider()
+        self._image_analysis = image_analysis_provider or CLIPImageAnalysisProvider()
 
     async def enrich(
-        self, lat: float, lon: float
-    ) -> Tuple[Optional[dict], Optional[dict], Optional[dict], Optional[dict], Optional[dict]]:
+        self,
+        lat: float,
+        lon: float,
+        photo_urls: Optional[List[str]] = None,
+    ) -> Tuple[Optional[dict], Optional[dict], Optional[dict], Optional[dict], Optional[dict], Optional[dict]]:
         """
-        Fetch traffic, weather, surveillance, population, and infrastructure
-        data in parallel.
+        Fetch traffic, weather, surveillance, population, infrastructure,
+        and image analysis data in parallel.
 
         Any failure returns None for that source — evaluation continues
         with reduced information rather than failing entirely.
 
         Returns:
             (traffic_context, weather_context, surveillance_context,
-             population_context, infrastructure_context)
+             population_context, infrastructure_context, image_analysis_context)
             — any element may be None on failure.
         """
         (
@@ -188,12 +194,14 @@ class EnrichmentPipeline:
             surveillance_result,
             population_result,
             infrastructure_result,
+            image_analysis_result,
         ) = await asyncio.gather(
             self._fetch_traffic(lat, lon),
             self._fetch_weather(lat, lon),
             self._fetch_surveillance(lat, lon),
             self._fetch_population(lat, lon),
             self._fetch_infrastructure(lat, lon),
+            self._fetch_image_analysis(photo_urls or []),
             return_exceptions=True,
         )
 
@@ -202,6 +210,7 @@ class EnrichmentPipeline:
         surveillance_ctx = surveillance_result if not isinstance(surveillance_result, Exception) else None
         population_ctx = population_result if not isinstance(population_result, Exception) else None
         infrastructure_ctx = infrastructure_result if not isinstance(infrastructure_result, Exception) else None
+        image_analysis_ctx = image_analysis_result if not isinstance(image_analysis_result, Exception) else None
 
         if isinstance(traffic_result, Exception):
             logger.warning("Traffic enrichment failed: %s", traffic_result)
@@ -213,8 +222,10 @@ class EnrichmentPipeline:
             logger.warning("Population enrichment failed: %s", population_result)
         if isinstance(infrastructure_result, Exception):
             logger.warning("Infrastructure enrichment failed: %s", infrastructure_result)
+        if isinstance(image_analysis_result, Exception):
+            logger.warning("Image analysis enrichment failed: %s", image_analysis_result)
 
-        return traffic_ctx, weather_ctx, surveillance_ctx, population_ctx, infrastructure_ctx
+        return traffic_ctx, weather_ctx, surveillance_ctx, population_ctx, infrastructure_ctx, image_analysis_ctx
 
     async def _fetch_traffic(self, lat: float, lon: float) -> Optional[dict]:
         """Fetch traffic flow data for a point via LiveMapService (zoom=12 bounds)."""
@@ -282,3 +293,9 @@ class EnrichmentPipeline:
     async def _fetch_infrastructure(self, lat: float, lon: float) -> dict:
         """Fetch nearby critical facilities (hospitals, fire stations, schools, police) from OSM."""
         return await self._infrastructure.get_facilities_near(lat, lon)
+
+    async def _fetch_image_analysis(self, photo_urls: List[str]) -> Optional[dict]:
+        """Run CLIP zero-shot disaster classification on report photos."""
+        if not photo_urls:
+            return None
+        return await self._image_analysis.analyse_photos(photo_urls)

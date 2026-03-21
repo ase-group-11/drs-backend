@@ -258,6 +258,9 @@ class EvaluationFlag(str, enum.Enum):
     LIMITED_DATA = "limited_data"
     FALSE_ALARM = "false_alarm"
     PENDING_REVIEW = "pending_review"
+    DUPLICATE = "duplicate"
+    ESCALATED = "escalated"
+    CORROBORATED = "corroborated"
 
 
 class RecommendedService(str, enum.Enum):

@@ -124,7 +124,18 @@ class RulesEngineStrategy(BaseEvaluationStrategy):
             score += 0.03  # cumulative with the >10 bonus
 
         # Evidence quality boosts
-        if ctx.photo_count > 0:
+        img_ctx = ctx.image_analysis_context or {}
+        img_score = img_ctx.get("disaster_score", 0.0)
+        if img_ctx.get("analysed_count", 0) > 0:
+            # CLIP confirmed disaster visuals — graduated boost
+            if img_score >= 0.75:
+                score += 0.08
+            elif img_score >= 0.50:
+                score += 0.05
+            else:
+                score += 0.02
+        elif ctx.photo_count > 0:
+            # Photos present but not analysed (fallback)
             score += 0.03
         if ctx.description_length > 100:
             score += 0.02

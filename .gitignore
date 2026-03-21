@@ -88,6 +88,12 @@ docker-compose.override.yml
 data/synthetic.csv
 models/*.joblib
 
+# Disaster image datasets (download from Kaggle — do not commit)
+# Source: https://www.kaggle.com/datasets/varpit94/disaster-images-dataset
+data/disaster_images/
+data/kaggle_disaster_images/
+data/*.zip
+
 # Local dev / evaluation scripts
 docs/
 scripts/demo_evaluation.py

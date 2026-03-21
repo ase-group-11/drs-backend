@@ -606,6 +606,7 @@ class DisasterRepository:
             if approved:
                 eval_meta["flag"] = "NORMAL"
                 eval_meta["trigger_deploy"] = True
+                disaster.disaster_status = DisasterStatus.ACTIVE
             else:
                 eval_meta["flag"] = "FALSE_ALARM"
                 disaster.disaster_status = DisasterStatus.ARCHIVED
