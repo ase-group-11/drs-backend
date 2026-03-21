@@ -206,6 +206,30 @@ def publish_disaster_updated(disaster_data: Dict[str, Any]) -> bool:
     })
 
 
+def publish_reporter_notification(notification_data: Dict[str, Any]) -> bool:
+    """
+    Publish a reporter-targeted notification to the notification queue.
+
+    Routing key: disaster.updated — already bound to notification_queue.
+
+    Used by the evaluation service for:
+    - REPORT_RECEIVED: "Your report has been received and evaluated."
+    - FALSE_ALARM_WARNING: "Your report was classified as a false alarm."
+    """
+    service = get_rabbitmq_service()
+    return service.publish("disaster.updated", {
+        "disaster_id": notification_data.get("disaster_id"),
+        "tracking_id": notification_data.get("tracking_id"),
+        "update_type": "reporter_notification",
+        "notification_type": notification_data.get("notification_type"),
+        "user_id": notification_data.get("user_id"),
+        "severity": notification_data.get("severity"),
+        "flag": notification_data.get("flag"),
+        "response_scale": notification_data.get("response_scale"),
+        "message": notification_data.get("message"),
+    })
+
+
 def publish_disaster_resolved(disaster_data: Dict[str, Any]) -> bool:
     """Publish disaster.resolved event — triggers notification + reroute restore."""
     service = get_rabbitmq_service()

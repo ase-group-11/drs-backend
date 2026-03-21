@@ -263,6 +263,38 @@ class EvaluationFlag(str, enum.Enum):
     CORROBORATED = "corroborated"
 
 
+class NotificationType(str, enum.Enum):
+    """
+    Types of notifications sent to users after evaluation.
+
+    Types:
+    - REPORT_RECEIVED: Confirmation that the report was received and evaluated
+    - FALSE_ALARM_WARNING: Warning that the report was classified as a false alarm
+    - DISASTER_UPDATE: Status change on a disaster the user reported
+    """
+    REPORT_RECEIVED = "report_received"
+    FALSE_ALARM_WARNING = "false_alarm_warning"
+    DISASTER_UPDATE = "disaster_update"
+
+
+class ResponseScale(str, enum.Enum):
+    """
+    Required emergency response level — calculateResponseScale() per spec.
+
+    Determined by severity + trigger flags:
+    - NONE: No response needed (false alarm)
+    - MINIMAL: Low severity, monitoring only
+    - STANDARD: Medium severity, standard services deployed
+    - ELEVATED: High severity, multiple services + possible reroute
+    - MAXIMUM: Critical severity, full deployment + evacuation + reroute
+    """
+    NONE = "none"
+    MINIMAL = "minimal"
+    STANDARD = "standard"
+    ELEVATED = "elevated"
+    MAXIMUM = "maximum"
+
+
 class RecommendedService(str, enum.Enum):
     """
     Recommended emergency services for dispatch.

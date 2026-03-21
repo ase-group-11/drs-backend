@@ -3,12 +3,16 @@ DisasterEvaluationService — orchestrator for the evaluation pipeline.
 
 Responsibilities:
 1. Load the disaster report (dict) from DisasterReportRepository
-2. Run the enrichment pipeline (traffic + weather)
+2. Run the enrichment pipeline (traffic, weather, surveillance, population, infrastructure, CLIP)
 3. Build an EvaluationContext
-4. Call the injected strategy
-5. Persist the result via DisasterEvaluationRepository
-6. Notify the reporter via SMS (spec step 10 — notifyReporter)
-7. Return a dict matching EvaluationResponse schema
+4. Call the injected strategy (ensemble: rules + XGBoost + CLIP blend)
+5. Calculate impact radius, affected population, roads, and facilities
+6. Calculate response scale (spec: calculateResponseScale)
+7. Persist the result via DisasterRepository
+8. Publish to RabbitMQ for downstream services
+9. Notify the reporter (spec: notifyReporter / notifyFalseAlarmReporter)
+10. Fire downstream triggers (Deploy Services, Re-Route Traffic, Plan Evacuation)
+11. Return a dict matching EvaluationResponse schema
 """
 
 from __future__ import annotations
@@ -29,6 +33,8 @@ from app.db.models.enums import (
     DisasterStatus,
     DisasterType,
     EvaluationFlag,
+    NotificationType,
+    ResponseScale,
 )
 from app.repositories.disaster_repository import DisasterRepository
 from app.repositories.disaster_report_repository import DisasterReportRepository
@@ -42,7 +48,7 @@ from app.services.evaluation.downstream import (
 )
 from app.services.evaluation.enrichment import EnrichmentPipeline
 from app.services.evaluation.impact import determine_impact_radius, estimate_affected_population
-from app.services.rabbitmq_service import publish_disaster_evaluated
+from app.services.rabbitmq_service import publish_disaster_evaluated, publish_reporter_notification
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +131,7 @@ class DisasterEvaluationService:
             "estimated_population": meta.get("estimated_population"),
             "affected_roads": meta.get("affected_roads"),
             "affected_facilities": meta.get("affected_facilities"),
+            "response_scale": meta.get("response_scale"),
         }
 
     async def evaluate(self, report_id: str) -> Dict[str, Any]:
@@ -223,17 +230,21 @@ class DisasterEvaluationService:
         )
         affected_facilities = _extract_facility_names(infrastructure_ctx)
 
-        # 8. Persist — write to disasters table and update report status
+        # 8. Calculate response scale (spec: calculateResponseScale)
+        response_scale = _calculate_response_scale(result).value
+
+        # 9. Persist — write to disasters table and update report status
         evaluated_at = datetime.now(timezone.utc)
         tracking_id = await self._persist_result(
             report, result, traffic_ctx, weather_ctx, surveillance_ctx,
             population_ctx, infrastructure_ctx, historical_ctx, evaluated_at,
             impact_radius_km, estimated_population, affected_roads, affected_facilities,
-            image_analysis_ctx,
+            image_analysis_ctx, response_scale,
         )
 
-        # 9. Publish evaluation result to message queue — fire-and-forget
-        #    FALSE_ALARM and DUPLICATE don't create new disasters, so skip the queue.
+        # 10. Publish evaluation result to message queue — fire-and-forget
+        #     FALSE_ALARM and DUPLICATE don't create new disasters, so skip the queue.
+
         _SKIP_QUEUE_FLAGS = {EvaluationFlag.FALSE_ALARM.name, EvaluationFlag.DUPLICATE.name}
         if result.flag not in _SKIP_QUEUE_FLAGS and tracking_id is not None:
             try:
@@ -258,13 +269,14 @@ class DisasterEvaluationService:
                     "estimated_population": estimated_population,
                     "affected_roads": affected_roads or [],
                     "affected_facilities": affected_facilities or [],
+                    "response_scale": response_scale,
                 })
             except Exception:
                 logger.exception(
                     "Failed to publish evaluation to queue for report %s", report_id
                 )
 
-        # 10. Fire downstream triggers — fire-and-forget; never blocks the response
+        # 11. Fire downstream triggers — fire-and-forget; never blocks the response
         await self._dispatch_downstream(
             disaster_id=result.disaster_id,
             result=result,
@@ -273,7 +285,15 @@ class DisasterEvaluationService:
             affected_roads=affected_roads,
         )
 
-        # 10. Return response dict (matches EvaluationResponse schema)
+        # 12. Notify reporter — spec steps 10 (notifyReporter) and 8.5 (notifyFalseAlarmReporter)
+        self._notify_reporter(
+            report=report,
+            result=result,
+            tracking_id=tracking_id,
+            response_scale=response_scale,
+        )
+
+        # 13. Return response dict (matches EvaluationResponse schema)
         return {
             "disaster_id": result.disaster_id,
             "severity": result.severity,
@@ -289,6 +309,7 @@ class DisasterEvaluationService:
             "estimated_population": estimated_population,
             "affected_roads": affected_roads,
             "affected_facilities": affected_facilities,
+            "response_scale": response_scale,
         }
 
     # ------------------------------------------------------------------
@@ -386,6 +407,7 @@ class DisasterEvaluationService:
         affected_roads: Optional[list] = None,
         affected_facilities: Optional[list] = None,
         image_analysis_ctx: Optional[dict] = None,
+        response_scale: str = "minimal",
     ) -> Optional[str]:
         """
         Write evaluation outcome to the disasters table and update the report status.
@@ -551,6 +573,7 @@ class DisasterEvaluationService:
                     "estimated_population": estimated_population,
                     "affected_roads": affected_roads or [],
                     "affected_facilities": affected_facilities or [],
+                    "response_scale": response_scale,
                 },
                 "evaluation_history": [],  # audit trail — prior evaluations appended here on reassess/review
                 "enrichment": {
@@ -611,6 +634,61 @@ class DisasterEvaluationService:
                 )
         except Exception:
             logger.exception("Downstream dispatch failed for disaster %s", disaster_id)
+
+    @staticmethod
+    def _notify_reporter(
+        report: Dict[str, Any],
+        result,
+        tracking_id: Optional[str],
+        response_scale: str,
+    ) -> None:
+        """
+        Publish a reporter-targeted notification to the notification queue.
+
+        Spec step 10: notifyReporter() — confirmation that the report was evaluated.
+        Spec Alt Flow 4, step 8.5: notifyFalseAlarmReporter() — false alarm warning.
+
+        Fire-and-forget — failures are logged but never surface to the caller.
+        The Notification Service (queue consumer) is responsible for delivering
+        the actual SMS/push notification to the user.
+        """
+        user_id = report.get("user_id")
+        if not user_id:
+            return
+
+        flag = result.flag
+
+        if flag == EvaluationFlag.FALSE_ALARM.name:
+            notification_type = NotificationType.FALSE_ALARM_WARNING.value
+            message = (
+                "Your disaster report has been reviewed and classified as a false alarm. "
+                "Repeated false reports may affect your account standing."
+            )
+        else:
+            notification_type = NotificationType.REPORT_RECEIVED.value
+            message = (
+                f"Your disaster report has been received and evaluated. "
+                f"Severity: {result.severity}. Response scale: {response_scale}."
+            )
+            if tracking_id:
+                message += f" Tracking ID: {tracking_id}."
+
+        try:
+            publish_reporter_notification({
+                "disaster_id": result.disaster_id,
+                "tracking_id": tracking_id,
+                "notification_type": notification_type,
+                "user_id": user_id,
+                "severity": result.severity,
+                "flag": flag,
+                "response_scale": response_scale,
+                "message": message,
+            })
+        except Exception:
+            logger.exception(
+                "Failed to publish reporter notification for report %s",
+                report.get("id"),
+            )
 
     @staticmethod
     def _aggregate_reports(primary: Dict[str, Any], linked: list) -> Dict[str, Any]:
@@ -947,6 +1025,38 @@ def _blend_confidence(
     image_score = image_analysis_ctx.get("disaster_score", 0.0)
     blended = 0.70 * engine_confidence + 0.30 * image_score
     return max(0.0, min(1.0, round(blended, 4)))
+
+
+def _calculate_response_scale(result) -> ResponseScale:
+    """
+    Determine the required emergency response level — spec: calculateResponseScale().
+
+    Maps severity + trigger flags to a response scale:
+        FALSE_ALARM              → NONE
+        LOW severity, no deploy  → MINIMAL
+        MEDIUM severity          → STANDARD
+        HIGH severity            → ELEVATED
+        CRITICAL severity        → MAXIMUM
+        Any evacuation trigger   → MAXIMUM (override)
+    """
+    if result.flag == EvaluationFlag.FALSE_ALARM.name:
+        return ResponseScale.NONE
+
+    sev = result.severity.upper()
+
+    if result.trigger_evacuation:
+        return ResponseScale.MAXIMUM
+
+    if sev == "CRITICAL":
+        return ResponseScale.MAXIMUM
+    if sev == "HIGH":
+        return ResponseScale.ELEVATED
+    if sev == "MEDIUM":
+        return ResponseScale.STANDARD
+    # LOW or unknown
+    if result.trigger_deploy:
+        return ResponseScale.STANDARD
+    return ResponseScale.MINIMAL
 
 
 def _extract_facility_names(infrastructure_ctx: Optional[dict]) -> list:
