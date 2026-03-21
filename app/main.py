@@ -23,6 +23,7 @@ from app.api.v1 import emergency_team_auth
 from app.api.v1 import live_map
 from app.api.v1 import disaster_report
 from app.api.v1.disaster import router as disaster_router
+from app.api.v1 import disaster_evaluation
 
 from cache.redis_client import close_redis_connection
 from app.providers.map_provider import MapProvider
@@ -30,6 +31,7 @@ from app.providers.traffic import TrafficProvider
 from app.api.v1.live_map import set_live_map_providers
 from app.api.v1.emergency_unit import router as emergency_unit_router
 from app.api.v1.deployment import router as deployment_router
+from app.api.v1.disaster_evaluation import set_evaluation_providers
 from app.api.v1.user_management import router as user_management_router
 
 # Setup logging FIRST
@@ -57,6 +59,7 @@ async def lifespan(app: FastAPI):
     map_provider = MapProvider(api_key=settings.MAPBOX_API_KEY)
     traffic_provider = TrafficProvider(api_key=settings.TRAFFIC_API_KEY)
     set_live_map_providers(map_provider, traffic_provider)
+    set_evaluation_providers(map_provider, traffic_provider)
     logger.info("🗺️  Map and traffic providers initialized")
     
     yield
@@ -144,6 +147,7 @@ app.include_router(emergency_team_auth.router, prefix="/api/v1")
 app.include_router(live_map.router, prefix="/api/v1")
 app.include_router(disaster_report.router, prefix="/api/v1")
 app.include_router(disaster_router, prefix="/api/v1")
+app.include_router(disaster_evaluation.router, prefix="/api/v1")
 
 app.include_router(emergency_unit_router, prefix="/api/v1")
 app.include_router(deployment_router, prefix="/api/v1")

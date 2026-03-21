@@ -25,6 +25,20 @@ services:
     networks:
       - drs_network
 
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: drs_rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - drs_network
+
   # Optional: Redis Commander for Redis GUI
   redis-commander:
     image: rediscommander/redis-commander:latest
@@ -41,6 +55,7 @@ services:
 volumes:
   postgres_data:
   redis_data:
+  rabbitmq_data:
 
 networks:
   drs_network:

@@ -112,6 +112,21 @@ class Settings(BaseSettings):
         description="TomTom API key for traffic data"
     )
 
+    MODEL_PATH: str = Field(
+        default="models/severity_classifier_v2.joblib",
+        description="Path to the XGBoost severity classifier artifact"
+    )
+
+    OPENWEATHER_API_KEY: str = Field(
+        default="",
+        description="OpenWeatherMap API key — if empty, MockWeatherProvider is used"
+    )
+
+    GEONAMES_USERNAME: str = Field(
+        default="",
+        description="GeoNames username for population density lookups — if empty, MockPopulationProvider is used"
+    )
+
     DISASTER_CACHE_TTL: int = Field(
         default=60,
         description="Cache TTL for disasters in seconds (default: 60s)"
@@ -183,31 +198,6 @@ class Settings(BaseSettings):
         # but ENVIRONMENT is not development, update DEBUG
         if self.ENVIRONMENT != "development":
             object.__setattr__(self, 'DEBUG', False)
-
-
-@lru_cache()
-def get_settings() -> Settings:
-    """
-    Get cached settings instance (singleton pattern).
-    
-    Using lru_cache ensures settings are loaded only once.
-    This improves performance and ensures consistency.
-    
-    Returns:
-        Settings: Application settings instance
-    """
-    return Settings()
-
-
-# Global settings instance for easy import
-settings = get_settings()
-    
-def model_post_init(self, __context) -> None:
-    """Post-initialization hook to set DEBUG based on ENVIRONMENT."""
-    # If DEBUG wasn't explicitly set via environment and is default True
-    # but ENVIRONMENT is not development, update DEBUG
-    if self.ENVIRONMENT != "development":
-        object.__setattr__(self, 'DEBUG', False)
 
 
 @lru_cache()
