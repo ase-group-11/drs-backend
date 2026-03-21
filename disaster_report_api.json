@@ -1,0 +1,375 @@
+{
+  "info": {
+    "name": "DRS Backend - Complete API Collection",
+    "description": "Dublin City Disaster Response System. Clean, no redundant APIs.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://localhost:8000" },
+    { "key": "token", "value": "PASTE_TOKEN_HERE" },
+    { "key": "citizen_user_id", "value": "b06b61da-7ab6-4533-b3d0-5fd59a6df798" },
+    { "key": "team_member_id", "value": "18bb55d0-3672-43bd-9d88-589c4888131d" },
+    { "key": "unit_id", "value": "" },
+    { "key": "disaster_id", "value": "" },
+    { "key": "deployment_id", "value": "" },
+    { "key": "report_id", "value": "" }
+  ],
+  "auth": {
+    "type": "bearer",
+    "bearer": [{ "key": "token", "value": "{{token}}" }]
+  },
+  "item": [
+    {
+      "name": "1. Auth",
+      "item": [
+        {
+          "name": "Login - Emergency Team",
+          "event": [{ "listen": "test", "script": { "exec": ["var j=pm.response.json(); if(j.tokens&&j.tokens.access_token){pm.collectionVariables.set('token',j.tokens.access_token);}"] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/api/v1/emergency-team/login", "host": ["{{base_url}}"], "path": ["api","v1","emergency-team","login"] },
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"admin@dublin-fire.ie\",\n  \"password\": \"AdminPass1\"\n}" }
+          }
+        },
+        {
+          "name": "Login - Citizen (temp)",
+          "event": [{ "listen": "test", "script": { "exec": ["var j=pm.response.json(); if(j.access_token){pm.collectionVariables.set('token',j.access_token);}"] } }],
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{base_url}}/api/v1/temp/citizen-login?user_id={{citizen_user_id}}", "host": ["{{base_url}}"], "path": ["api","v1","temp","citizen-login"], "query": [{"key": "user_id", "value": "{{citizen_user_id}}"}] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. User Management",
+      "item": [
+        {
+          "name": "Create Citizen",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/api/v1/users/", "host": ["{{base_url}}"], "path": ["api","v1","users",""] },
+            "body": { "mode": "raw", "raw": "{\n  \"user_type\": \"citizen\",\n  \"phone_number\": \"+353891234571\",\n  \"full_name\": \"Mike O'Brien\",\n  \"email\": \"mike.obrien@gmail.com\"\n}" }
+          }
+        },
+        {
+          "name": "Create Team Member",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/api/v1/users/", "host": ["{{base_url}}"], "path": ["api","v1","users",""] },
+            "body": { "mode": "raw", "raw": "{\n  \"user_type\": \"team\",\n  \"phone_number\": \"+353891234572\",\n  \"full_name\": \"Sarah Fire Officer\",\n  \"email\": \"sarah@dublin-fire.ie\",\n  \"password\": \"FirePass123\",\n  \"role\": \"STAFF\",\n  \"department\": \"FIRE\",\n  \"employee_id\": \"FIRE-002\"\n}" }
+          }
+        },
+        {
+          "name": "List All Users (combined)",
+          "request": { "method": "GET", "url": { "raw": "{{base_url}}/api/v1/users/", "host": ["{{base_url}}"], "path": ["api","v1","users",""] } }
+        },
+        {
+          "name": "List Citizens Only",
+          "request": { "method": "GET", "url": { "raw": "{{base_url}}/api/v1/users/?user_type=citizen", "host": ["{{base_url}}"], "path": ["api","v1","users",""], "query": [{"key": "user_type", "value": "citizen"}] } }
+        },
+        {
+          "name": "List Team Members Only",
+          "request": { "method": "GET", "url": { "raw": "{{base_url}}/api/v1/users/?user_type=team", "host": ["{{base_url}}"], "path": ["api","v1","users",""], "query": [{"key": "user_type", "value": "team"}] } }
+        },
+        {
+          "name": "List by Department",
+          "request": { "method": "GET", "url": { "raw": "{{base_url}}/api/v1/users/?user_type=team&department=FIRE", "host": ["{{base_url}}"], "path": ["api","v1","users",""], "query": [{"key": "user_type", "value": "team"}, {"key": "department", "value": "FIRE"}] } }
+        },
+        {
+          "name": "List by Unit Type (for unit creation)",
+          "request": { "method": "GET", "url": { "raw": "{{base_url}}/api/v1/users/?user_type=team&unit_type=FIRE_ENGINE", "host": ["{{base_url}}"], "path": ["api","v1","users",""], "query": [{"key": "user_type", "value": "team"}, {"key": "unit_type", "value": "FIRE_ENGINE"}] } }
+        },
+        {
+          "name": "List Unassigned Members",
+          "request": { "method": "GET", "url": { "raw": "{{base_url}}/api/v1/users/?user_type=team&exclude_assigned=true", "host": ["{{base_url}}"], "path": ["api","v1","users",""], "query": [{"key": "user_type", "value": "team"}, {"key": "exclude_assigned", "value": "true"}] } }
+        },
+        {
+          "name": "Search Users",
+          "request": { "method": "GET", "url": { "raw": "{{base_url}}/api/v1/users/?search=Smith", "host": ["{{base_url}}"], "path": ["api","v1","users",""], "query": [{"key": "search", "value": "Smith"}] } }
+        },
+        {
+          "name": "Department Map (unit type → department)",
+          "request": { "method": "GET", "url": { "raw": "{{base_url}}/api/v1/users/department-map", "host": ["{{base_url}}"], "path": ["api","v1","users","department-map"] } }
+        },
+        {
+          "name": "Get User Details",
+          "request": { "method": "GET", "url": { "raw": "{{base_url}}/api/v1/users/{{citizen_user_id}}", "host": ["{{base_url}}"], "path": ["api","v1","users","{{citizen_user_id}}"] } }
+        },
+        {
+          "name": "Get Team Member Details",
+          "request": { "method": "GET", "url": { "raw": "{{base_url}}/api/v1/users/{{team_member_id}}", "host": ["{{base_url}}"], "path": ["api","v1","users","{{team_member_id}}"] } }
+        },
+        {
+          "name": "Update User Status",
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/api/v1/users/{{citizen_user_id}}/status", "host": ["{{base_url}}"], "path": ["api","v1","users","{{citizen_user_id}}","status"] },
+            "body": { "mode": "raw", "raw": "{\n  \"status\": \"ACTIVE\",\n  \"reason\": \"Account verified\"\n}" }
+          }
+        },
+        {
+          "name": "Delete User (soft)",
+          "request": { "method": "DELETE", "url": { "raw": "{{base_url}}/api/v1/users/USER_ID_HERE", "host": ["{{base_url}}"], "path": ["api","v1","users","USER_ID_HERE"] } }
+        }
+      ]
+    },
+    {
+      "name": "3. Disaster Reports",
+      "item": [
+        {
+          "name": "Submit Report (with photos)",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{base_url}}/api/v1/disaster-reports/submit", "host": ["{{base_url}}"], "path": ["api","v1","disaster-reports","submit"] },
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                { "key": "user_id", "value": "{{citizen_user_id}}", "type": "text" },
+                { "key": "location_address", "value": "O'Connell Street, Dublin 1", "type": "text" },
+                { "key": "disaster_type", "value": "FIRE", "type": "text" },
+                { "key": "severity", "value": "CRITICAL", "type": "text" },
+                { "key": "description", "value": "Large fire in commercial building.", "type": "text" },
+                { "key": "latitude", "value": "53.3498", "type": "text" },
+                { "key": "longitude", "value": "-6.2603", "type": "text" },
+                { "key": "people_affected", "value": "80", "type": "text" },
+                { "key": "multiple_casualties", "value": "true", "type": "text" },
+                { "key": "structural_damage", "value": "true", "type": "text" },
+                { "key": "road_blocked", "value": "true", "type": "text" },
+                { "key": "files", "type": "file", "src": "" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get Pending Reports",
+          "request": { "method": "GET", "url": { "raw": "{{base_url}}/api/v1/disaster-reports/pending/all", "host": ["{{base_url}}"], "path": ["api","v1","disaster-reports","pending","all"] } }
+        },
+        {
+          "name": "Get Clustered Reports",
+          "request": { "method": "GET", "url": { "raw": "{{base_url}}/api/v1/disaster-reports/pending/clustered", "host": ["{{base_url}}"], "path": ["api","v1","disaster-reports","pending","clustered"] } }
+        },
+        {
+          "name": "Get Report by ID",
+          "request": { "method": "GET", "url": { "raw": "{{base_url}}/api/v1/disaster-reports/{{report_id}}", "host": ["{{base_url}}"], "path": ["api","v1","disaster-reports","{{report_id}}"] } }
+        },
+        {
+          "name": "Get Reports by User",
+          "request": { "method": "GET", "url": { "raw": "{{base_url}}/api/v1/disaster-reports/user/{{citizen_user_id}}", "host": ["{{base_url}}"], "path": ["api","v1","disaster-reports","user","{{citizen_user_id}}"] } }
+        },
+        {
+          "name": "Review Report",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/api/v1/disaster-reports/{{report_id}}/review", "host": ["{{base_url}}"], "path": ["api","v1","disaster-reports","{{report_id}}","review"] },
+            "body": { "mode": "raw", "raw": "{\n  \"reviewed_by_id\": \"{{team_member_id}}\",\n  \"action\": \"verified\"\n}" }
+          }
+        },
+        {
+          "name": "Bulk Review Cluster",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/api/v1/disaster-reports/cluster/review", "host": ["{{base_url}}"], "path": ["api","v1","disaster-reports","cluster","review"] },
+            "body": { "mode": "raw", "raw": "{\n  \"report_ids\": [\"ID_1\", \"ID_2\"],\n  \"reviewed_by_id\": \"{{team_member_id}}\",\n  \"action\": \"verified\"\n}" }
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Disaster Management",
+      "item": [
+        {
+          "name": "List ACTIVE Disasters",
+          "request": { "method": "GET", "url": { "raw": "{{base_url}}/api/v1/disasters/active", "host": ["{{base_url}}"], "path": ["api","v1","disasters","active"] } }
+        },
+        {
+          "name": "List ALL Disasters",
+          "request": { "method": "GET", "url": { "raw": "{{base_url}}/api/v1/disasters/all", "host": ["{{base_url}}"], "path": ["api","v1","disasters","all"] } }
+        },
+        {
+          "name": "Get Disaster Details",
+          "request": { "method": "GET", "url": { "raw": "{{base_url}}/api/v1/disasters/{{disaster_id}}", "host": ["{{base_url}}"], "path": ["api","v1","disasters","{{disaster_id}}"] } }
+        },
+        {
+          "name": "Get Disaster Photos",
+          "request": { "method": "GET", "url": { "raw": "{{base_url}}/api/v1/disasters/{{disaster_id}}/photos", "host": ["{{base_url}}"], "path": ["api","v1","disasters","{{disaster_id}}","photos"] } }
+        },
+        {
+          "name": "Get Disaster Deployments",
+          "request": { "method": "GET", "url": { "raw": "{{base_url}}/api/v1/disasters/{{disaster_id}}/deployments", "host": ["{{base_url}}"], "path": ["api","v1","disasters","{{disaster_id}}","deployments"] } }
+        },
+        {
+          "name": "Escalate Priority",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/api/v1/disasters/{{disaster_id}}/escalate", "host": ["{{base_url}}"], "path": ["api","v1","disasters","{{disaster_id}}","escalate"] },
+            "body": { "mode": "raw", "raw": "{\n  \"new_severity\": \"CRITICAL\",\n  \"reason\": \"Fire spreading\"\n}" }
+          }
+        },
+        {
+          "name": "Resolve Disaster",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/api/v1/disasters/{{disaster_id}}/resolve", "host": ["{{base_url}}"], "path": ["api","v1","disasters","{{disaster_id}}","resolve"] },
+            "body": { "mode": "raw", "raw": "{\n  \"resolution_notes\": \"Fire contained. All casualties treated.\"\n}" }
+          }
+        }
+      ]
+    },
+    {
+      "name": "5. Emergency Units",
+      "item": [
+        {
+          "name": "Create Unit (with crew)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/api/v1/emergency-units/", "host": ["{{base_url}}"], "path": ["api","v1","emergency-units",""] },
+            "body": { "mode": "raw", "raw": "{\n  \"unit_code\": \"F-30\",\n  \"unit_name\": \"Fire Response Unit\",\n  \"unit_type\": \"FIRE_ENGINE\",\n  \"capacity\": 4,\n  \"station_name\": \"Tara Street Station\",\n  \"station_address\": \"Tara Street, Dublin 2\",\n  \"station_latitude\": 53.3474,\n  \"station_longitude\": -6.2530,\n  \"commander_id\": \"{{team_member_id}}\",\n  \"crew_member_ids\": [\"{{team_member_id}}\"],\n  \"vehicle_model\": \"Scania P280\",\n  \"vehicle_year\": 2023\n}" }
+          }
+        },
+        {
+          "name": "List All Units",
+          "request": { "method": "GET", "url": { "raw": "{{base_url}}/api/v1/emergency-units/", "host": ["{{base_url}}"], "path": ["api","v1","emergency-units",""] } }
+        },
+        {
+          "name": "Available Units (dispatch)",
+          "request": { "method": "GET", "url": { "raw": "{{base_url}}/api/v1/emergency-units/available?disaster_id={{disaster_id}}", "host": ["{{base_url}}"], "path": ["api","v1","emergency-units","available"], "query": [{"key": "disaster_id", "value": "{{disaster_id}}"}] } }
+        },
+        {
+          "name": "Get Unit Details",
+          "request": { "method": "GET", "url": { "raw": "{{base_url}}/api/v1/emergency-units/{{unit_id}}", "host": ["{{base_url}}"], "path": ["api","v1","emergency-units","{{unit_id}}"] } }
+        },
+        {
+          "name": "Update Unit Config",
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/api/v1/emergency-units/{{unit_id}}", "host": ["{{base_url}}"], "path": ["api","v1","emergency-units","{{unit_id}}"] },
+            "body": { "mode": "raw", "raw": "{\n  \"unit_name\": \"Updated Name\",\n  \"vehicle_model\": \"Mercedes Sprinter\"\n}" }
+          }
+        },
+        {
+          "name": "Replace Crew",
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/api/v1/emergency-units/{{unit_id}}/crew", "host": ["{{base_url}}"], "path": ["api","v1","emergency-units","{{unit_id}}","crew"] },
+            "body": { "mode": "raw", "raw": "{\n  \"crew_member_ids\": [\"{{team_member_id}}\"],\n  \"commander_id\": \"{{team_member_id}}\"\n}" }
+          }
+        },
+        {
+          "name": "Add Crew Member",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/api/v1/emergency-units/{{unit_id}}/crew", "host": ["{{base_url}}"], "path": ["api","v1","emergency-units","{{unit_id}}","crew"] },
+            "body": { "mode": "raw", "raw": "{\n  \"team_member_id\": \"{{team_member_id}}\"\n}" }
+          }
+        },
+        {
+          "name": "Remove Crew Member",
+          "request": { "method": "DELETE", "url": { "raw": "{{base_url}}/api/v1/emergency-units/{{unit_id}}/crew/{{team_member_id}}", "host": ["{{base_url}}"], "path": ["api","v1","emergency-units","{{unit_id}}","crew","{{team_member_id}}"] } }
+        },
+        {
+          "name": "Decommission Unit",
+          "request": { "method": "DELETE", "url": { "raw": "{{base_url}}/api/v1/emergency-units/{{unit_id}}", "host": ["{{base_url}}"], "path": ["api","v1","emergency-units","{{unit_id}}"] } }
+        }
+      ]
+    },
+    {
+      "name": "6. Deploy Services",
+      "item": [
+        {
+          "name": "Suggested Units",
+          "request": { "method": "GET", "url": { "raw": "{{base_url}}/api/v1/disasters/{{disaster_id}}/suggested-units", "host": ["{{base_url}}"], "path": ["api","v1","disasters","{{disaster_id}}","suggested-units"] } }
+        },
+        {
+          "name": "Dispatch Units",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/api/v1/disasters/{{disaster_id}}/dispatch", "host": ["{{base_url}}"], "path": ["api","v1","disasters","{{disaster_id}}","dispatch"] },
+            "body": { "mode": "raw", "raw": "{\n  \"unit_ids\": [\"{{unit_id}}\"],\n  \"priority_level\": \"CRITICAL\",\n  \"special_instructions\": \"Approach from north side.\"\n}" }
+          }
+        },
+        {
+          "name": "Get Route",
+          "request": { "method": "GET", "url": { "raw": "{{base_url}}/api/v1/deployments/{{deployment_id}}/route", "host": ["{{base_url}}"], "path": ["api","v1","deployments","{{deployment_id}}","route"] } }
+        },
+        {
+          "name": "Update GPS",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/api/v1/deployments/{{deployment_id}}/location", "host": ["{{base_url}}"], "path": ["api","v1","deployments","{{deployment_id}}","location"] },
+            "body": { "mode": "raw", "raw": "{\n  \"latitude\": 53.3485,\n  \"longitude\": -6.2560,\n  \"heading\": 45,\n  \"speed_kmh\": 35\n}" }
+          }
+        },
+        {
+          "name": "Unit Positions (Map)",
+          "request": { "method": "GET", "url": { "raw": "{{base_url}}/api/v1/disasters/{{disaster_id}}/unit-positions", "host": ["{{base_url}}"], "path": ["api","v1","disasters","{{disaster_id}}","unit-positions"] } }
+        },
+        {
+          "name": "Recall Unit",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/api/v1/deployments/{{deployment_id}}/recall", "host": ["{{base_url}}"], "path": ["api","v1","deployments","{{deployment_id}}","recall"] },
+            "body": { "mode": "raw", "raw": "{\n  \"reason\": \"Situation downgraded.\"\n}" }
+          }
+        },
+        {
+          "name": "Calculate Route (general)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/api/v1/routes/calculate", "host": ["{{base_url}}"], "path": ["api","v1","routes","calculate"] },
+            "body": { "mode": "raw", "raw": "{\n  \"origin_lat\": 53.3474,\n  \"origin_lon\": -6.2530,\n  \"dest_lat\": 53.3498,\n  \"dest_lon\": -6.2603\n}" }
+          }
+        }
+      ]
+    },
+    {
+      "name": "7. Deployments (Responder)",
+      "item": [
+        {
+          "name": "Active Missions",
+          "request": { "method": "GET", "url": { "raw": "{{base_url}}/api/v1/deployments/unit/{{unit_id}}/active", "host": ["{{base_url}}"], "path": ["api","v1","deployments","unit","{{unit_id}}","active"] } }
+        },
+        {
+          "name": "Completed Missions",
+          "request": { "method": "GET", "url": { "raw": "{{base_url}}/api/v1/deployments/unit/{{unit_id}}/completed", "host": ["{{base_url}}"], "path": ["api","v1","deployments","unit","{{unit_id}}","completed"] } }
+        },
+        {
+          "name": "Deployment Details",
+          "request": { "method": "GET", "url": { "raw": "{{base_url}}/api/v1/deployments/{{deployment_id}}", "host": ["{{base_url}}"], "path": ["api","v1","deployments","{{deployment_id}}"] } }
+        },
+        {
+          "name": "Update → EN_ROUTE",
+          "request": { "method": "POST", "header": [{ "key": "Content-Type", "value": "application/json" }], "url": { "raw": "{{base_url}}/api/v1/deployments/{{deployment_id}}/update-status", "host": ["{{base_url}}"], "path": ["api","v1","deployments","{{deployment_id}}","update-status"] }, "body": { "mode": "raw", "raw": "{\"new_status\": \"EN_ROUTE\"}" } }
+        },
+        {
+          "name": "Update → ON_SCENE",
+          "request": { "method": "POST", "header": [{ "key": "Content-Type", "value": "application/json" }], "url": { "raw": "{{base_url}}/api/v1/deployments/{{deployment_id}}/update-status", "host": ["{{base_url}}"], "path": ["api","v1","deployments","{{deployment_id}}","update-status"] }, "body": { "mode": "raw", "raw": "{\n  \"new_status\": \"ON_SCENE\",\n  \"situation_report\": \"Fire confirmed.\",\n  \"tags\": [\"casualties_present\"],\n  \"minor_injuries\": 4,\n  \"serious_injuries\": 2,\n  \"location_verified\": true\n}" } }
+        },
+        {
+          "name": "Update → IN_PROGRESS",
+          "request": { "method": "POST", "header": [{ "key": "Content-Type", "value": "application/json" }], "url": { "raw": "{{base_url}}/api/v1/deployments/{{deployment_id}}/update-status", "host": ["{{base_url}}"], "path": ["api","v1","deployments","{{deployment_id}}","update-status"] }, "body": { "mode": "raw", "raw": "{\"new_status\": \"IN_PROGRESS\", \"situation_report\": \"Containment in progress.\"}" } }
+        },
+        {
+          "name": "Update → COMPLETED",
+          "request": { "method": "POST", "header": [{ "key": "Content-Type", "value": "application/json" }], "url": { "raw": "{{base_url}}/api/v1/deployments/{{deployment_id}}/update-status", "host": ["{{base_url}}"], "path": ["api","v1","deployments","{{deployment_id}}","update-status"] }, "body": { "mode": "raw", "raw": "{\"new_status\": \"COMPLETED\", \"situation_report\": \"Fire extinguished.\", \"assessment_notes\": \"Structural inspection needed.\"}" } }
+        }
+      ]
+    }
+  ]
+}

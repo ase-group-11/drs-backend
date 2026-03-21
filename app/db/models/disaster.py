@@ -308,7 +308,7 @@ if TYPE_CHECKING:
     from app.db.models.user import User
     from app.db.models.emergency_team import EmergencyTeam
     from app.db.models.disaster_report import DisasterReport
-
+    from app.db.models.emergency_unit import EmergencyUnit
 
 class Disaster(Base):
     """
@@ -429,6 +429,14 @@ class Disaster(Base):
         comment="Department handling this disaster"
     )
     
+    assigned_unit_id: Mapped[Optional[str]] = mapped_column(  # ← MOVE HERE
+        UUID(as_uuid=False),
+        ForeignKey("emergency_units.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+        comment="Emergency unit assigned to this disaster"
+    )
+    
     # === TIMELINE ===
     response_time: Mapped[Optional[datetime]] = mapped_column(
         nullable=True,
@@ -486,6 +494,19 @@ class Disaster(Base):
         lazy="select"
     )
     
+    # assigned_unit_id: Mapped[Optional[str]] = mapped_column(
+    #     UUID(as_uuid=False),
+    #     ForeignKey("emergency_units.id", ondelete="SET NULL"),
+    #     nullable=True, index=True,
+    # )
+
+    assigned_unit: Mapped[Optional["EmergencyUnit"]] = relationship(
+        "EmergencyUnit",
+        foreign_keys=[assigned_unit_id],
+        back_populates="assigned_disasters",
+        lazy="select"
+    )
+    
     # === INDEXES ===
     __table_args__ = (
         Index('idx_disasters_type_severity', 'type', 'severity'),
@@ -496,6 +517,7 @@ class Disaster(Base):
         Index('idx_disasters_tracking_id', 'tracking_id'),
         Index('idx_disasters_assigned', 'assigned_to_id', 'disaster_status'),
         Index('idx_disasters_dept_status', 'assigned_department', 'disaster_status'),
+        Index('idx_disasters_assigned_unit', 'assigned_unit_id'),
     )
     
     def __repr__(self) -> str:

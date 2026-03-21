@@ -27,6 +27,7 @@ from app.db.models.user import User
 from app.db.models.emergency_team import EmergencyTeam
 from app.db.models.disaster_report import DisasterReport
 from app.db.models.reroute import RoadSegment, ReroutePlan, TrafficOverride, AuditLog
+from app.db.models.emergency_unit import EmergencyUnit  # add this line
 
 # Alembic Config object
 config = context.config

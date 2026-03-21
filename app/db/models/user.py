@@ -6,7 +6,7 @@ Regular users authenticate using OTP (SMS-based).
 They can submit emergency requests and track their status.
 """
 
-from sqlalchemy import String, Enum as SQLEnum, Index
+from sqlalchemy import Integer, String, Enum as SQLEnum, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from typing import Optional, List, TYPE_CHECKING
 from app.db.models.base import Base
@@ -62,6 +62,14 @@ class User(Base):
         index=True
     )
     
+    # False report tracking — incremented each time one of this user's reports is flagged FALSE_ALARM
+    false_report_count: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default="0",
+        nullable=False,
+    )
+
     # Account status
     status: Mapped[UserStatus] = mapped_column(
         SQLEnum(UserStatus, name="user_status"),
