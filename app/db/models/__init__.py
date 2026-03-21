@@ -17,6 +17,8 @@ from app.db.models.enums import (
     DisasterReportStatus,
     UnitType,
     UnitStatus,
+    EvaluationFlag,
+    RecommendedService,
 )
 from app.db.models.user import User
 from app.db.models.emergency_team import EmergencyTeam       
@@ -44,4 +46,6 @@ __all__ = [
     "DisasterReportStatus",
     "UnitType",
     "UnitStatus",
+    "EvaluationFlag",
+    "RecommendedService",
 ]

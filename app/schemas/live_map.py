@@ -21,8 +21,26 @@ class DisastersRequest(BaseModel):
     )
     types: Optional[str] = Field(
         None,
-        description="Comma-separated disaster types (flood,fire,earthquake,...)"
+        description="Comma-separated disaster types (case-insensitive: flood,fire,earthquake,...)"
     )
+
+    @validator('types')
+    def normalise_types(cls, v):
+        """Normalise disaster types to UPPERCASE to match DisasterType enum."""
+        if v is None:
+            return v
+        from app.utils.enum_utils import normalize_enum_value
+        from app.db.models.enums import DisasterType
+        normalised = []
+        for t in v.split(','):
+            t = t.strip()
+            if t:
+                try:
+                    normalised.append(normalize_enum_value(DisasterType, t))
+                except ValueError:
+                    valid = [m.value for m in DisasterType]
+                    raise ValueError(f"Invalid disaster type '{t}'. Valid: {valid} (case-insensitive)")
+        return ','.join(normalised)
     min_severity: Optional[str] = Field(
         None,
         description="Minimum severity level (low,medium,high,critical)"
@@ -51,11 +69,15 @@ class DisastersRequest(BaseModel):
     
     @validator('min_severity')
     def validate_severity(cls, v):
-        """Validate severity level."""
+        """Validate and normalise severity to match DisasterSeverity enum (UPPERCASE)."""
         if v is not None:
-            valid_severities = ["low", "medium", "high", "critical"]
-            if v.lower() not in valid_severities:
-                raise ValueError(f"Severity must be one of: {', '.join(valid_severities)}")
+            from app.utils.enum_utils import normalize_enum_value
+            from app.db.models.enums import DisasterSeverity
+            try:
+                return normalize_enum_value(DisasterSeverity, v)
+            except ValueError:
+                valid = [m.value for m in DisasterSeverity]
+                raise ValueError(f"Severity must be one of: {valid} (case-insensitive)")
         return v
 
 

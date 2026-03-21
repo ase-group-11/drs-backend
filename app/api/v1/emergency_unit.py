@@ -20,21 +20,22 @@ router = APIRouter(prefix="/emergency-units", tags=["Emergency Units"])
 # ── Request Models ──
 
 class CreateUnitRequest(BaseModel):
-    unit_code: str = Field(...)
-    unit_name: str = Field(...)
-    unit_type: str = Field(...)
-    department: str = Field(...)
-    capacity: int = Field(4)
-    station_name: str = Field(...)
+    unit_code: str = Field(..., description="Unit code e.g. F-12")
+    unit_name: str = Field(..., description="Unit name e.g. Fire Response Unit")
+    unit_type: str = Field(..., description="AMBULANCE, FIRE_ENGINE, PATROL_CAR, RESCUE, HAZMAT, COMMAND")
+    department: Optional[str] = Field(None, description="Auto-mapped from unit_type if not provided. FIRE, MEDICAL, POLICE, IT")
+    capacity: int = Field(4, description="Max crew size")
+    station_name: str = Field(..., description="Station name")
     station_address: Optional[str] = None
     station_latitude: Optional[float] = 53.3498
     station_longitude: Optional[float] = -6.2603
-    commander_id: Optional[str] = None
+    commander_id: Optional[str] = Field(None, description="UUID of team member to assign as commander")
+    crew_member_ids: Optional[List[str]] = Field(None, description="List of team member UUIDs to add as crew")
     description: Optional[str] = None
     vehicle_model: Optional[str] = None
     vehicle_license_plate: Optional[str] = None
     vehicle_year: Optional[int] = None
-    crew_member_ids: Optional[List[str]] = None
+    equipment_checklist: Optional[List[dict]] = None
 
 
 class UpdateUnitRequest(BaseModel):
@@ -99,14 +100,21 @@ async def list_units(
     )
 
 
-@router.post("/", status_code=status.HTTP_201_CREATED, summary="Create new unit")
+@router.post("/", status_code=status.HTTP_201_CREATED, summary="Create new emergency unit",
+    description=(
+        "Create a new unit with commander and crew. "
+        "Department is auto-mapped from unit_type if not provided. "
+        "Commander and crew are validated against emergency_teams table."
+    )
+)
 async def create_unit(
     data: CreateUnitRequest,
     db: AsyncSession = Depends(get_db),
     current_user: Dict[str, Any] = Depends(get_current_team_member),
 ):
     service = EmergencyUnitService(db)
-    return await service.create_unit(data.model_dump())
+    create_data = {k: v for k, v in data.model_dump().items() if v is not None}
+    return await service.create_unit(create_data)
 
 
 # ── DYNAMIC ROUTES LAST ──
