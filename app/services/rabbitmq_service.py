@@ -34,10 +34,10 @@ EXCHANGE_NAME = "disaster_events"
 # Queue → Routing key bindings
 QUEUE_BINDINGS = {
     "evaluation_queue": ["disaster.verified"],
-    "coordination_queue": ["disaster.verified", "disaster.backup_requested"],
-    "notification_queue": ["disaster.dispatched", "disaster.verified", "disaster.updated",
+    "coordination_queue": ["disaster.verified", "disaster.evaluated", "disaster.backup_requested"],
+    "notification_queue": ["disaster.dispatched", "disaster.verified", "disaster.evaluated", "disaster.updated",
                            "disaster.resolved", "disaster.backup_requested", "disaster.unit_completed"],
-    "reroute_queue": ["disaster.verified", "disaster.resolved", "disaster.unit_completed"],
+    "reroute_queue": ["disaster.verified", "disaster.evaluated", "disaster.resolved", "disaster.unit_completed"],
 }
 
 
@@ -176,15 +176,24 @@ def publish_disaster_reported(disaster_data: Dict[str, Any]) -> bool:
 
 
 def publish_disaster_evaluated(disaster_data: Dict[str, Any]) -> bool:
-    """Publish disaster.evaluated event — triggers coordination + reroute."""
+    """Publish disaster.evaluated event — triggers coordination, notification + reroute."""
     service = get_rabbitmq_service()
     return service.publish("disaster.evaluated", {
         "disaster_id": disaster_data.get("disaster_id"),
         "tracking_id": disaster_data.get("tracking_id"),
         "severity": disaster_data.get("severity"),
-        "impact_radius": disaster_data.get("impact_radius"),
+        "confidence": disaster_data.get("confidence"),
+        "recommended_services": disaster_data.get("recommended_services"),
+        "trigger_deploy": disaster_data.get("trigger_deploy"),
+        "trigger_reroute": disaster_data.get("trigger_reroute"),
+        "trigger_evacuation": disaster_data.get("trigger_evacuation"),
+        "flag": disaster_data.get("flag"),
+        "strategy_used": disaster_data.get("strategy_used"),
+        "evaluated_at": disaster_data.get("evaluated_at"),
+        "impact_radius_km": disaster_data.get("impact_radius_km"),
+        "estimated_population": disaster_data.get("estimated_population"),
         "affected_roads": disaster_data.get("affected_roads"),
-        "required_services": disaster_data.get("required_services"),
+        "affected_facilities": disaster_data.get("affected_facilities"),
     })
 
 
@@ -196,6 +205,30 @@ def publish_disaster_updated(disaster_data: Dict[str, Any]) -> bool:
         "tracking_id": disaster_data.get("tracking_id"),
         "update_type": disaster_data.get("update_type"),
         "details": disaster_data.get("details"),
+    })
+
+
+def publish_reporter_notification(notification_data: Dict[str, Any]) -> bool:
+    """
+    Publish a reporter-targeted notification to the notification queue.
+
+    Routing key: disaster.updated — already bound to notification_queue.
+
+    Used by the evaluation service for:
+    - REPORT_RECEIVED: "Your report has been received and evaluated."
+    - FALSE_ALARM_WARNING: "Your report was classified as a false alarm."
+    """
+    service = get_rabbitmq_service()
+    return service.publish("disaster.updated", {
+        "disaster_id": notification_data.get("disaster_id"),
+        "tracking_id": notification_data.get("tracking_id"),
+        "update_type": "reporter_notification",
+        "notification_type": notification_data.get("notification_type"),
+        "user_id": notification_data.get("user_id"),
+        "severity": notification_data.get("severity"),
+        "flag": notification_data.get("flag"),
+        "response_scale": notification_data.get("response_scale"),
+        "message": notification_data.get("message"),
     })
 
 

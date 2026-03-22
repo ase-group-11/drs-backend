@@ -26,6 +26,7 @@ from app.db.models.base import Base
 from app.db.models.user import User
 from app.db.models.emergency_team import EmergencyTeam
 from app.db.models.disaster_report import DisasterReport
+from app.db.models.reroute import RoadSegment, ReroutePlan, TrafficOverride, AuditLog
 from app.db.models.emergency_unit import EmergencyUnit  # add this line
 
 # Alembic Config object
@@ -44,7 +45,7 @@ if database_url.startswith("postgresql+asyncpg://"):
     elif "&ssl=require" in database_url:
         database_url = database_url.replace("&ssl=require", "&sslmode=require")
     
-    print(f"✅ Converted async URL to sync URL for migration")
+    print(f"Converted async URL to sync URL for migration")
     print(f"   Using SSL mode: require")
 
 config.set_main_option("sqlalchemy.url", database_url)

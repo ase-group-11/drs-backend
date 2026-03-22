@@ -82,8 +82,9 @@ async def register_team_member(
         # role = EmergencyTeamRole(request.role)
         # department = Department(request.department)
         
-        role = EmergencyTeamRole(request.role.upper())
-        department = Department(request.department.upper())
+        from app.utils.enum_utils import coerce_enum
+        role = coerce_enum(EmergencyTeamRole, request.role)
+        department = coerce_enum(Department, request.department)
         
         result = await service.register_team_member(
             phone_number=request.phone_number,
