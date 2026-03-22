@@ -864,6 +864,16 @@ class DeploymentService:
                 })
 
             await self.db.flush()
+            
+            pending_event = {
+                "topic" : "disaster.dispatched",
+                "payload" : {
+                    "disaster_id" : disaster_id,
+                    "tracking_id" : str(disaster["tracking_id"]),
+                    "units_dispatched" : len(dispatched_units),
+                    "priority_level" : priority_level,
+                },
+            }
 
             # Publish RabbitMQ event
             from app.services.rabbitmq_service import get_rabbitmq_service
