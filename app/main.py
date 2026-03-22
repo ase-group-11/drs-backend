@@ -61,11 +61,15 @@ async def lifespan(app: FastAPI):
     set_live_map_providers(map_provider, traffic_provider)
     logger.info("🗺️  Map and traffic providers initialized")
     
+    _listener = asyncio.create_task(redis_listener())                   # ← ADD
+    logger.info("Redis notification listener started")
+    
     yield
     
     # Shutdown
     logger.info("=" * 70)
     logger.info("Shutting down...")
+    _listener.cancel()
     await close_redis_connection()
     await traffic_provider.close()
     logger.info("Cleanup complete")

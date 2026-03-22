@@ -51,6 +51,12 @@ class Settings(BaseSettings):
         description="Redis connection URL"
     )
     
+    # ── RabbitMQ ──────────────────────────────────────────────
+    RABBITMQ_URL: str = Field(
+        default="amqp://guest:guest@localhost:5672/",
+        description="RabbitMQ connection URL (AMQP)"
+    )
+    
     # JWT Configuration
     JWT_SECRET_KEY: str = Field(
         ...,  # Required field
@@ -119,6 +125,20 @@ class Settings(BaseSettings):
     TRAFFIC_CACHE_TTL: int = Field(
         default=30,
         description="Cache TTL for traffic data in seconds (default: 30s)"
+    )
+    
+    # ── SendGrid Email ────────────────────────────────────────
+    SENDGRID_API_KEY: str = Field(
+        default="",
+        description="SendGrid API key (starts with SG.)"
+    )
+    SENDGRID_FROM_EMAIL: str = Field(
+        default="",
+        description="Verified sender email address in SendGrid"
+    )
+    SENDGRID_FROM_NAME: str = Field(
+        default="Dublin Disaster Response",
+        description="Display name shown in the From header"
     )
     
     # Azure Blob Storage

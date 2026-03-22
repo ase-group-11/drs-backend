@@ -19,12 +19,13 @@ Queues:
   - reroute_queue       → Re-Route Service
 """
 
-import os
 import json
 import logging
 import pika
 from typing import Dict, Any, Optional
 from datetime import datetime
+
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +47,8 @@ class RabbitMQService:
     def __init__(self):
         self.connection: Optional[pika.BlockingConnection] = None
         self.channel: Optional[pika.channel.Channel] = None
-        self.rabbitmq_url = os.getenv("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/")
+        # self.rabbitmq_url = os.getenv("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/")
+        self.rabbitmq_url = settings.RABBITMQ_URL
 
     def connect(self):
         """Establish connection to RabbitMQ and setup exchange + queues."""

@@ -22,6 +22,8 @@ import time
 import signal
 import sys
 
+from app.core.config import settings
+
 logger = logging.getLogger(__name__)
 
 EXCHANGE_NAME = "disaster_events"
@@ -32,7 +34,8 @@ class BaseConsumer:
 
     def __init__(self, queue_name: str):
         self.queue_name = queue_name
-        self.rabbitmq_url = os.getenv("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/")
+        # self.rabbitmq_url = os.getenv("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/")
+        self.rabbitmq_url = settings.RABBITMQ_URL
         self.connection = None
         self.channel = None
         self._running = True

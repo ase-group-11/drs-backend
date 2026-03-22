@@ -194,11 +194,23 @@ class DeploymentService:
             # Publish RabbitMQ event
             from app.services.rabbitmq_service import get_rabbitmq_service
             service = get_rabbitmq_service()
+            # service.publish("disaster.dispatched", {
+            #     "disaster_id": disaster_id,
+            #     "tracking_id": str(disaster["tracking_id"]),
+            #     "units_dispatched": len(dispatched_units),
+            #     "priority_level": priority_level,
+            # })
+            
             service.publish("disaster.dispatched", {
                 "disaster_id": disaster_id,
                 "tracking_id": str(disaster["tracking_id"]),
                 "units_dispatched": len(dispatched_units),
                 "priority_level": priority_level,
+                "location": {
+                    "lat": float(disaster["lat"]) if disaster["lat"] else None,
+                    "lon": float(disaster["lon"]) if disaster["lon"] else None,
+                },
+                "location_address": disaster["location_address"],
             })
 
             return {
@@ -236,14 +248,27 @@ class DeploymentService:
 
         try:
             # Fetch deployment
+            # dep_sql = text("""
+            #     SELECT dep.id, dep.disaster_id, dep.unit_id, dep.deployment_status,
+            #            dep.dispatched_at,
+            #            dis.tracking_id, dis.disaster_status, dis.type as disaster_type
+            #     FROM deployments dep
+            #     JOIN disasters dis ON dep.disaster_id = dis.id
+            #     WHERE dep.id = :deployment_id AND dep.deleted_at IS NULL
+            # """)
+            
             dep_sql = text("""
                 SELECT dep.id, dep.disaster_id, dep.unit_id, dep.deployment_status,
-                       dep.dispatched_at,
-                       dis.tracking_id, dis.disaster_status, dis.type as disaster_type
+                    dep.dispatched_at,
+                    dis.tracking_id, dis.disaster_status, dis.type as disaster_type,
+                    dis.location_address,
+                    ST_Y(dis.location::geometry) as lat,
+                    ST_X(dis.location::geometry) as lon
                 FROM deployments dep
                 JOIN disasters dis ON dep.disaster_id = dis.id
                 WHERE dep.id = :deployment_id AND dep.deleted_at IS NULL
             """)
+            
             result = await self.db.execute(dep_sql, {"deployment_id": deployment_id})
             dep = result.mappings().first()
 
@@ -370,11 +395,23 @@ class DeploymentService:
                 # Publish verified event
                 from app.services.rabbitmq_service import get_rabbitmq_service
                 svc = get_rabbitmq_service()
+                # svc.publish("disaster.verified", {
+                #     "disaster_id": disaster_id,
+                #     "tracking_id": str(dep["tracking_id"]),
+                #     "verified_by_unit": unit_id,
+                #     "situation_report": situation_report,
+                # })
+                
                 svc.publish("disaster.verified", {
                     "disaster_id": disaster_id,
                     "tracking_id": str(dep["tracking_id"]),
                     "verified_by_unit": unit_id,
                     "situation_report": situation_report,
+                    "location": {
+                        "lat": float(dep["lat"]) if dep["lat"] else None,
+                        "lon": float(dep["lon"]) if dep["lon"] else None,
+                    },
+                    "location_address": dep["location_address"],
                 })
 
             # If COMPLETED → publish
@@ -391,12 +428,26 @@ class DeploymentService:
             if request_immediate_backup:
                 from app.services.rabbitmq_service import get_rabbitmq_service
                 svc = get_rabbitmq_service()
+                # svc.publish("disaster.backup_requested", {
+                #     "disaster_id": disaster_id,
+                #     "tracking_id": str(dep["tracking_id"]),
+                #     "requesting_unit": unit_id,
+                #     "resources_needed": additional_resources,
+                # })
+                
                 svc.publish("disaster.backup_requested", {
                     "disaster_id": disaster_id,
                     "tracking_id": str(dep["tracking_id"]),
                     "requesting_unit": unit_id,
                     "resources_needed": additional_resources,
+                    "location": {
+                        "lat": float(dep["lat"]) if dep["lat"] else None,
+                        "lon": float(dep["lon"]) if dep["lon"] else None,
+                    },
+                    "location_address": dep["location_address"],
                 })
+                
+                
 
             await self.db.flush()
 
