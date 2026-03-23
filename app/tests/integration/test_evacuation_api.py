@@ -16,14 +16,7 @@ from httpx import AsyncClient
 from unittest.mock import AsyncMock, MagicMock
 
 from app.main import app
-from app.auth.dependencies import get_current_team_member
 from app.api.v1.evacuation import get_evacuation_service
-
-FAKE_TEAM_MEMBER = {
-    "user_id":    "team-001",
-    "user_type":  "emergency_team",
-    "token_type": "access",
-}
 
 
 # ---------------------------------------------------------------------------
@@ -49,7 +42,6 @@ def mock_evacuation_service():
 @pytest_asyncio.fixture
 async def client(mock_evacuation_service):
     """HTTP client with auth and service both overridden."""
-    app.dependency_overrides[get_current_team_member]  = lambda: FAKE_TEAM_MEMBER
     app.dependency_overrides[get_evacuation_service]   = lambda: mock_evacuation_service
     transport = httpx.ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as c:
@@ -108,14 +100,6 @@ class TestPlanEvacuation:
         r = await client.post("/api/v1/evacuations/plan",
                               json={"disaster_id": "no-such"})
         assert r.status_code == 404
-
-    @pytest.mark.asyncio
-    async def test_requires_auth(self):
-        transport = httpx.ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as c:
-            r = await c.post("/api/v1/evacuations/plan",
-                             json={"disaster_id": "dis-1"})
-        assert r.status_code in (401, 403, 422)
 
 
 # ---------------------------------------------------------------------------

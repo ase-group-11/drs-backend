@@ -21,6 +21,7 @@ from app.api.v1 import emergency_team_auth
 from app.api.v1 import live_map
 from app.api.v1 import scenario_engine
 from app.api.v1 import reroute
+from app.api.v1 import evacuation   
 from cache.redis_client import close_redis_connection
 from app.providers.map_provider import MapProvider
 from app.providers.traffic import TrafficProvider
@@ -150,6 +151,7 @@ app.include_router(emergency_team_auth.router, prefix="/api/v1")
 app.include_router(live_map.router, prefix="/api/v1")
 app.include_router(scenario_engine.router, prefix="/api/v1")
 app.include_router(reroute.router, prefix="/api/v1")
+app.include_router(evacuation.router, prefix="/api/v1")
 
 
 
