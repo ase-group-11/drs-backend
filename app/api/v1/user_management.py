@@ -553,7 +553,7 @@ async def update_user_status(
  
         # Try citizens first
         result = await db.execute(
-            text("SELECT id, full_name, status FROM users WHERE id = :id AND deleted_at IS NULL"),
+            text("SELECT id, full_name, status FROM users WHERE id = :id"),
             {"id": user_id}
         )
         user = result.mappings().first()
@@ -582,7 +582,7 @@ async def update_user_status(
  
         # Try emergency team
         result = await db.execute(
-            text("SELECT id, full_name, status, department FROM emergency_teams WHERE id = :id AND deleted_at IS NULL"),
+            text("SELECT id, full_name, status, department FROM emergency_teams WHERE id = :id"),
             {"id": user_id}
         )
         team = result.mappings().first()
