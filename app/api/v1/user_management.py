@@ -546,39 +546,62 @@ async def update_user_status(
         from datetime import datetime
         now = datetime.utcnow()
         new_status = data.status.upper()
-
-        if new_status not in ("ACTIVE", "INACTIVE", "SUSPENDED"):
-            raise HTTPException(status_code=400, detail="Status must be ACTIVE, INACTIVE, or SUSPENDED.")
-
+ 
+        valid_statuses = ("ACTIVE", "INACTIVE", "SUSPENDED", "PENDING", "DELETED")
+        if new_status not in valid_statuses:
+            raise HTTPException(status_code=400, detail=f"Status must be one of: {', '.join(valid_statuses)}")
+ 
         # Try citizens first
         result = await db.execute(
             text("SELECT id, full_name, status FROM users WHERE id = :id AND deleted_at IS NULL"),
             {"id": user_id}
         )
         user = result.mappings().first()
-
+ 
         if user:
-            await db.execute(text("""
-                UPDATE users SET status = CAST(:status AS user_status), updated_at = :now WHERE id = :id
-            """), {"id": user_id, "status": new_status, "now": now})
+            if new_status == "DELETED":
+                # Soft delete — also set deleted_at so email/phone can be reused
+                await db.execute(text("""
+                    UPDATE users SET status = CAST(:status AS user_status),
+                        deleted_at = :now, updated_at = :now
+                    WHERE id = :id
+                """), {"id": user_id, "status": new_status, "now": now})
+            else:
+                # If reactivating a deleted user, clear deleted_at
+                await db.execute(text("""
+                    UPDATE users SET status = CAST(:status AS user_status),
+                        deleted_at = NULL, updated_at = :now
+                    WHERE id = :id
+                """), {"id": user_id, "status": new_status, "now": now})
             await db.flush()
             return {
                 "id": user_id, "full_name": user["full_name"], "user_type": "citizen",
                 "previous_status": str(user["status"]), "new_status": new_status,
                 "reason": data.reason, "message": f"{user['full_name']} → {new_status}",
             }
-
+ 
         # Try emergency team
         result = await db.execute(
             text("SELECT id, full_name, status, department FROM emergency_teams WHERE id = :id AND deleted_at IS NULL"),
             {"id": user_id}
         )
         team = result.mappings().first()
-
+ 
         if team:
-            await db.execute(text("""
-                UPDATE emergency_teams SET status = CAST(:status AS user_status), updated_at = :now WHERE id = :id
-            """), {"id": user_id, "status": new_status, "now": now})
+            if new_status == "DELETED":
+                await db.execute(text("""
+                    UPDATE emergency_teams SET status = CAST(:status AS user_status),
+                        deleted_at = :now, updated_at = :now
+                    WHERE id = :id
+                """), {"id": user_id, "status": new_status, "now": now})
+                # Remove from unit crews
+                await db.execute(text("DELETE FROM unit_crew WHERE team_member_id = :id"), {"id": user_id})
+            else:
+                await db.execute(text("""
+                    UPDATE emergency_teams SET status = CAST(:status AS user_status),
+                        deleted_at = NULL, updated_at = :now
+                    WHERE id = :id
+                """), {"id": user_id, "status": new_status, "now": now})
             await db.flush()
             return {
                 "id": user_id, "full_name": team["full_name"], "user_type": "team",
@@ -586,20 +609,20 @@ async def update_user_status(
                 "previous_status": str(team["status"]), "new_status": new_status,
                 "reason": data.reason, "message": f"{team['full_name']} → {new_status}",
             }
-
+ 
         raise HTTPException(status_code=404, detail="User not found.")
-
+ 
     except HTTPException:
         raise
     except Exception as e:
         logger.exception(f"Error updating user status: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to update status: {str(e)[:200]}")
-
-
+ 
+ 
 # ══════════════════════════════════════════════
 # DELETE: Soft delete user
 # ══════════════════════════════════════════════
-
+ 
 @router.delete(
     "/{user_id}",
     summary="Soft delete user",
@@ -613,28 +636,28 @@ async def delete_user(
     try:
         from datetime import datetime
         now = datetime.utcnow()
-
+ 
         # Try citizens
         result = await db.execute(
             text("SELECT id, full_name FROM users WHERE id = :id AND deleted_at IS NULL"),
             {"id": user_id}
         )
         user = result.mappings().first()
-
+ 
         if user:
             await db.execute(text("""
                 UPDATE users SET deleted_at = :now, status = CAST('DELETED' AS user_status), updated_at = :now WHERE id = :id
             """), {"id": user_id, "now": now})
             await db.flush()
             return {"id": user_id, "full_name": user["full_name"], "user_type": "citizen", "status": "DELETED"}
-
+ 
         # Try emergency team
         result = await db.execute(
             text("SELECT id, full_name FROM emergency_teams WHERE id = :id AND deleted_at IS NULL"),
             {"id": user_id}
         )
         team = result.mappings().first()
-
+ 
         if team:
             cmd_check = await db.execute(
                 text("SELECT COUNT(*) FROM emergency_units WHERE commander_id = :id AND deleted_at IS NULL"),
@@ -642,18 +665,19 @@ async def delete_user(
             )
             if cmd_check.scalar() > 0:
                 raise HTTPException(status_code=400, detail="Cannot delete — commanding active unit(s). Reassign commander first.")
-
+ 
             await db.execute(text("""
                 UPDATE emergency_teams SET deleted_at = :now, status = CAST('DELETED' AS user_status), updated_at = :now WHERE id = :id
             """), {"id": user_id, "now": now})
             await db.execute(text("DELETE FROM unit_crew WHERE team_member_id = :id"), {"id": user_id})
             await db.flush()
             return {"id": user_id, "full_name": team["full_name"], "user_type": "team", "status": "DELETED"}
-
+ 
         raise HTTPException(status_code=404, detail="User not found.")
-
+ 
     except HTTPException:
         raise
     except Exception as e:
         logger.exception(f"Error deleting user: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to delete user: {str(e)[:200]}")
+ 
