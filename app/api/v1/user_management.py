@@ -287,7 +287,7 @@ async def list_all_users(
         if user_type is None or user_type == "citizen":
             # Skip citizens if filtering by department/unit_type/role/exclude_assigned (team-only filters)
             if not effective_department and not role and not exclude_assigned:
-                citizen_where = ["u.deleted_at IS NULL"]
+                citizen_where = ["u.email IS NOT NULL"]
                 citizen_params = {"limit": limit}
 
                 if status_filter:
@@ -333,7 +333,7 @@ async def list_all_users(
 
         # ── Emergency Team ──
         if user_type is None or user_type == "team":
-            team_where = ["et.deleted_at IS NULL"]
+            team_where = ["et.email IS NOT NULL"]
             team_params = {"limit": limit}
 
             if status_filter:
