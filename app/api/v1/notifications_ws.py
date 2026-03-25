@@ -37,7 +37,8 @@ logger = logging.getLogger("notifications_ws")
 
 router = APIRouter(tags=["Notifications"])
 
-REDIS_URL     = os.getenv("REDIS_URL", "redis://localhost:6379")
+from app.core.config import settings as _settings
+REDIS_URL     = _settings.REDIS_URL
 REDIS_CHANNEL = "app_alerts"
 
 # In-memory set of active WebSocket connections.
@@ -147,11 +148,17 @@ async def websocket_notifications(websocket: WebSocket) -> None:
 
     try:
         while True:
-            # Keep connection alive. Inbound frames are discarded —
-            # the client only needs to receive, not send.
-            await asyncio.wait_for(websocket.receive_text(), timeout=60)
-    except asyncio.TimeoutError:
-        pass        # no data for 60 s — normal, loop back
+            # Keep connection alive — wait for client ping or any message.
+            # On timeout just loop back and keep waiting.
+            # Connection only ends on explicit disconnect or error.
+            try:
+                await asyncio.wait_for(websocket.receive_text(), timeout=60)
+            except asyncio.TimeoutError:
+                # No message for 60s — send a ping to keep connection alive
+                try:
+                    await websocket.send_text('{"type":"ping"}')
+                except Exception:
+                    break  # client gone — exit loop
     except WebSocketDisconnect:
         pass
     except Exception as exc:

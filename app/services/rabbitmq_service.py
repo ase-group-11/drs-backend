@@ -46,7 +46,7 @@ class RabbitMQService:
     def __init__(self):
         self.connection: Optional[pika.BlockingConnection] = None
         self.channel: Optional[pika.channel.Channel] = None
-        self.rabbitmq_url = os.getenv("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/")
+        from app.core.config import settings as _app_settings; self.rabbitmq_url = _app_settings.RABBITMQ_URL
 
     def connect(self):
         """Establish connection to RabbitMQ and setup exchange + queues."""

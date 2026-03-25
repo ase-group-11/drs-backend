@@ -31,6 +31,7 @@ from typing import Dict, Any, List, Optional
 
 from app.providers.integration_service import IntegrationService
 from app.repositories.reroute_repository import RerouteRepository
+from app.repositories.disaster_repository import DisasterRepository
 from app.services.traffic_distribution import optimize_traffic_distribution, DistributionPlan
 from app.services.instant_map_updates import MappingService
 from app.workers.reroute_publisher import ReroutePublisher
@@ -65,33 +66,83 @@ class RerouteService:
     async def trigger_reroute_traffic(
         self,
         disaster_id: str,
-        region_id: str,
-        affected_roads: Optional[List[Dict[str, Any]]] = None,
-    ) -> Dict[str, Any]:
+        affected_roads=None,
+    ):
         """
-        Main entry point — called by POST /reroute/trigger.
-
-        Orchestrates the full pipeline from Steps 2–12.
+        fetch the disaster record to get:
+            lat, lon         → disaster centre point
+            impact_radius_km → from disaster_metadata["evaluation"]["impact_radius_km"]
+                            (stored by _persist_result in evaluation service)
+    
+        Fallback radius: 3.0 km if metadata is missing (e.g. scenario_engine disasters
+        which don't go through evaluation).
         """
-        logger.info(f"triggerRerouteTraffic: disaster={disaster_id} region={region_id}")
-
+        from app.repositories.disaster_repository import DisasterRepository
+    
+        # Read disaster coordinates and impact radius from DB
+        disaster_repo = DisasterRepository(self.db.db)   # self.db is RerouteRepository
+        disaster = await disaster_repo.get_disaster_by_id(disaster_id)
+    
+        if not disaster:
+            return {"status": "error", "detail": f"Disaster {disaster_id} not found"}
+    
+        lat = disaster["location"]["lat"]
+        lon = disaster["location"]["lon"]
+        radius_km = (
+            disaster.get("disaster_metadata", {})
+            .get("evaluation", {})
+            .get("impact_radius_km", 3.0)
+        )
+    
         # Step 2 — blocked roads
         if affected_roads:
-            blocked_roads = affected_roads
+            blocked_roads = await self.enrich_segments_with_geometry(affected_roads)
             await self.db.upsert_road_segments(blocked_roads, disaster_id)
         else:
             blocked_roads = await self.get_blocked_roads(disaster_id)
+            # Fallback: roads were identified by evaluation but not yet written
+            # to road_segments (happens when trigger_reroute=false was used).
+            # Read them from disaster_metadata and upsert now.
+        if not blocked_roads and disaster:
+            meta_roads = (
+                disaster.get("disaster_metadata", {})
+                .get("evaluation", {})
+                .get("affected_roads", [])
+            )
+            if meta_roads:
+                # Convert string road names to segment dicts if needed
+                blocked_roads = []
+                for i, road in enumerate(meta_roads):
+                    if isinstance(road, dict):
+                        blocked_roads.append(road)
+                    else:
+                        # String fallback — use disaster lat/lon as coords
+                        blocked_roads.append({
+                            "segment_id": f"eval-seg-{disaster_id[:8]}-{i}",
+                            "road_name": road,
+                            "start_lat": lat,
+                            "start_lng": lon,
+                            "end_lat": lat,
+                            "end_lng": lon,
+                            "status": "closed",
+                            "reason": "disaster",
+                            "capacity": 300,
+                        })
+                if blocked_roads:
+                    blocked_roads = await self.enrich_segments_with_geometry(blocked_roads)
+                    await self.db.upsert_road_segments(blocked_roads, disaster_id)
 
+    
         if not blocked_roads:
-            logger.warning(f"No blocked roads found for disaster {disaster_id}")
             return {"status": "no_blocked_roads", "disaster_id": disaster_id}
-
-        # Step 3 — traffic data
-        traffic_data = await self.fetch_traffic_data(region_id)
+    
+        # Step 3 — traffic (uses lat/lon/radius)
+        traffic_data = await self.external.fetch_traffic_data(lat, lon, radius_km)
         traffic_segments = traffic_data.get("segments", [])
-
-        # Step 4 — impacted vehicles
-        vehicles = await self.find_impacted_vehicles(region_id, blocked_roads)
+    
+        # Step 4 — vehicles (uses lat/lon/radius)
+        vehicles = await self.db.get_users_in_affected_area(lat, lon, radius_km)
+ 
 
         if not vehicles:
             logger.info(f"No impacted vehicles for disaster {disaster_id}")
@@ -103,12 +154,15 @@ class RerouteService:
             return {"status": "no_vehicles_affected", "disaster_id": disaster_id}
 
         # Step 5 — alternative routes
+        # Deduplicate destinations — simulator uses 3 fixed destinations so this
+        # gives exactly 3 unique clusters = 3 TomTom calls, no 429 risk.
         destinations = list({
             (v["destination"]["lat"], v["destination"]["lng"])
             for v in vehicles
             if v.get("destination")
         })
         destination_dicts = [{"lat": lat, "lng": lng} for lat, lng in destinations]
+        logger.info(f"Routing to {len(destination_dicts)} destination clusters: {destination_dicts}")
 
         alternative_routes = await self.calculate_alternative_routes(
             blocked_roads=blocked_roads,
@@ -148,7 +202,7 @@ class RerouteService:
         await self.update_road_status(blocked_roads, "closed")
 
         # Step 10 — map update (synchronous — must complete before response)
-        await self.mapping.highlight_alternative_routes(alternative_routes, region_id=region_id)
+        await self.mapping.highlight_alternative_routes(alternative_routes, disaster_id=disaster_id)
 
         # Step 11 — publish to RabbitMQ (fire-and-forget, non-blocking)
         await self.publisher.publish_reroute_triggered(
@@ -176,7 +230,7 @@ class RerouteService:
         # Register region for Celery monitoring loop (Phase 4a)
         register_active_region(
             disaster_id=disaster_id,
-            region_id=region_id,
+            lat = lat, lon = lon, radius_km=radius_km,
             route_plan={
                 r["route_id"]: {
                     "vehicles_assigned": plan.route_stats.get(r["route_id"], {}).get("assigned", 0),
@@ -211,8 +265,42 @@ class RerouteService:
     # Step 2 — Blocked roads
     # -------------------------------------------------------------------------
 
+
+
     async def get_blocked_roads(self, disaster_id: str) -> List[Dict[str, Any]]:
         return await self.db.get_blocked_roads(disaster_id)
+
+
+    async def enrich_segments_with_geometry(
+        self,
+        segments: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """
+        Fetch road-following geometry from TomTom for each blocked segment
+        and attach points + geojson directly to the segment dict.
+
+        Runs in parallel — one TomTom call per segment.
+        Falls back to straight line silently if TomTom is unavailable.
+        Called once at trigger time; results are stored in the DB.
+        """
+        async def _enrich_one(seg: Dict[str, Any]) -> Dict[str, Any]:
+            # Skip if geometry already present (re-trigger scenario)
+            if seg.get("points"):
+                return seg
+
+            geometry = await self.external.fetch_segment_geometry(
+                start_lat=seg["start_lat"],
+                start_lng=seg["start_lng"],
+                end_lat=seg["end_lat"],
+                end_lng=seg["end_lng"],
+            )
+            return {**seg, **geometry}
+
+        enriched = await asyncio.gather(
+            *[_enrich_one(s) for s in segments],
+            return_exceptions=False,
+        )
+        return list(enriched)
 
     # -------------------------------------------------------------------------
     # Step 3 — Traffic data
@@ -361,120 +449,180 @@ class RerouteService:
     async def receive_override(self, override: Dict[str, Any]) -> Dict[str, Any]:
         """
         Apply an operator override and recompute the active reroute plan.
-
+ 
         Steps:
           1. Persist override to DB
-          2. Recompute routes with override constraints (TomTom)
-          3. Update map (synchronous)
-          4. Publish route.updated event to RabbitMQ (async)
+          2. Fetch disaster lat/lon/radius from DB
+          3. Recompute routes with override constraints (TomTom)
+          4. Update map (synchronous)
+          5. Publish route.updated event to RabbitMQ (async)
         """
+        from app.repositories.disaster_repository import DisasterRepository
+ 
         disaster_id = override.get("disaster_id", "unknown")
-
+ 
         # Step 1 — persist
         await self.db.apply_override(override, disaster_id)
-
-        # Step 2 — recompute
+ 
+        # Step 2 — read disaster coordinates from DB
+        disaster_repo = DisasterRepository(self.db.db)
+        disaster = await disaster_repo.get_disaster_by_id(disaster_id)
+ 
+        lat = disaster["location"]["lat"] if disaster else 53.30
+        lon = disaster["location"]["lon"] if disaster else -6.36
+        radius_km = (
+            disaster.get("disaster_metadata", {})
+            .get("evaluation", {})
+            .get("impact_radius_km", 3.0)
+        ) if disaster else 3.0
+ 
+        # Step 3 — recompute using actual blocked roads and all destinations
         active_overrides = await self.db.get_active_overrides(disaster_id)
-        result = await self.external.recompute_with_overrides(
-            origin=override.get("origin", {"lat": 53.3498, "lng": -6.2603}),
-            destination=override.get("destination", {"lat": 53.4000, "lng": -6.2000}),
-            blocked_roads=override.get("blocked_roads", []),
-            active_overrides=active_overrides,
+        blocked_roads = await self.db.get_blocked_roads(disaster_id)
+        vehicles = await self.db.get_users_in_affected_area(lat, lon, radius_km)
+ 
+        destinations = list({
+            (v["destination"]["lat"], v["destination"]["lng"])
+            for v in vehicles if v.get("destination")
+        })[:3]
+ 
+        all_routes = []
+        for dest in destinations:
+            dest_dict = {"lat": dest[0], "lng": dest[1]}
+            result = await self.external.recompute_with_overrides(
+                origin={"lat": 53.2900, "lng": -6.3800},
+                destination=dest_dict,
+                blocked_roads=blocked_roads,
+                active_overrides=active_overrides,
+            )
+            all_routes.extend(result.get("routes", []))
+ 
+        # Deduplicate
+        seen = set()
+        updated_routes = []
+        for r in all_routes:
+            rid = r.get("route_id")
+            if rid and rid not in seen:
+                seen.add(rid)
+                updated_routes.append(r)
+ 
+        if not updated_routes:
+            updated_routes = all_routes[:4]
+ 
+        # Step 3b — persist updated plan
+        if updated_routes and vehicles:
+            plan: DistributionPlan = optimize_traffic_distribution(
+                vehicles=vehicles,
+                routes=updated_routes,
+            )
+            await self.db.save_reroute_plan(
+                disaster_id=disaster_id,
+                blocked_roads=blocked_roads,
+                chosen_routes=updated_routes,
+                route_assignments=plan.route_assignments,
+                estimated_times=plan.estimated_times,
+                capacity_usage=plan.capacity_usage,
+                vehicles_affected=len(vehicles),
+                trigger_source="operator_override",
+            )
+ 
+        # Step 4 — map
+        await self.mapping.highlight_alternative_routes(
+            updated_routes, disaster_id=disaster_id
         )
-        updated_routes = result.get("routes", [])
-
-        # Step 3 — map (synchronous)
-        await self.mapping.highlight_alternative_routes(updated_routes)
-
-        # Step 4 — publish to RabbitMQ (fire-and-forget)
+ 
+        # Step 5 — publish
         await self.publisher.publish_route_updated(
             disaster_id=disaster_id,
             reason="operator_override",
-            vehicles=[],
+            vehicles=vehicles,
             route_assignments={},
             routes=updated_routes,
         )
-
+ 
         await self.db.log_event(
             disaster_id=disaster_id,
             event_type="operator_override",
             data={
                 "override_type": override.get("type"),
                 "operator_id": override.get("operator_id"),
+                "routes_recomputed": len(updated_routes),
             },
         )
-
+ 
         return {"status": "override_applied", "routes_recomputed": len(updated_routes)}
     # -------------------------------------------------------------------------
     # Monitoring cycle (called by Celery task + tests)
     # -------------------------------------------------------------------------
 
-    async def run_monitoring_cycle(self, region_id: str) -> dict:
+    async def run_monitoring_cycle(self, disaster_id: str) -> dict:
         """
-        Run one monitoring cycle for a region.
-
-        Steps:
-          1. Fetch live traffic from TomTom
-          2. Run dual congestion check (reactive + predictive)
-          3. If recalculation needed → recompute routes, update map, publish
-
-        Called by Celery monitor_traffic_conditions task every 30s,
-        and directly in tests.
+        Run one monitoring cycle for a disaster.
+ 
+        Parameter changed from region_id: str  →  disaster_id: str
+        lat/lon/radius_km are read from the active regions registry
+        (stored there by register_active_region after trigger_reroute_traffic).
+ 
+        Called by:
+          - Celery monitor_traffic_conditions task (every 30s)
+          - POST /scenarios/trigger-monitoring-cycle (manual, for testing)
         """
         from app.services.predictive_congestion import dual_congestion_check
-
+        from app.workers.tasks import get_active_regions
+ 
+        active = get_active_regions()
+        region_entry = active.get(disaster_id)
+ 
+        if not region_entry:
+            logger.debug(f"run_monitoring_cycle: no active region for {disaster_id}")
+            return {"status": "no_active_region", "disaster_id": disaster_id}
+ 
+        lat        = region_entry["lat"]
+        lon        = region_entry["lon"]
+        radius_km  = region_entry["radius_km"]
+        route_plan = region_entry["route_plan"]
+        segment_capacities = region_entry["segment_capacities"]
+ 
         try:
-            traffic_data = await self.external.fetch_traffic_data(region_id)
+            traffic_data = await self.external.fetch_traffic_data(lat, lon, radius_km)
             live_segments = traffic_data.get("segments", [])
         except Exception as e:
             logger.warning(f"run_monitoring_cycle: traffic fetch failed — {e}")
             live_segments = []
-
-        # Get current route plan for this region from registry
-        from app.workers.tasks import get_active_regions
-        active = get_active_regions()
-        region_entry = next(
-            (v for v in active.values() if v["region_id"] == region_id),
-            None,
-        )
-
-        route_plan = region_entry["route_plan"] if region_entry else {}
-        segment_capacities = region_entry["segment_capacities"] if region_entry else {}
-
+ 
         check = dual_congestion_check(
             live_traffic_data=live_segments,
             route_plan=route_plan,
             segment_capacities=segment_capacities,
         )
-
+ 
         if not check["should_recalculate"]:
-            logger.debug(f"run_monitoring_cycle: no recalculation needed for {region_id}")
-            return {"status": "ok", "should_recalculate": False, "region_id": region_id}
-
+            logger.debug(f"run_monitoring_cycle: no recalculation needed for {disaster_id}")
+            return {"status": "ok", "should_recalculate": False, "disaster_id": disaster_id}
+ 
         logger.info(
             f"run_monitoring_cycle: recalculation triggered "
-            f"region={region_id} reason={check['triggered_by']}"
+            f"disaster={disaster_id} reason={check['triggered_by']}"
         )
-
-        # Fetch vehicles + blocked roads for this region
-        disaster_id = region_entry.get("disaster_id", region_id) if region_entry else region_id
+ 
         blocked_roads = await self.db.get_blocked_roads(disaster_id)
-        vehicles = await self.db.get_users_in_affected_area(region_id)
-
+        vehicles = await self.db.get_users_in_affected_area(lat, lon, radius_km)
+ 
         destinations = list({
             (v["destination"]["lat"], v["destination"]["lng"])
-            for v in vehicles
-            if v.get("destination")
+            for v in vehicles if v.get("destination")
         })
-        destination_dicts = [{"lat": lat, "lng": lng} for lat, lng in destinations]
-
+        destination_dicts = [{"lat": la, "lng": lo} for la, lo in destinations]
+ 
         new_routes = await self.calculate_alternative_routes(
             blocked_roads=blocked_roads,
             destinations=destination_dicts,
         )
-
+ 
         if new_routes:
-            await self.mapping.highlight_alternative_routes(new_routes, region_id=region_id)
+            await self.mapping.highlight_alternative_routes(
+                new_routes, disaster_id=disaster_id
+            )
             await self.publisher.publish_route_updated(
                 disaster_id=disaster_id,
                 reason=check["triggered_by"],
@@ -482,14 +630,15 @@ class RerouteService:
                 route_assignments={},
                 routes=new_routes,
             )
-
+ 
         return {
             "status": "recalculated",
             "should_recalculate": True,
             "triggered_by": check["triggered_by"],
-            "region_id": region_id,
+            "disaster_id": disaster_id,
             "new_routes_count": len(new_routes),
         }
+    
 
     # -------------------------------------------------------------------------
     # Multi-incident handling (Phase 5)

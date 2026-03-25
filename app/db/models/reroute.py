@@ -118,6 +118,18 @@ class RoadSegment(Base):
         comment="Max vehicles per hour this segment can handle"
     )
 
+    points: Mapped[Optional[list]] = mapped_column(
+        JSON,
+        nullable=True,
+        comment="Road-following polyline [[lat,lng],...] fetched from TomTom at trigger time"
+    )
+
+    geojson: Mapped[Optional[dict]] = mapped_column(
+        JSON,
+        nullable=True,
+        comment="GeoJSON LineString Feature for frontend map rendering"
+    )
+
     __table_args__ = (
         Index("idx_road_segments_status", "status"),
         Index("idx_road_segments_disaster", "disaster_id"),
@@ -197,6 +209,8 @@ class ReroutePlan(Base):
         nullable=True,
         comment="Vehicles assigned and remaining capacity per segment"
     )
+
+
 
     # --- Full alternative routes as returned by TomTom (GeoJSON-ready) ---
     chosen_routes: Mapped[Optional[dict]] = mapped_column(

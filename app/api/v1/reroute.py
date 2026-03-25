@@ -75,7 +75,6 @@ class RoadSegmentInput(BaseModel):
 
 class TriggerRerouteRequest(BaseModel):
     disaster_id: str = Field(..., description="ID of the active disaster")
-    region_id: str = Field(..., description="Region identifier for traffic data")
     affected_roads: Optional[List[RoadSegmentInput]] = Field(
         None,
         description="Blocked road segments. If omitted, fetched from DB by disaster_id."
@@ -143,7 +142,6 @@ async def trigger_reroute(
     try:
         result = await service.trigger_reroute_traffic(
             disaster_id=request.disaster_id,
-            region_id=request.region_id,
             affected_roads=affected_roads,
         )
         return result
@@ -236,6 +234,21 @@ async def get_reroute_status(
         )
     return plan
 
+@router.get(
+        "/plans",
+        summary="Get all active reroute plans across all disasters",
+        response_model=List[Dict[str, Any]]
+)
+async def get_all_active_plans(
+    db: AsyncSession = Depends(get_db),
+) -> List[Dict[str, Any]]:
+    """
+        Admin dashboard gets all reroute plans in one call
+    
+    """
+
+    repo = RerouteRepository(db)
+    return await repo.get_all_active_plans()
 
 @router.get(
     "/health",

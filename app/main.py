@@ -24,6 +24,7 @@ from app.api.v1 import live_map
 from app.api.v1 import scenario_engine
 from app.api.v1 import reroute
 from app.api.v1 import disaster_report
+from app.api.v1 import vehicles
 from app.api.v1.disaster import router as disaster_router
 from app.api.v1 import disaster_evaluation
 
@@ -78,7 +79,18 @@ async def lifespan(app: FastAPI):
     else:
         logger.warning("⚠️  RabbitMQ publisher not connected — running in degraded mode (notifications disabled)")
 
+    # Start Redis pub/sub listener for WebSocket notifications
+    listener_task = asyncio.create_task(redis_listener())
+    logger.info("📡 Redis notification listener started")
+
     yield
+
+    # Cancel listener on shutdown
+    listener_task.cancel()
+    try:
+        await listener_task
+    except asyncio.CancelledError:
+        pass
 
     # Shutdown
     logger.info("=" * 70)
@@ -169,6 +181,8 @@ app.include_router(disaster_router, prefix="/api/v1")
 app.include_router(disaster_evaluation.router, prefix="/api/v1")
 
 app.include_router(emergency_unit_router, prefix="/api/v1")
+app.include_router(vehicles.router, prefix = "/api/v1")
+
 app.include_router(deployment_router, prefix="/api/v1")
 app.include_router(user_management_router, prefix="/api/v1")
 
@@ -252,5 +266,3 @@ if __name__ == "__main__":
         reload=settings.DEBUG,
         log_level="info" if not settings.DEBUG else "debug"
     )
-    
-    

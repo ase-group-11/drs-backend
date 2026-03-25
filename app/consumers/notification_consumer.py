@@ -1,28 +1,15 @@
-# File: app/consumers/notification_consumer.py
 """
-Notification Consumer.
+app/consumers/notification_consumer.py
 
-Listens on notification_queue which is already bound (in rabbitmq_service.py)
-to ALL notification-relevant routing keys:
+Unified Consumer — handles ALL queues in one process, one connection.
 
-    Routing key               Published by
-    ──────────────────────    ────────────────────────────────────────────
-    disaster.dispatched       deployment_service  → units sent to disaster
-    disaster.verified         deployment_service  → field unit on-scene confirmed
-    disaster.updated          disaster_service    → status / response recorded
-    disaster.resolved         disaster_service    → disaster fully resolved
-    disaster.backup_requested deployment_service  → field unit needs more resources
-    disaster.unit_completed   deployment_service  → a unit finished its mission
+Queues consumed:
+    notification_queue      — disaster lifecycle events
+    notification.reroute    — reroute events
+    reroute_queue           — disaster events that trigger rerouting
+    evaluation_queue        — disaster.reported events
 
-For every message this consumer:
-  1. Reads the event_type field injected by rabbitmq_service.publish()
-  2. Calls the matching handler to build a standardised alert envelope
-  3. Publishes the envelope to Redis pub/sub channel 'app_alerts'
-
-The async redis_listener() in notifications_ws.py is subscribed to
-'app_alerts' and fans every alert out to all connected WebSocket clients.
-
-Run standalone:
+Run:
     python -m app.consumers.notification_consumer
 """
 
@@ -30,31 +17,33 @@ import os
 import sys
 import json
 import logging
+import pathlib
+import signal
+import time
 from datetime import datetime, timezone
-from typing import Optional, Dict, Any
+from typing import Optional
 
-sys.path.insert(
-    0,
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from dotenv import load_dotenv
+from dotenv import load_dotenv, dotenv_values
 load_dotenv()
 
+import pika
 import redis as sync_redis
-from app.consumers.base_consumer import BaseConsumer
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-)
-logger = logging.getLogger("notification_consumer")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
+logger = logging.getLogger("unified_consumer")
 
-REDIS_URL     = os.getenv("REDIS_URL", "redis://localhost:6379")
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+_env = dotenv_values(pathlib.Path(__file__).parents[2] / ".env")
+REDIS_URL     = _env.get("REDIS_URL") or os.getenv("REDIS_URL", "redis://:6379")
+RABBITMQ_URL  = _env.get("RABBITMQ_URL") or os.getenv("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/")
 REDIS_CHANNEL = "app_alerts"
 
 _redis_client: Optional[sync_redis.Redis] = None
-
 
 def _get_redis() -> sync_redis.Redis:
     global _redis_client
@@ -62,176 +51,278 @@ def _get_redis() -> sync_redis.Redis:
         _redis_client = sync_redis.from_url(REDIS_URL, decode_responses=True)
     return _redis_client
 
-
 SEVERITY_COLOUR = {
-    "CRITICAL": "red",
-    "HIGH":     "orange",
-    "MEDIUM":   "yellow",
-    "LOW":      "blue",
-    "INFO":     "green",
+    "CRITICAL": "red", "HIGH": "orange", "MEDIUM": "yellow",
+    "LOW": "blue", "INFO": "green",
 }
 
-
 def _publish(alert: dict) -> None:
-    """Publish a formatted alert envelope to Redis pub/sub."""
     try:
         _get_redis().publish(REDIS_CHANNEL, json.dumps(alert, default=str))
         logger.info(f"[Redis → {REDIS_CHANNEL}] {alert['event_type']}")
     except Exception as exc:
         logger.error(f"Redis publish failed: {exc}")
 
+# ---------------------------------------------------------------------------
+# Handlers
+# ---------------------------------------------------------------------------
 
-# ══════════════════════════════════════════════════════════════
-class NotificationConsumer(BaseConsumer):
-    """
-    Single consumer on notification_queue.
+def _on_disaster_evaluated(data: dict) -> None:
+    severity = data.get("severity", "MEDIUM").upper()
+    _publish({
+        "service": "disaster", "event_type": "disaster.evaluated",
+        "severity": severity, "colour": SEVERITY_COLOUR.get(severity, "yellow"),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "title": f"Disaster evaluated — {data.get('tracking_id', '')}",
+        "message": (
+            f"Severity: {severity}. Confidence: {data.get('confidence', 0):.0%}. "
+            f"Trigger reroute: {data.get('trigger_reroute', False)}."
+        ),
+        "data": {
+            "disaster_id": data.get("disaster_id"),
+            "tracking_id": data.get("tracking_id"),
+            "severity": severity,
+            "confidence": data.get("confidence"),
+            "trigger_reroute": data.get("trigger_reroute"),
+            "trigger_deploy": data.get("trigger_deploy"),
+            "recommended_services": data.get("recommended_services", []),
+            "affected_roads": data.get("affected_roads", []),
+        },
+    })
 
-    Handles all six routing keys the system publishes to this queue.
-    Each handler builds the standard alert envelope and pushes it
-    to Redis so the WebSocket layer can broadcast it to the frontend.
-    """
+def _on_disaster_dispatched(data: dict) -> None:
+    units = data.get("units_dispatched", 0)
+    _publish({
+        "service": "disaster", "event_type": "disaster.dispatched",
+        "severity": "HIGH", "colour": SEVERITY_COLOUR["HIGH"],
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "title": f"Units dispatched — {data.get('tracking_id', '')}",
+        "message": f"{units} unit(s) dispatched with {data.get('priority_level', 'STANDARD')} priority.",
+        "data": {"disaster_id": data.get("disaster_id"), "tracking_id": data.get("tracking_id"),
+                 "units_dispatched": units},
+    })
+
+def _on_disaster_verified(data: dict) -> None:
+    _publish({
+        "service": "disaster", "event_type": "disaster.verified",
+        "severity": "HIGH", "colour": SEVERITY_COLOUR["HIGH"],
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "title": f"Disaster confirmed on-scene — {data.get('tracking_id', '')}",
+        "message": f"Emergency unit confirmed. Report: {data.get('situation_report', 'N/A')}",
+        "data": {"disaster_id": data.get("disaster_id"), "tracking_id": data.get("tracking_id"),
+                 "verified_by_unit": data.get("verified_by_unit")},
+    })
+
+def _on_disaster_updated(data: dict) -> None:
+    _publish({
+        "service": "disaster", "event_type": "disaster.updated",
+        "severity": "LOW", "colour": SEVERITY_COLOUR["LOW"],
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "title": f"Disaster update — {data.get('tracking_id', '')}",
+        "message": data.get("details", "The disaster status has been updated."),
+        "data": {"disaster_id": data.get("disaster_id"), "tracking_id": data.get("tracking_id"),
+                 "update_type": data.get("update_type"), "details": data.get("details")},
+    })
+
+def _on_disaster_resolved(data: dict) -> None:
+    _publish({
+        "service": "disaster", "event_type": "disaster.resolved",
+        "severity": "INFO", "colour": SEVERITY_COLOUR["INFO"],
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "title": f"Disaster resolved — {data.get('tracking_id', '')}",
+        "message": data.get("resolution_notes", "The situation has been resolved."),
+        "data": {"disaster_id": data.get("disaster_id"), "tracking_id": data.get("tracking_id"),
+                 "resolution_notes": data.get("resolution_notes")},
+    })
+
+def _on_backup_requested(data: dict) -> None:
+    resources = data.get("resources_needed") or ["Unspecified"]
+    _publish({
+        "service": "disaster", "event_type": "disaster.backup_requested",
+        "severity": "CRITICAL", "colour": SEVERITY_COLOUR["CRITICAL"],
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "title": f"Backup requested — {data.get('tracking_id', '')}",
+        "message": f"Field unit requesting backup. Resources: {', '.join(resources)}",
+        "data": {"disaster_id": data.get("disaster_id"), "tracking_id": data.get("tracking_id"),
+                 "resources_needed": resources},
+    })
+
+def _on_unit_completed(data: dict) -> None:
+    _publish({
+        "service": "disaster", "event_type": "disaster.unit_completed",
+        "severity": "INFO", "colour": SEVERITY_COLOUR["INFO"],
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "title": f"Unit mission complete — {data.get('tracking_id', '')}",
+        "message": "A response unit has completed its mission.",
+        "data": {"disaster_id": data.get("disaster_id"), "tracking_id": data.get("tracking_id"),
+                 "unit_id": data.get("unit_id")},
+    })
+
+def _on_reroute_triggered(data: dict) -> None:
+    vehicles = data.get("vehicles_count") or len(data.get("vehicles", []))
+    _publish({
+        "service": "reroute", "event_type": "reroute.triggered",
+        "severity": "HIGH", "colour": SEVERITY_COLOUR["HIGH"],
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "title": "Traffic reroute activated",
+        "message": (
+            f"{vehicles} vehicles rerouted across {len(data.get('routes', []))} routes. "
+            f"Overflow: {data.get('overflow_count', 0)}."
+        ),
+        "data": {"disaster_id": data.get("disaster_id"), "plan_id": data.get("plan_id"),
+                 "vehicles_count": vehicles, "overflow_count": data.get("overflow_count", 0),
+                 "routes": data.get("routes", [])},
+    })
+
+def _on_route_updated(data: dict) -> None:
+    reason = data.get("reason", "congestion")
+    _publish({
+        "service": "reroute", "event_type": "route.updated",
+        "severity": "MEDIUM", "colour": SEVERITY_COLOUR["MEDIUM"],
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "title": f"Routes recalculated — {reason}",
+        "message": f"Traffic routes updated due to {reason}.",
+        "data": {"disaster_id": data.get("disaster_id"), "reason": reason,
+                 "routes": data.get("routes", [])},
+    })
+
+def _on_disaster_cleared(data: dict) -> None:
+    _publish({
+        "service": "reroute", "event_type": "disaster.cleared",
+        "severity": "INFO", "colour": SEVERITY_COLOUR["INFO"],
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "title": "Roads cleared — normal flow restored",
+        "message": (
+            f"Disaster cleared. {data.get('cleared_segments', 0)} road segment(s) reopened. "
+            "Normal traffic flow has resumed."
+        ),
+        "data": {"disaster_id": data.get("disaster_id"),
+                 "cleared_segments": data.get("cleared_segments")},
+    })
+
+def _on_disaster_reported(data: dict) -> None:
+    """evaluation_queue — log only for now, future: auto-evaluate."""
+    logger.info(
+        f"[evaluation_queue] disaster.reported — "
+        f"id={data.get('disaster_id')} type={data.get('type')}"
+    )
+
+# ---------------------------------------------------------------------------
+# Master dispatch table
+# ---------------------------------------------------------------------------
+
+HANDLERS = {
+    "disaster.evaluated":        _on_disaster_evaluated,
+    "disaster.dispatched":       _on_disaster_dispatched,
+    "disaster.verified":         _on_disaster_verified,
+    "disaster.updated":          _on_disaster_updated,
+    "disaster.resolved":         _on_disaster_resolved,
+    "disaster.backup_requested": _on_backup_requested,
+    "disaster.unit_completed":   _on_unit_completed,
+    "reroute.triggered":         _on_reroute_triggered,
+    "route.updated":             _on_route_updated,
+    "disaster.cleared":          _on_disaster_cleared,
+    "disaster.reported":         _on_disaster_reported,
+}
+
+ALL_QUEUES = [
+    "notification_queue",
+    "notification.reroute",
+    "reroute_queue",
+    "evaluation_queue",
+]
+
+# ---------------------------------------------------------------------------
+# Unified Consumer
+# ---------------------------------------------------------------------------
+
+class UnifiedConsumer:
+    """One process, one connection, consuming all queues."""
 
     def __init__(self):
-        # notification_queue is already declared + bound in rabbitmq_service.py
-        super().__init__(queue_name="notification_queue")
+        self.rabbitmq_url = RABBITMQ_URL
+        self.connection = None
+        self.channel = None
+        signal.signal(signal.SIGINT, self._shutdown)
+        signal.signal(signal.SIGTERM, self._shutdown)
 
-    # ── main dispatch ─────────────────────────────────────────
+    def _shutdown(self, signum, frame):
+        logger.info("Shutting down unified consumer...")
+        if self.connection and not self.connection.is_closed:
+            self.connection.close()
+        sys.exit(0)
 
-    def process_message(self, data: dict) -> None:
-        event_type = data.get("event_type", "")
-        handlers = {
-            "disaster.dispatched":       self._on_dispatched,
-            "disaster.verified":         self._on_verified,
-            "disaster.updated":          self._on_updated,
-            "disaster.resolved":         self._on_resolved,
-            "disaster.backup_requested": self._on_backup_requested,
-            "disaster.unit_completed":   self._on_unit_completed,
-        }
-        handler = handlers.get(event_type)
-        if handler:
-            handler(data)
-        else:
-            logger.warning(f"Unrecognised event_type '{event_type}' — skipping")
+    def connect(self) -> bool:
+        for attempt in range(1, 6):
+            try:
+                params = pika.URLParameters(self.rabbitmq_url)
+                self.connection = pika.BlockingConnection(params)
+                self.channel = self.connection.channel()
+                self.channel.basic_qos(prefetch_count=1)
+                logger.info(f"Connected to RabbitMQ (attempt {attempt})")
+                return True
+            except Exception as e:
+                logger.error(f"Connection failed (attempt {attempt}/5): {e}")
+                if attempt < 5:
+                    time.sleep(3)
+        return False
 
-    # ── per-event handlers ────────────────────────────────────
+    def _make_callback(self, queue_name: str):
+        def callback(ch, method, properties, body):
+            try:
+                data = json.loads(body)
+                event_type = data.get("event_type") or data.get("event", "unknown")
+                data["event_type"] = event_type
+                logger.info(f"[{queue_name}] {event_type}")
+                handler = HANDLERS.get(event_type)
+                if handler:
+                    handler(data)
+                else:
+                    logger.warning(f"[{queue_name}] No handler for '{event_type}' — skipping")
+                ch.basic_ack(delivery_tag=method.delivery_tag)
+            except Exception as e:
+                logger.error(f"[{queue_name}] Error: {e}")
+                ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
+        return callback
 
-    def _on_dispatched(self, data: dict) -> None:
-        """Units sent to a disaster. Published by deployment_service.dispatch_units()"""
-        units    = data.get("units_dispatched", 0)
-        priority = data.get("priority_level", "STANDARD")
-        _publish({
-            "service":    "disaster",
-            "event_type": "disaster.dispatched",
-            "severity":   "HIGH",
-            "colour":     SEVERITY_COLOUR["HIGH"],
-            "timestamp":  datetime.now(timezone.utc).isoformat(),
-            "title":      f"Units dispatched — {data.get('tracking_id', '')}",
-            "message":    f"{units} unit(s) dispatched with {priority} priority.",
-            "data": {
-                "disaster_id":      data.get("disaster_id"),
-                "tracking_id":      data.get("tracking_id"),
-                "units_dispatched": units,
-                "priority_level":   priority,
-            },
-        })
+    def start(self):
+        if not self.connect():
+            logger.error("Could not connect to RabbitMQ — exiting")
+            return
 
-    def _on_verified(self, data: dict) -> None:
-        """Field unit arrived on-scene and confirmed the disaster (ON_SCENE transition)."""
-        _publish({
-            "service":    "disaster",
-            "event_type": "disaster.verified",
-            "severity":   "HIGH",
-            "colour":     SEVERITY_COLOUR["HIGH"],
-            "timestamp":  datetime.now(timezone.utc).isoformat(),
-            "title":      f"Disaster confirmed on-scene — {data.get('tracking_id', '')}",
-            "message": (
-                f"Emergency unit has arrived and confirmed the disaster. "
-                f"Report: {data.get('situation_report', 'N/A')}"
-            ),
-            "data": {
-                "disaster_id":      data.get("disaster_id"),
-                "tracking_id":      data.get("tracking_id"),
-                "verified_by_unit": data.get("verified_by_unit"),
-                "situation_report": data.get("situation_report"),
-            },
-        })
+        for queue in ALL_QUEUES:
+            try:
+                self.channel.queue_declare(queue=queue, durable=True, passive=True)
+            except Exception:
+                try:
+                    # Re-open channel after passive declare fails
+                    self.channel = self.connection.channel()
+                    self.channel.basic_qos(prefetch_count=1)
+                    self.channel.queue_declare(queue=queue, durable=True)
+                except Exception as e:
+                    logger.warning(f"Could not declare {queue}: {e}")
+                    continue
 
-    def _on_updated(self, data: dict) -> None:
-        """Generic status / response-time update. Published by disaster_service."""
-        _publish({
-            "service":    "disaster",
-            "event_type": "disaster.updated",
-            "severity":   "LOW",
-            "colour":     SEVERITY_COLOUR["LOW"],
-            "timestamp":  datetime.now(timezone.utc).isoformat(),
-            "title":      f"Disaster update — {data.get('tracking_id', '')}",
-            "message":    data.get("details", "The disaster status has been updated."),
-            "data": {
-                "disaster_id": data.get("disaster_id"),
-                "tracking_id": data.get("tracking_id"),
-                "update_type": data.get("update_type"),
-                "details":     data.get("details"),
-            },
-        })
+            self.channel.basic_consume(
+                queue=queue,
+                on_message_callback=self._make_callback(queue),
+                auto_ack=False,
+            )
+            logger.info(f"✅ Subscribed to: {queue}")
 
-    def _on_resolved(self, data: dict) -> None:
-        """Disaster fully resolved. Published by disaster_service.resolve_disaster()."""
-        _publish({
-            "service":    "disaster",
-            "event_type": "disaster.resolved",
-            "severity":   "INFO",
-            "colour":     SEVERITY_COLOUR["INFO"],
-            "timestamp":  datetime.now(timezone.utc).isoformat(),
-            "title":      f"Disaster resolved — {data.get('tracking_id', '')}",
-            "message":    data.get("resolution_notes", "The situation has been resolved."),
-            "data": {
-                "disaster_id":      data.get("disaster_id"),
-                "tracking_id":      data.get("tracking_id"),
-                "resolution_notes": data.get("resolution_notes"),
-                "resolved_time":    data.get("resolved_time"),
-            },
-        })
+        print(f"\n{'='*60}")
+        print(f"  UNIFIED CONSUMER")
+        print(f"  Queues: {', '.join(ALL_QUEUES)}")
+        print(f"  Redis → {REDIS_CHANNEL}")
+        print(f"  Press Ctrl+C to stop")
+        print(f"{'='*60}\n")
 
-    def _on_backup_requested(self, data: dict) -> None:
-        """Field unit needs more resources. Published when request_immediate_backup=True."""
-        resources = data.get("resources_needed") or ["Unspecified"]
-        _publish({
-            "service":    "disaster",
-            "event_type": "disaster.backup_requested",
-            "severity":   "CRITICAL",
-            "colour":     SEVERITY_COLOUR["CRITICAL"],
-            "timestamp":  datetime.now(timezone.utc).isoformat(),
-            "title":      f"Backup requested — {data.get('tracking_id', '')}",
-            "message": (
-                f"Field unit is requesting immediate backup. "
-                f"Resources needed: {', '.join(resources)}"
-            ),
-            "data": {
-                "disaster_id":      data.get("disaster_id"),
-                "tracking_id":      data.get("tracking_id"),
-                "requesting_unit":  data.get("requesting_unit"),
-                "resources_needed": resources,
-            },
-        })
-
-    def _on_unit_completed(self, data: dict) -> None:
-        """A unit has completed its deployment. Published on COMPLETED status transition."""
-        _publish({
-            "service":    "disaster",
-            "event_type": "disaster.unit_completed",
-            "severity":   "INFO",
-            "colour":     SEVERITY_COLOUR["INFO"],
-            "timestamp":  datetime.now(timezone.utc).isoformat(),
-            "title":      f"Unit mission complete — {data.get('tracking_id', '')}",
-            "message":    "A response unit has completed its mission at this incident.",
-            "data": {
-                "disaster_id": data.get("disaster_id"),
-                "tracking_id": data.get("tracking_id"),
-                "unit_id":     data.get("unit_id"),
-            },
-        })
+        try:
+            self.channel.start_consuming()
+        except KeyboardInterrupt:
+            self._shutdown(None, None)
 
 
 if __name__ == "__main__":
-    consumer = NotificationConsumer()
+    consumer = UnifiedConsumer()
     consumer.start()

@@ -20,6 +20,7 @@ from geoalchemy2.functions import (
     ST_AsGeoJSON, ST_Point, ST_DWithin, ST_X, ST_Y
 )
 from geoalchemy2 import Geography
+from sqlalchemy.orm import selectinload
 
 from app.db.models.disaster import Disaster
 from app.db.models.enums import DisasterType, DisasterSeverity, DisasterStatus
@@ -208,31 +209,17 @@ class DisasterRepository:
             logger.error(f"Error querying disasters near point: {e}")
             raise
     
-    async def get_disaster_by_id(
-        self,
-        disaster_id: str
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Get a single disaster by ID.
-        
-        Args:
-            disaster_id: UUID of the disaster
-            
-        Returns:
-            Disaster dict or None if not found
-        """
-        try:
-            query = select(Disaster).where(Disaster.id == disaster_id)
-            result = await self.db.execute(query)
-            disaster = result.scalar_one_or_none()
-            
-            if disaster:
-                return await self._disaster_to_dict(disaster)
-            return None
-            
-        except Exception as e:
-            logger.error(f"Error querying disaster by ID: {e}")
-            raise
+    async def get_disaster_by_id(self, disaster_id: str):
+        query = (
+            select(Disaster)
+            .options(selectinload(Disaster.reports))  # add this
+            .where(Disaster.id == disaster_id)
+        )
+        result = await self.db.execute(query)
+        disaster = result.scalar_one_or_none()
+        if disaster:
+            return await self._disaster_to_dict(disaster)
+        return None
     
     async def get_disaster_by_tracking_id(
         self,

@@ -162,6 +162,7 @@ class EnrichmentPipeline:
         population_provider: BasePopulationProvider,
         infrastructure_provider: Optional[InfrastructureProvider] = None,
         image_analysis_provider: Optional[CLIPImageAnalysisProvider] = None,
+        tomtom_api_key: Optional[str] = None,
     ) -> None:
         self._live_map = live_map_service
         self._weather = weather_provider
@@ -169,6 +170,12 @@ class EnrichmentPipeline:
         self._population = population_provider
         self._infrastructure = infrastructure_provider or InfrastructureProvider()
         self._image_analysis = image_analysis_provider or CLIPImageAnalysisProvider()
+        # TomTom API key for reverse geocoding — falls back to settings
+        if tomtom_api_key:
+            self._tomtom_api_key = tomtom_api_key
+        else:
+            from app.core.config import settings
+            self._tomtom_api_key = settings.TRAFFIC_API_KEY
 
     async def enrich(
         self,
@@ -234,6 +241,95 @@ class EnrichmentPipeline:
         bounds = f"{lat - delta_lat},{lon - delta_lon},{lat + delta_lat},{lon + delta_lon}"
         return await self._live_map.get_traffic(bounds=bounds)
 
+    async def identify_affected_roads_async(
+        self,
+        traffic_context: Optional[dict],
+        lat: float,
+        lon: float,
+    ) -> List[dict]:
+        """
+        Get real road names + coordinates via TomTom Reverse Geocoding API.
+
+        Returns a list of dicts with road name AND the actual start/end
+        coordinates of each affected segment, so road_segments table gets
+        correct per-road coordinates rather than hardcoded values.
+
+        Each dict:
+            {
+                "road_name": "M50",
+                "start_lat": 53.302,
+                "start_lng": -6.361,
+                "end_lat":   53.318,
+                "end_lng":   -6.349,
+            }
+
+        Falls back to coordinate-only descriptors if geocoding fails.
+        Returns at most 5 unique roads.
+        """
+        if not traffic_context:
+            return [{"road_name": f"Road network near ({lat:.4f}, {lon:.4f})",
+                     "start_lat": lat, "start_lng": lon,
+                     "end_lat": lat, "end_lng": lon}]
+
+        flow = traffic_context.get("flow", [])
+        if not flow:
+            return [{"road_name": f"Road network near ({lat:.4f}, {lon:.4f})",
+                     "start_lat": lat, "start_lng": lon,
+                     "end_lat": lat, "end_lng": lon}]
+
+        # Collect unique sample coords from flow segments (max 5)
+        # Keep the full segment so we have start + end coords
+        sample_segments = []
+        seen_coords: set = set()
+        for segment in flow:
+            coords = segment.get("coordinates", [])
+            if coords and len(coords) >= 2:
+                key = (round(coords[0][0], 3), round(coords[0][1], 3))
+                if key not in seen_coords:
+                    seen_coords.add(key)
+                    sample_segments.append({
+                        "start": coords[0],
+                        "end": coords[-1],
+                        "mid": coords[len(coords) // 2],
+                    })
+            if len(sample_segments) >= 5:
+                break
+
+        if not sample_segments:
+            return [{"road_name": f"Road network near ({lat:.4f}, {lon:.4f})",
+                     "start_lat": lat, "start_lng": lon,
+                     "end_lat": lat, "end_lng": lon}]
+
+        # Reverse geocode midpoints in parallel to get road names
+        tasks = [
+            self._reverse_geocode_point(seg["mid"][0], seg["mid"][1])
+            for seg in sample_segments
+        ]
+        names = await asyncio.gather(*tasks, return_exceptions=True)
+
+        seen_names: set[str] = set()
+        road_list: List[dict] = []
+
+        for seg, name in zip(sample_segments, names):
+            if isinstance(name, Exception) or not name:
+                name = f"Road near ({seg['mid'][0]:.3f}, {seg['mid'][1]:.3f})"
+
+            if name not in seen_names:
+                seen_names.add(name)
+                road_list.append({
+                    "road_name": name,
+                    "start_lat": seg["start"][0],
+                    "start_lng": seg["start"][1],
+                    "end_lat":   seg["end"][0],
+                    "end_lng":   seg["end"][1],
+                })
+
+        return road_list if road_list else [
+            {"road_name": f"Road network near ({lat:.4f}, {lon:.4f})",
+             "start_lat": lat, "start_lng": lon,
+             "end_lat": lat, "end_lng": lon}
+        ]
+
     def identify_affected_roads(
         self,
         traffic_context: Optional[dict],
@@ -241,36 +337,79 @@ class EnrichmentPipeline:
         lon: float,
     ) -> List[str]:
         """
-        Extract affected road names from already-fetched traffic context.
-
-        No extra HTTP call — uses the traffic data gathered during enrichment.
-        Falls back to a location descriptor when traffic data is unavailable.
-
-        Args:
-            traffic_context: Dict from _fetch_traffic (may be None)
-            lat: Disaster latitude (used in fallback descriptor)
-            lon: Disaster longitude (used in fallback descriptor)
-
-        Returns:
-            Deduplicated list of affected road name strings (non-empty).
+        Sync fallback — returns FRC-based descriptors.
+        Use identify_affected_roads_async() for real road names.
         """
         if not traffic_context:
-            return [f"area near ({lat:.4f}, {lon:.4f})"]
+            return [f"Road network near ({lat:.4f}, {lon:.4f})"]
 
+        FRC_LABELS = {
+            "FRC0": "Motorway", "FRC1": "Major Road", "FRC2": "Major Road",
+            "FRC3": "Secondary Road", "FRC4": "Local Road",
+            "FRC5": "Local Road", "FRC6": "Local Road",
+        }
         flow = traffic_context.get("flow", [])
         seen: set[str] = set()
         roads: List[str] = []
         for segment in flow:
-            road_name = (
-                segment.get("road_name")
-                or segment.get("street")
-                or segment.get("id")
-            )
-            if road_name and str(road_name) not in seen:
-                seen.add(str(road_name))
-                roads.append(str(road_name))
+            road_type = segment.get("road_type", "")
+            label = FRC_LABELS.get(road_type, "")
+            coords = segment.get("coordinates", [])
+            if label and coords:
+                first = coords[0]
+                descriptor = f"{label} near ({first[0]:.3f}, {first[1]:.3f})"
+                if descriptor not in seen:
+                    seen.add(descriptor)
+                    roads.append(descriptor)
+        return roads[:5] if roads else [f"Road network near ({lat:.4f}, {lon:.4f})"]
 
-        return roads if roads else [f"area near ({lat:.4f}, {lon:.4f})"]
+    async def _reverse_geocode_point(self, lat: float, lon: float) -> Optional[str]:
+        """
+        Call TomTom Reverse Geocoding API to get a road name for a coordinate.
+
+        API: GET https://api.tomtom.com/search/2/reverseGeocode/{lat},{lon}.json
+        Returns the street name or road number (e.g. "M50", "N4", "Grafton Street").
+        Returns None on failure.
+        """
+        if not self._tomtom_api_key:
+            return None
+
+        url = f"https://api.tomtom.com/search/2/reverseGeocode/{lat},{lon}.json"
+        params = {
+            "key": self._tomtom_api_key,
+            "radius": 100,              # 100m search radius
+            "returnSpeedLimit": "false",
+            "returnRoadUse": "true",
+        }
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    url,
+                    params=params,
+                    timeout=aiohttp.ClientTimeout(total=5),
+                ) as response:
+                    if response.status != 200:
+                        return None
+                    data = await response.json()
+
+            addresses = data.get("addresses", [])
+            if not addresses:
+                return None
+
+            addr = addresses[0].get("address", {})
+
+            # Priority: street → road number → municipality
+            road_name = (
+                addr.get("streetName")
+                or addr.get("routeNumbers", [None])[0]
+                or addr.get("municipality")
+            )
+            return road_name if road_name else None
+
+        except Exception as e:
+            logger.debug(f"Reverse geocode failed for ({lat}, {lon}): {e}")
+            return None
 
     async def _fetch_weather(self, lat: float, lon: float) -> dict:
         """Fetch weather data and serialise to a plain dict."""

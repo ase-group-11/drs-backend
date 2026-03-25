@@ -11,8 +11,8 @@ Responsibilities:
   - send_updated_routes:          push recalculated routes after congestion / override
 
 Room convention:
-  reroute:{region_id}   — all users subscribed to a geographic region
-  Fallback: reroute:global when region_id is not provided
+  reroute:{disaster_id}   — all users subscribed to a geographic region
+  Fallback: reroute:global when disaster_id is not provided
 
 Events emitted:
   reroute_alert           — initial detour overlays
@@ -46,7 +46,7 @@ class MappingService:
     async def highlight_alternative_routes(
         self,
         routes: list,
-        region_id: Optional[str] = None,
+        disaster_id: Optional[str] = None,
     ) -> dict:
         """
         Send alternative route overlays to the frontend map.
@@ -56,13 +56,13 @@ class MappingService:
 
         Args:
             routes:    List of parsed route dicts
-            region_id: Region identifier — used to target the correct room
+            disaster_id: Region identifier — used to target the correct room
 
         Returns:
             Status dict
         """
         geojson = extract_geojson(routes)
-        room = f"reroute:{region_id}" if region_id else "reroute:global"
+        room = f"reroute:{disaster_id}" if disaster_id else "reroute:global"
 
         if self.sio:
             await self.sio.emit(
@@ -70,7 +70,7 @@ class MappingService:
                 {
                     "geojson": geojson,
                     "routes_count": len(routes),
-                    "region_id": region_id,
+                    "disaster_id": disaster_id,
                 },
                 room=room,
             )
@@ -88,7 +88,7 @@ class MappingService:
 
     async def clear_detours(
         self,
-        region_id: Optional[str] = None,
+        disaster_id: Optional[str] = None,
     ) -> dict:
         """
         Remove all active route overlays from the map.
@@ -96,17 +96,17 @@ class MappingService:
         Emits an 'all_clear' event to the region Socket.IO room.
 
         Args:
-            region_id: Region identifier
+            disaster_id: Region identifier
 
         Returns:
             Status dict
         """
-        room = f"reroute:{region_id}" if region_id else "reroute:global"
+        room = f"reroute:{disaster_id}" if disaster_id else "reroute:global"
 
         if self.sio:
             await self.sio.emit(
                 "all_clear",
-                {"message": "Routes cleared. Normal flow restored.", "region_id": region_id},
+                {"message": "Routes cleared. Normal flow restored.", "disaster_id": disaster_id},
                 room=room,
             )
             logger.info(f"MappingService: emitted all_clear room={room}")
@@ -118,7 +118,7 @@ class MappingService:
     async def send_updated_routes(
         self,
         routes: list,
-        region_id: Optional[str] = None,
+        disaster_id: Optional[str] = None,
         reason: str = "congestion",
     ) -> dict:
         """
@@ -128,14 +128,14 @@ class MappingService:
 
         Args:
             routes:    Updated route objects
-            region_id: Region identifier
+            disaster_id: Region identifier
             reason:    Why routes were recalculated
 
         Returns:
             Status dict
         """
         geojson = extract_geojson(routes)
-        room = f"reroute:{region_id}" if region_id else "reroute:global"
+        room = f"reroute:{disaster_id}" if disaster_id else "reroute:global"
 
         if self.sio:
             await self.sio.emit(
@@ -144,7 +144,7 @@ class MappingService:
                     "geojson": geojson,
                     "routes_count": len(routes),
                     "reason": reason,
-                    "region_id": region_id,
+                    "disaster_id": disaster_id,
                 },
                 room=room,
             )

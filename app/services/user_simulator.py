@@ -118,21 +118,23 @@ class UserSimulator:
         for vtype, weight in distribution.items():
             types.extend([vtype] * int(weight * 1000))
 
-        # Spread destinations across Dublin so routes visually diverge on the map.
-        # Vehicles come from south/southwest, M50 is blocked, routes fan out to
-        # different parts of the city showing the real detour diversity.
+        # Exactly 3 fixed destinations — round-robin ensures even split.
+        # No jitter — exact coordinates so set deduplication gives exactly 3 clusters
+        # which means exactly 3 TomTom routing calls (avoids 429 rate limits).
         COMMON_DESTINATIONS = [
-            {"lat": 53.3498, "lng": -6.2603},  # Dublin City Centre
-            {"lat": 53.3800, "lng": -6.4400},  # Blanchardstown (northwest)
-            {"lat": 53.4200, "lng": -6.2700},  # Dublin Airport area (north)
+            {"lat": 53.3498, "lng": -6.2603},  # Dublin City Centre      (~33%)
+            {"lat": 53.3800, "lng": -6.4400},  # Blanchardstown (NW)     (~33%)
+            {"lat": 53.4200, "lng": -6.2700},  # Dublin Airport (N)      (~33%)
         ]
 
         registered = []
-        for _ in range(n):
-            dest = random.choice(COMMON_DESTINATIONS)
+        for i in range(n):
+            # Round-robin: vehicle 0→City, 1→Blanchardstown, 2→Airport, 3→City ...
+            dest = COMMON_DESTINATIONS[i % len(COMMON_DESTINATIONS)]
+
             user = self.register_user(
-                lat=random.uniform(bounds["lat_min"], bounds["lat_max"]),
-                lng=random.uniform(bounds["lng_min"], bounds["lng_max"]),
+                lat=random.uniform(53.275, 53.310),   # Southwest Dublin / Tallaght
+                lng=random.uniform(-6.415, -6.340),   # West of M50
                 dest_lat=dest["lat"],
                 dest_lng=dest["lng"],
                 vehicle_type=random.choice(types) if types else "general",
