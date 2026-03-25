@@ -83,8 +83,8 @@ class TriggerRerouteRequest(BaseModel):
 
 class RestoreFlowRequest(BaseModel):
     disaster_id: str = Field(..., description="ID of the disaster being cleared")
-    cleared_segments: List[RoadSegmentInput] = Field(
-        ..., description="Road segments that have been cleared"
+    cleared_segments: Optional[List[RoadSegmentInput]] = Field(
+        None, description="Road segments that have been cleared"
     )
 
 
@@ -161,13 +161,18 @@ async def trigger_reroute(
 async def restore_flow(
     request: RestoreFlowRequest,
     service: RerouteService = Depends(get_reroute_service),
+    db: AsyncSession = Depends(get_db)
 ):
     """
     Restore normal traffic flow when a disaster is cleared.
 
     Updates road status → open, clears map overlays, sends all-clear to users.
     """
-    cleared_segments = [s.model_dump() for s in request.cleared_segments]
+    if request.cleared_segments:
+        cleared_segments = [s.model_dump() for s in request.cleared_segments]
+    else:
+        repo = RerouteRepository(db)
+        cleared_segments = await repo.get_blocked_roads(request.disaster_id)
 
     try:
         result = await service.restore_normal_flow(

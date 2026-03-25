@@ -759,7 +759,21 @@ class RerouteService:
         await self.mapping.clear_detours()
 
         # Step 3
-        users = await self.db.get_users_in_affected_area(disaster_id)
+        from app.repositories.disaster_repository import DisasterRepository
+        disaster_repo = DisasterRepository(self.db.db)
+        disaster = await disaster_repo.get_disaster_by_id(disaster_id)
+
+        users = []
+        if disaster:
+            lat = disaster["location"]["lat"]
+            lon = disaster["location"]["lon"]
+            radius_km = (
+                disaster.get("disaster_metadata", {})
+                .get("evaluation", {})
+                .get("impact_radius_km", 3.0)
+            )
+            users = await self.db.get_users_in_affected_area(lat, lon, radius_km)
+
 
         # Step 4 — publish to RabbitMQ (fire-and-forget)
         await self.publisher.publish_all_clear(
