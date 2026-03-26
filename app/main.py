@@ -7,8 +7,10 @@ UPDATED:
 - Redis fallback support
 - 1 year access tokens
 """
-
-from fastapi import FastAPI, Request
+import asyncio  
+from fastapi import FastAPI, Request, Depends
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.db.session import get_db
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
@@ -22,6 +24,11 @@ from app.api.v1 import live_map
 from app.api.v1 import scenario_engine
 from app.api.v1 import reroute
 from app.api.v1 import evacuation   
+from app.api.v1 import disaster_report
+from app.api.v1 import vehicles
+from app.api.v1.disaster import router as disaster_router
+from app.api.v1 import disaster_evaluation
+
 from cache.redis_client import close_redis_connection
 from app.providers.map_provider import MapProvider
 from app.providers.traffic import TrafficProvider
@@ -29,6 +36,13 @@ from app.api.v1.live_map import set_live_map_providers
 from app.socket.manager import sio
 from app.workers.reroute_publisher import get_publisher
 import socketio
+from app.api.v1.emergency_unit import router as emergency_unit_router
+from app.api.v1.deployment import router as deployment_router
+from app.api.v1.disaster_evaluation import set_evaluation_providers
+from app.api.v1.user_management import router as user_management_router
+
+from app.api.v1.notifications_ws import router as notifications_router
+from app.api.v1.notifications_ws import redis_listener                  
 
 # Setup logging FIRST
 setup_logging()
@@ -55,6 +69,7 @@ async def lifespan(app: FastAPI):
     map_provider = MapProvider(api_key=settings.MAPBOX_API_KEY)
     traffic_provider = TrafficProvider(api_key=settings.TRAFFIC_API_KEY)
     set_live_map_providers(map_provider, traffic_provider)
+    set_evaluation_providers(map_provider, traffic_provider)
     logger.info("🗺️  Map and traffic providers initialized")
 
     # Connect RabbitMQ publisher
@@ -65,7 +80,18 @@ async def lifespan(app: FastAPI):
     else:
         logger.warning("⚠️  RabbitMQ publisher not connected — running in degraded mode (notifications disabled)")
 
+    # Start Redis pub/sub listener for WebSocket notifications
+    listener_task = asyncio.create_task(redis_listener())
+    logger.info("📡 Redis notification listener started")
+
     yield
+
+    # Cancel listener on shutdown
+    listener_task.cancel()
+    try:
+        await listener_task
+    except asyncio.CancelledError:
+        pass
 
     # Shutdown
     logger.info("=" * 70)
@@ -152,10 +178,18 @@ app.include_router(live_map.router, prefix="/api/v1")
 app.include_router(scenario_engine.router, prefix="/api/v1")
 app.include_router(reroute.router, prefix="/api/v1")
 app.include_router(evacuation.router, prefix="/api/v1")
+app.include_router(disaster_report.router, prefix="/api/v1")
+app.include_router(disaster_router, prefix="/api/v1")
+app.include_router(disaster_evaluation.router, prefix="/api/v1")
 
+app.include_router(emergency_unit_router, prefix="/api/v1")
+app.include_router(vehicles.router, prefix = "/api/v1")
 
+app.include_router(deployment_router, prefix="/api/v1")
+app.include_router(user_management_router, prefix="/api/v1")
 
-
+# ── Notification router ─────────────────────────────────
+app.include_router(notifications_router,prefix="/api/v1")  
 # Serve demo page
 from fastapi.responses import FileResponse
 from pathlib import Path

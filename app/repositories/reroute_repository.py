@@ -302,43 +302,100 @@ class RerouteRepository:
     # -------------------------------------------------------------------------
 
     async def get_users_in_affected_area(
-        self, region_id: str
-    ) -> List[Dict[str, Any]]:
+        self,
+        lat: float,
+        lon: float,
+        radius_km: float,
+    ) -> list[dict]:
         """
-        Return vehicles in the affected region from the UserSimulator.
-
-        UserSimulator holds the in-memory vehicle pool registered for
-        testing. Falls back to querying real DB users if simulator is empty.
+        Return active travellers whose current position falls within
+        radius_km of (lat, lon).
+    
+        Dev/test path: if UserSimulator has vehicles loaded (via
+        POST /scenarios/seed-vehicles), returns those — keeps scenario_engine
+        working for testing without touching the DB.
+    
+        Production path: queries active_trips using a bounding box derived
+        from the disaster coordinates and impact radius.
+    
+        Bounding box conversion:
+            1 degree lat  ≈ 111 km
+            1 degree lon  ≈ 73 km at Dublin latitude (53°N)
         """
+        # -- Dev/test override ---------------------------------------------------
         from app.services.user_simulator import user_simulator
-
-        # Convert region_id string to bounds dict for simulator
-        REGION_BOUNDS = {
-            "region-dublin-m50":    {"lat_min": 53.280, "lat_max": 53.410, "lng_min": -6.420, "lng_max": -6.220},
-            "region-dublin-city":   {"lat_min": 53.330, "lat_max": 53.360, "lng_min": -6.290, "lng_max": -6.240},
-            "region-dublin-port":   {"lat_min": 53.340, "lat_max": 53.380, "lng_min": -6.250, "lng_max": -6.200},
-            "region-dublin-south":  {"lat_min": 53.270, "lat_max": 53.340, "lng_min": -6.380, "lng_max": -6.180},
+    
+        lat_offset = radius_km / 111.0
+        lon_offset = radius_km / 73.0
+    
+        bounds = {
+            "lat_min": lat - lat_offset,
+            "lat_max": lat + lat_offset,
+            "lng_min": lon - lon_offset,
+            "lng_max": lon + lon_offset,
         }
-        bounds = REGION_BOUNDS.get(region_id)
-
-        # Try simulator first
+    
         simulated = user_simulator.get_users_in_region(bounds)
         if simulated:
             return simulated
-
-        # Fallback — real DB users (production path)
+    
+        # -- Production path -----------------------------------------------------
+        from sqlalchemy import select
+        from app.db.models.active_trip import ActiveTrip
+        from datetime import datetime, timezone
+    
+        now = datetime.now(timezone.utc)
+    
         result = await self.db.execute(
-            select(User).where(User.deleted_at.is_(None)).limit(1000)
+            select(ActiveTrip).where(
+                ActiveTrip.current_lat >= bounds["lat_min"],
+                ActiveTrip.current_lat <= bounds["lat_max"],
+                ActiveTrip.current_lng >= bounds["lng_min"],
+                ActiveTrip.current_lng <= bounds["lng_max"],
+                ActiveTrip.expires_at > now,
+            )
         )
-        users = result.scalars().all()
+        trips = result.scalars().all()
+    
         return [
             {
-                "user_id": str(u.id),
-                "phone_number": getattr(u, "phone_number", None),
-                "destination": {"lat": 53.3498, "lng": -6.2603},
-                "type": "general",
+                "user_id": trip.user_id,
+                "destination": {"lat": trip.dest_lat, "lng": trip.dest_lng},
+                "type": trip.vehicle_type,
+                "phone_number": None,  # extend: join users table for SMS
             }
-            for u in users
+            for trip in trips
+        ]
+
+    async def get_all_active_plans(self) -> list[dict]:
+        """
+        Return every active reroute plan across all disasters.
+        Used by the admin dashboard to show the full operational picture.
+        """
+        from sqlalchemy import select
+        result = await self.db.execute(
+            select(ReroutePlan)
+            .where(ReroutePlan.status == "active")
+            .order_by(ReroutePlan.created_at.desc())
+        )
+        plans = result.scalars().all()
+    
+        return [
+            {
+                "id": p.id,
+                "disaster_id": p.disaster_id,
+                "status": p.status,
+                "blocked_roads": p.blocked_roads,
+                "vehicles_affected": p.vehicles_affected,
+                "routes_count": len(p.chosen_routes) if p.chosen_routes else 0,
+                "trigger_source": p.trigger_source,
+                "route_assignments": p.route_assignments,
+                "chosen_routes": p.chosen_routes,
+                "capacity_usage": p.capacity_usage,
+                "estimated_times": p.estimated_times,
+                "created_at": p.created_at.isoformat() if p.created_at else None,
+            }
+            for p in plans
         ]
 
     async def resolve_disaster(self, disaster_id: str) -> None:
@@ -381,4 +438,6 @@ class RerouteRepository:
             "reason": segment.reason,
             "capacity": segment.capacity,
             "disaster_id": segment.disaster_id,
+            "points":      segment.points,  
+            "geojson":     segment.geojson,   
         }

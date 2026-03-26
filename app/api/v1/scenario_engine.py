@@ -362,6 +362,24 @@ async def deactivate_scenario(disaster_id: str):
 
 
 @router.get(
+    "/vehicles",
+    summary="List all seeded vehicles",
+    response_model=Dict[str, Any],
+)
+async def list_vehicles():
+    """
+    Return all vehicles currently in the simulator pool.
+    Useful for tracking specific user_ids before triggering a reroute.
+    """
+    from app.services.user_simulator import user_simulator
+    vehicles = user_simulator.get_all_users()
+    return {
+        "total": len(vehicles),
+        "vehicles": vehicles,
+    }
+
+
+@router.get(
     "/{disaster_id}",
     summary="Get a specific active scenario by disaster ID",
     response_model=Dict[str, Any],
@@ -611,23 +629,6 @@ async def trigger_monitoring_cycle(
         "speed_threshold_kmh": speed_threshold_kmh,
         "regions_checked": len(results),
         "results": results,
-    }
-
-@router.get(
-    "/vehicles",
-    summary="List all seeded vehicles",
-    response_model=Dict[str, Any],
-)
-async def list_vehicles():
-    """
-    Return all vehicles currently in the simulator pool.
-    Useful for tracking specific user_ids before triggering a reroute.
-    """
-    from app.services.user_simulator import user_simulator
-    vehicles = user_simulator.get_all_users()
-    return {
-        "total": len(vehicles),
-        "vehicles": vehicles,
     }
 
 

@@ -71,6 +71,7 @@ def create_access_token(
 
 def create_refresh_token(
     user_id: str,
+    user_type: str,
     expires_delta: Optional[timedelta] = None
 ) -> str:
     """
@@ -100,6 +101,7 @@ def create_refresh_token(
     payload = {
         "sub": user_id,
         "type": "refresh",  # Refresh token type
+        "user_type": user_type,
         "exp": expire,
         "iat": datetime.utcnow(),
     }

@@ -6,7 +6,7 @@ Extends BaseRepository with user-specific queries.
 """
 
 from typing import Optional
-from sqlalchemy import select
+from sqlalchemy import select, update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.user import User
@@ -134,6 +134,20 @@ class UserRepository(BaseRepository[User]):
         await self.session.refresh(user)
         return user
     
+    async def increment_false_report_count(self, user_id: str) -> None:
+        """
+        Atomically increment false_report_count for a user.
+
+        Called when an evaluation flags the user's report as FALSE_ALARM.
+        Uses a SQL-level increment to avoid race conditions.
+        """
+        await self.session.execute(
+            sa_update(User)
+            .where(User.id == user_id)
+            .values(false_report_count=User.false_report_count + 1)
+        )
+        await self.session.flush()
+
     async def get_pending_users(self, skip: int = 0, limit: int = 100):
         """
         Get all pending users (awaiting verification).

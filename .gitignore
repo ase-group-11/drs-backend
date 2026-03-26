@@ -83,3 +83,18 @@ docker-compose.override.yml
 *.bak
 *.swp
 *.tmp
+
+# ML training artefacts (generated — do not commit)
+data/synthetic.csv
+models/*.joblib
+
+# Disaster image datasets (download from Kaggle — do not commit)
+# Source: https://www.kaggle.com/datasets/varpit94/disaster-images-dataset
+data/disaster_images/
+data/kaggle_disaster_images/
+data/*.zip
+
+# Local dev / evaluation scripts
+scripts/demo_evaluation.py
+scripts/evaluate.py
+evaluation-demo/
