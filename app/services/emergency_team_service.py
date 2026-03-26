@@ -984,43 +984,77 @@ class EmergencyTeamService:
         old_password: str,
         new_password: str
     ) -> Dict[str, str]:
-        """Change team member password."""
+        """
+        Change password for an authenticated team member.
+
+        Verifies the current (old) password before applying the new one.
+        Uses raw SQL for the lookup and update to stay consistent with
+        the project's no-ORM rule.
+
+        Args:
+            team_member_id: UUID from the JWT token (get_current_team_member)
+            old_password:   The member's current plaintext password
+            new_password:   The desired new plaintext password (already validated
+                            by the Pydantic schema before this is called)
+
+        Raises:
+            ValueError: Team member not found / old password wrong / account inactive
+        """
+        from sqlalchemy import text
+        from datetime import datetime
+
         logger.info(f"🔐 Changing password for team member {team_member_id}")
-        
-        team_member = await self.team_repo.get_by_id(team_member_id)
-        
-        if not team_member:
+
+        # ── 1. Fetch current password hash + status ──────────────────────────
+        fetch_sql = text("""
+            SELECT id, password_hash, status
+            FROM emergency_teams
+            WHERE id = :id
+              AND deleted_at IS NULL
+        """)
+        result = await self.session.execute(fetch_sql, {"id": team_member_id})
+        member = result.mappings().first()
+
+        if not member:
             raise ValueError("Team member not found")
-        
-        # Verify old password
-        is_valid = verify_password(old_password, team_member.password_hash)
-        
-        if not is_valid:
+
+        if str(member["status"]) != "ACTIVE":
+            raise ValueError("Account is not active. Please contact an administrator.")
+
+        # ── 2. Verify old password ────────────────────────────────────────────
+        if not verify_password(old_password, member["password_hash"]):
             raise ValueError("Current password is incorrect")
-        
-        # Hash new password
-        new_password_hash = hash_password(new_password)
-        
-        # Update password
-        await self.team_repo.update(
-            team_member_id,
-            password_hash=new_password_hash
-        )
-        
-        await self.session.commit()
-        
+
+        # ── 3. Hash + persist new password ───────────────────────────────────
+        new_hash = hash_password(new_password)
+        now = datetime.utcnow()
+
+        update_sql = text("""
+            UPDATE emergency_teams
+            SET password_hash = :password_hash,
+                updated_at    = :updated_at
+            WHERE id = :id
+              AND deleted_at IS NULL
+        """)
+        await self.session.execute(update_sql, {
+            "password_hash": new_hash,
+            "updated_at":    now,
+            "id":            team_member_id,
+        })
+
+        logger.info(f"✅ Password changed for team member {team_member_id}")
         return {"message": "Password changed successfully"}
-    
+
     async def deactivate_team_member(
-        self, 
+        self,
         team_member_id: str
     ) -> Dict[str, str]:
         """Deactivate a team member account."""
         team_member = await self.team_repo.deactivate_team_member(team_member_id)
-        
+
         if not team_member:
             raise ValueError("Team member not found")
-        
+
         await self.session.commit()
-        
+
         return {"message": "Team member deactivated successfully"}
