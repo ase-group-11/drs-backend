@@ -23,6 +23,7 @@ from app.api.v1 import emergency_team_auth
 from app.api.v1 import live_map
 from app.api.v1 import scenario_engine
 from app.api.v1 import reroute
+from app.api.v1 import evacuation   
 from app.api.v1 import disaster_report
 from app.api.v1 import vehicles
 from app.api.v1.disaster import router as disaster_router
@@ -176,6 +177,7 @@ app.include_router(emergency_team_auth.router, prefix="/api/v1")
 app.include_router(live_map.router, prefix="/api/v1")
 app.include_router(scenario_engine.router, prefix="/api/v1")
 app.include_router(reroute.router, prefix="/api/v1")
+app.include_router(evacuation.router, prefix="/api/v1")
 app.include_router(disaster_report.router, prefix="/api/v1")
 app.include_router(disaster_router, prefix="/api/v1")
 app.include_router(disaster_evaluation.router, prefix="/api/v1")
