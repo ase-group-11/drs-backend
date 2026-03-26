@@ -38,7 +38,7 @@ UNIT_TYPE_TO_DEPARTMENT = {
 
 
 class UpdateUserStatusRequest(BaseModel):
-    status: str = Field(..., description="New status: ACTIVE, INACTIVE, SUSPENDED")
+    status: str = Field(..., description="New status: ACTIVE, INACTIVE, SUSPENDED, PENDING, DELETED")
     reason: Optional[str] = Field(None, description="Reason for status change")
 
 
@@ -117,7 +117,7 @@ async def create_user(
 
         if data.user_type == "citizen":
             # ── Create Citizen ──
-            # Check phone uniqueness
+            # Check phone uniqueness (only among non-deleted users)
             check = await db.execute(
                 text("SELECT id FROM users WHERE phone_number = :phone AND deleted_at IS NULL"),
                 {"phone": data.phone_number}
@@ -125,7 +125,7 @@ async def create_user(
             if check.first():
                 raise HTTPException(status_code=400, detail=f"Phone number {data.phone_number} already registered.")
 
-            # Check email uniqueness if provided
+            # Check email uniqueness if provided (only among non-deleted users)
             if data.email:
                 check = await db.execute(
                     text("SELECT id FROM users WHERE email = :email AND deleted_at IS NULL"),
@@ -177,7 +177,7 @@ async def create_user(
             if department not in ("FIRE", "MEDICAL", "POLICE", "IT"):
                 raise HTTPException(status_code=400, detail="Department must be FIRE, MEDICAL, POLICE, or IT.")
 
-            # Check phone uniqueness
+            # Check phone uniqueness (only among non-deleted)
             check = await db.execute(
                 text("SELECT id FROM emergency_teams WHERE phone_number = :phone AND deleted_at IS NULL"),
                 {"phone": data.phone_number}
@@ -185,7 +185,7 @@ async def create_user(
             if check.first():
                 raise HTTPException(status_code=400, detail=f"Phone number {data.phone_number} already registered.")
 
-            # Check email uniqueness
+            # Check email uniqueness (only among non-deleted)
             check = await db.execute(
                 text("SELECT id FROM emergency_teams WHERE email = :email AND deleted_at IS NULL"),
                 {"email": data.email}
@@ -546,18 +546,18 @@ async def update_user_status(
         from datetime import datetime
         now = datetime.utcnow()
         new_status = data.status.upper()
- 
+
         valid_statuses = ("ACTIVE", "INACTIVE", "SUSPENDED", "PENDING", "DELETED")
         if new_status not in valid_statuses:
             raise HTTPException(status_code=400, detail=f"Status must be one of: {', '.join(valid_statuses)}")
- 
+
         # Try citizens first
         result = await db.execute(
             text("SELECT id, full_name, status FROM users WHERE id = :id"),
             {"id": user_id}
         )
         user = result.mappings().first()
- 
+
         if user:
             if new_status == "DELETED":
                 # Soft delete — also set deleted_at so email/phone can be reused
@@ -579,14 +579,14 @@ async def update_user_status(
                 "previous_status": str(user["status"]), "new_status": new_status,
                 "reason": data.reason, "message": f"{user['full_name']} → {new_status}",
             }
- 
+
         # Try emergency team
         result = await db.execute(
             text("SELECT id, full_name, status, department FROM emergency_teams WHERE id = :id"),
             {"id": user_id}
         )
         team = result.mappings().first()
- 
+
         if team:
             if new_status == "DELETED":
                 await db.execute(text("""
@@ -609,20 +609,20 @@ async def update_user_status(
                 "previous_status": str(team["status"]), "new_status": new_status,
                 "reason": data.reason, "message": f"{team['full_name']} → {new_status}",
             }
- 
+
         raise HTTPException(status_code=404, detail="User not found.")
- 
+
     except HTTPException:
         raise
     except Exception as e:
         logger.exception(f"Error updating user status: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to update status: {str(e)[:200]}")
- 
- 
+
+
 # ══════════════════════════════════════════════
 # DELETE: Soft delete user
 # ══════════════════════════════════════════════
- 
+
 @router.delete(
     "/{user_id}",
     summary="Soft delete user",
@@ -636,28 +636,28 @@ async def delete_user(
     try:
         from datetime import datetime
         now = datetime.utcnow()
- 
+
         # Try citizens
         result = await db.execute(
             text("SELECT id, full_name FROM users WHERE id = :id AND deleted_at IS NULL"),
             {"id": user_id}
         )
         user = result.mappings().first()
- 
+
         if user:
             await db.execute(text("""
                 UPDATE users SET deleted_at = :now, status = CAST('DELETED' AS user_status), updated_at = :now WHERE id = :id
             """), {"id": user_id, "now": now})
             await db.flush()
             return {"id": user_id, "full_name": user["full_name"], "user_type": "citizen", "status": "DELETED"}
- 
+
         # Try emergency team
         result = await db.execute(
             text("SELECT id, full_name FROM emergency_teams WHERE id = :id AND deleted_at IS NULL"),
             {"id": user_id}
         )
         team = result.mappings().first()
- 
+
         if team:
             cmd_check = await db.execute(
                 text("SELECT COUNT(*) FROM emergency_units WHERE commander_id = :id AND deleted_at IS NULL"),
@@ -665,19 +665,18 @@ async def delete_user(
             )
             if cmd_check.scalar() > 0:
                 raise HTTPException(status_code=400, detail="Cannot delete — commanding active unit(s). Reassign commander first.")
- 
+
             await db.execute(text("""
                 UPDATE emergency_teams SET deleted_at = :now, status = CAST('DELETED' AS user_status), updated_at = :now WHERE id = :id
             """), {"id": user_id, "now": now})
             await db.execute(text("DELETE FROM unit_crew WHERE team_member_id = :id"), {"id": user_id})
             await db.flush()
             return {"id": user_id, "full_name": team["full_name"], "user_type": "team", "status": "DELETED"}
- 
+
         raise HTTPException(status_code=404, detail="User not found.")
- 
+
     except HTTPException:
         raise
     except Exception as e:
         logger.exception(f"Error deleting user: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to delete user: {str(e)[:200]}")
- 
