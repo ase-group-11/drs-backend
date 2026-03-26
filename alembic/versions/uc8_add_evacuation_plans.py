@@ -16,7 +16,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 
 revision      = "uc8_evacuation_plans"
-down_revision = None          # ← REPLACE with your current head
+down_revision = "493f4be60325"          # ← REPLACE with your current head
 branch_labels = None
 depends_on    = None
 
