@@ -19,12 +19,13 @@ Queues:
   - reroute_queue       → Re-Route Service
 """
 
-import os
 import json
 import logging
 import pika
 from typing import Dict, Any, Optional
 from datetime import datetime
+
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -34,8 +35,11 @@ EXCHANGE_NAME = "disaster_events"
 QUEUE_BINDINGS = {
     "evaluation_queue": ["disaster.verified"],
     "coordination_queue": ["disaster.verified", "disaster.evaluated", "disaster.backup_requested"],
-    "notification_queue": ["disaster.dispatched", "disaster.verified", "disaster.evaluated", "disaster.updated",
-                           "disaster.resolved", "disaster.backup_requested", "disaster.unit_completed"],
+    "notification_queue": [
+        "disaster.dispatched", "disaster.verified", "disaster.evaluated",
+        "disaster.updated", "disaster.resolved", "disaster.backup_requested",
+        "disaster.unit_completed", "disaster.false_alarm",
+    ],
     "reroute_queue": ["disaster.verified", "disaster.evaluated", "disaster.resolved", "disaster.unit_completed"],
 }
 
@@ -46,7 +50,7 @@ class RabbitMQService:
     def __init__(self):
         self.connection: Optional[pika.BlockingConnection] = None
         self.channel: Optional[pika.channel.Channel] = None
-        from app.core.config import settings as _app_settings; self.rabbitmq_url = _app_settings.RABBITMQ_URL
+        self.rabbitmq_url = settings.RABBITMQ_URL
 
     def connect(self):
         """Establish connection to RabbitMQ and setup exchange + queues."""

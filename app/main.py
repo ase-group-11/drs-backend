@@ -49,12 +49,10 @@ setup_logging()
 logger = logging.getLogger(__name__)
 
 
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
     Application lifespan manager.
-    
     Handles startup and shutdown events.
     """
     # Startup
@@ -86,21 +84,22 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # Cancel listener on shutdown
+    # Shutdown
+    logger.info("=" * 70)
+    logger.info("Shutting down...")
+
     listener_task.cancel()
     try:
         await listener_task
     except asyncio.CancelledError:
         pass
 
-    # Shutdown
-    logger.info("=" * 70)
-    logger.info("Shutting down...")
     await close_redis_connection()
     await traffic_provider.close()
     await publisher.close()
     logger.info("Cleanup complete")
     logger.info("=" * 70)
+
 
 
 # Create FastAPI application

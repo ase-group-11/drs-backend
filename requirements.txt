@@ -33,6 +33,9 @@ pybreaker==1.2.0
 # Twilio SMS
 twilio==8.12.0
 
+# SendGrid Email
+sendgrid==6.11.0
+
 # Validation & Settings
 pydantic==2.5.3
 pydantic-settings==2.1.0

@@ -3,17 +3,11 @@
 Deployment Service - Manages unit deployments to disasters.
 
 Handles:
-  - Dispatch units to disasters (with auto-cancel of old deployments)
+  - Dispatch units to disasters
   - Update deployment status (DISPATCHED → EN_ROUTE → ON_SCENE → IN_PROGRESS → COMPLETED)
   - List active missions for a unit
   - Get deployment details (mission progress)
   - Request backup
-
-FIXES APPLIED:
-  - Auto-cancel old active deployments when re-dispatching same unit
-  - Reset orphaned DEPLOYED units back to AVAILABLE
-  - pending_events collected properly (was causing NameError)
-  - Uses _pending_events pattern for BackgroundTasks publishing
 """
 
 import uuid
@@ -101,35 +95,9 @@ class DeploymentService:
                 if not unit:
                     raise HTTPException(status_code=404, detail=f"Unit {uid} not found.")
 
-                # FIX: Auto-cancel any existing active deployment for this unit
-                await self.db.execute(text("""
-                    UPDATE deployments
-                    SET deployment_status = 'CANCELLED',
-                        completed_at = :completed_now,
-                        assessment_notes = 'Auto-cancelled: unit re-dispatched',
-                        updated_at = :updated_now
-                    WHERE unit_id = :unit_id
-                      AND deployment_status NOT IN ('COMPLETED', 'CANCELLED')
-                      AND deleted_at IS NULL
-                """), {"unit_id": uid, "completed_now": now, "updated_now": now})
-
-                # FIX: Reset unit to AVAILABLE if stuck as DEPLOYED with no active deployments
-                await self.db.execute(text("""
-                    UPDATE emergency_units
-                    SET unit_status = CAST('AVAILABLE' AS unit_status),
-                        updated_at = :reset_now
-                    WHERE id = :unit_id
-                      AND unit_status = CAST('DEPLOYED' AS unit_status)
-                      AND deleted_at IS NULL
-                      AND NOT EXISTS (
-                          SELECT 1 FROM deployments
-                          WHERE unit_id = :unit_id
-                            AND deployment_status NOT IN ('COMPLETED', 'CANCELLED')
-                            AND deleted_at IS NULL
-                      )
-                """), {"unit_id": uid, "reset_now": now})
-                
-                # Atomic claim: AVAILABLE → DEPLOYED
+                # FIX #1: Atomic conditional UPDATE replaces the read-then-write pattern.
+                # The WHERE clause on unit_status = AVAILABLE means only one concurrent
+                # request can succeed — the rest get 0 rows back and receive a 409.
                 claim_unit_sql = text("""
                     UPDATE emergency_units
                     SET unit_status = CAST('DEPLOYED' AS unit_status),
@@ -152,7 +120,7 @@ class DeploymentService:
                         detail=f"Unit {unit['unit_code']} is no longer AVAILABLE — it may have just been claimed by another request."
                     )
 
-                # Create deployment record
+                # Create deployment record (unit is now atomically locked to DEPLOYED)
                 deployment_id = str(uuid.uuid4())
                 deploy_sql = text("""
                     INSERT INTO deployments (
@@ -211,7 +179,7 @@ class DeploymentService:
                     "eta_minutes": eta,
                 })
 
-            # Update disaster assigned_department
+            # Update disaster assigned_department (use first unit's department)
             if dispatched_units:
                 update_disaster_sql = text("""
                     UPDATE disasters
@@ -226,9 +194,9 @@ class DeploymentService:
                 })
 
             await self.db.flush()
-            
 
-            # Return event for BackgroundTasks publishing
+            # FIX #8: Do NOT publish here — the transaction hasn't committed yet.
+            # Return the event payload; the API layer will publish it after commit.
             pending_event = {
                 "topic": "disaster.dispatched",
                 "payload": {
@@ -247,7 +215,6 @@ class DeploymentService:
                 "message": f"{len(dispatched_units)} unit(s) dispatched to {disaster['tracking_id']}",
                 "_pending_event": pending_event,
             }
-            
 
         except HTTPException:
             raise
@@ -270,6 +237,7 @@ class DeploymentService:
         location_verified: bool = False,
         request_immediate_backup: bool = False,
         assessment_notes: str = None,
+        is_false_alarm: bool = False,
     ) -> Dict[str, Any]:
         """Update deployment status — the main responder endpoint."""
         logger.info(f"Updating deployment {deployment_id} to {new_status}")
@@ -279,7 +247,10 @@ class DeploymentService:
             dep_sql = text("""
                 SELECT dep.id, dep.disaster_id, dep.unit_id, dep.deployment_status,
                        dep.dispatched_at,
-                       dis.tracking_id, dis.disaster_status, dis.type as disaster_type
+                       dis.tracking_id, dis.disaster_status, dis.type as disaster_type,
+                       dis.location_address,
+                       ST_Y(dis.location::geometry) as lat,
+                       ST_X(dis.location::geometry) as lon
                 FROM deployments dep
                 JOIN disasters dis ON dep.disaster_id = dis.id
                 WHERE dep.id = :deployment_id AND dep.deleted_at IS NULL
@@ -316,7 +287,7 @@ class DeploymentService:
                 "updated_at": now,
             }
 
-            # Set timeline timestamp
+            # Set timeline timestamp for this status
             timestamp_map = {
                 "EN_ROUTE": "en_route_at",
                 "ON_SCENE": "on_scene_at",
@@ -331,10 +302,6 @@ class DeploymentService:
             if new_status == "ON_SCENE":
                 set_clauses.append("arrived_at = :arrived_at")
                 params["arrived_at"] = now
-
-            if new_status == "CANCELLED":
-                set_clauses.append("completed_at = :completed_at")
-                params["completed_at"] = now
 
             if situation_report:
                 set_clauses.append("situation_report = :situation_report")
@@ -368,7 +335,9 @@ class DeploymentService:
                 set_clauses.append("assessment_notes = :assessment_notes")
                 params["assessment_notes"] = assessment_notes
 
-            # Atomic update with current_status check
+            # FIX #2: Add current_status to the WHERE clause so the UPDATE itself
+            # validates the transition atomically. If another request already advanced
+            # the status, rowcount = 0 and we raise 409 instead of silently overwriting.
             params["current_status"] = current
             update_sql = text(f"""
                 UPDATE deployments
@@ -381,7 +350,7 @@ class DeploymentService:
             if not update_result.first():
                 raise HTTPException(
                     status_code=409,
-                    detail="Deployment status was changed by a concurrent request. Fetch the latest status and retry."
+                    detail=f"Deployment status was changed by a concurrent request. Fetch the latest status and retry."
                 )
 
             # Update unit status to match
@@ -389,7 +358,7 @@ class DeploymentService:
                 "EN_ROUTE": "DEPLOYED",
                 "ON_SCENE": "ON_SCENE",
                 "IN_PROGRESS": "ON_SCENE",
-                "COMPLETED": "AVAILABLE",
+                "COMPLETED": "RETURNING",
                 "CANCELLED": "AVAILABLE",
             }
             if new_status in unit_status_map:
@@ -405,23 +374,76 @@ class DeploymentService:
                     "updated_at": now,
                 })
 
+
             await self.db.flush()
 
-            # FIX: Collect events properly — API layer publishes after commit
+            # Collect events — API layer publishes after DB commit
             pending_events = []
+
+            if new_status == "ON_SCENE":
+                if is_false_alarm:
+                    # Field team says evaluation was wrong — mark disaster as rejected
+                    await self.db.execute(text("""
+                        UPDATE disasters
+                        SET disaster_status = CAST('REJECTED' AS disaster_status),
+                            updated_at = :updated_at
+                        WHERE id = :disaster_id
+                    """), {"disaster_id": disaster_id, "updated_at": now})
+
+                    pending_events.append(("disaster.false_alarm", {
+                        "disaster_id": disaster_id,
+                        "tracking_id": str(dep["tracking_id"]),
+                        "flagged_by_unit": unit_id,
+                        "situation_report": situation_report,
+                        "location": {
+                            "lat": float(dep["lat"]) if dep["lat"] else None,
+                            "lon": float(dep["lon"]) if dep["lon"] else None,
+                        },
+                        "location_address": dep["location_address"],
+                    }))
+
+                elif str(dep["disaster_status"]) == "UNVERIFIED":
+                    # Real disaster — activate it (field-verified)
+                    await self.db.execute(text("""
+                        UPDATE disasters
+                        SET disaster_status = CAST('ACTIVE' AS disaster_status),
+                            response_time = :response_time,
+                            updated_at = :updated_at
+                        WHERE id = :disaster_id
+                    """), {"disaster_id": disaster_id, "response_time": now, "updated_at": now})
+
+                    pending_events.append(("disaster.verified", {
+                        "disaster_id": disaster_id,
+                        "tracking_id": str(dep["tracking_id"]),
+                        "verified_by_unit": unit_id,
+                        "situation_report": situation_report,
+                        "location": {
+                            "lat": float(dep["lat"]) if dep["lat"] else None,
+                            "lon": float(dep["lon"]) if dep["lon"] else None,
+                        },
+                        "location_address": dep["location_address"],
+                    }))
+
             if new_status == "COMPLETED":
                 pending_events.append(("disaster.unit_completed", {
                     "disaster_id": disaster_id,
                     "tracking_id": str(dep["tracking_id"]),
                     "unit_id": unit_id,
                 }))
+
             if request_immediate_backup:
                 pending_events.append(("disaster.backup_requested", {
                     "disaster_id": disaster_id,
                     "tracking_id": str(dep["tracking_id"]),
                     "requesting_unit": unit_id,
                     "resources_needed": additional_resources,
+                    "location": {
+                        "lat": float(dep["lat"]) if dep["lat"] else None,
+                        "lon": float(dep["lon"]) if dep["lon"] else None,
+                    },
+                    "location_address": dep["location_address"],
                 }))
+
 
             return {
                 "deployment_id": deployment_id,
@@ -430,6 +452,7 @@ class DeploymentService:
                 "previous_status": current,
                 "new_status": new_status,
                 "updated_at": now.isoformat(),
+
                 "backup_requested": request_immediate_backup,
                 "message": f"Deployment updated: {current} → {new_status}",
                 "_pending_events": pending_events,
@@ -445,7 +468,7 @@ class DeploymentService:
     # GET: Active missions for a unit
     # ──────────────────────────────────────────────
     async def get_active_missions(self, unit_id: str) -> List[Dict[str, Any]]:
-        """Get all active deployments for a unit."""
+        """Get all active deployments for a unit (Active Missions page)."""
         try:
             sql = text("""
                 SELECT
@@ -514,10 +537,10 @@ class DeploymentService:
             raise HTTPException(status_code=500, detail=f"Failed to fetch missions: {str(e)}")
 
     # ──────────────────────────────────────────────
-    # GET: Single deployment details
+    # GET: Single deployment details (Mission Progress)
     # ──────────────────────────────────────────────
     async def get_deployment(self, deployment_id: str) -> Dict[str, Any]:
-        """Get full deployment details including timeline."""
+        """Get full deployment details including timeline and situation report."""
         try:
             sql = text("""
                 SELECT
@@ -596,7 +619,7 @@ class DeploymentService:
     # GET: Completed missions for a unit
     # ──────────────────────────────────────────────
     async def get_completed_missions(self, unit_id: str, limit: int = 20) -> List[Dict[str, Any]]:
-        """Get completed deployments for a unit."""
+        """Get completed deployments for a unit (Completed tab)."""
         try:
             sql = text("""
                 SELECT
