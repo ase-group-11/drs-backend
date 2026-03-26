@@ -204,6 +204,7 @@ class IntegrationService:
                 encoding="utf-8",
                 decode_responses=True,
                 socket_connect_timeout=2,
+                socket_timeout=2,
             )
             return self._redis
         except Exception as e:
@@ -485,185 +486,194 @@ class IntegrationService:
 
         return _straight_line()
 
-        @_circuit_breaker
-        @retry(
+    @_circuit_breaker
+    @retry(
             stop=stop_after_attempt(3),
             wait=wait_exponential(multiplier=1, min=1, max=8),
             retry=retry_if_exception_type((aiohttp.ClientError, asyncio.TimeoutError)),
             before_sleep=before_sleep_log(logger, logging.WARNING),
             reraise=True,
         )
-        async def _get_directions_with_breaker(
-            self,
-            origin: Dict[str, float],
-            destination: Dict[str, float],
-            avoid: List[Dict[str, Any]],
-            alternatives: bool,
-            max_alternatives: int,
-        ) -> Dict[str, Any]:
-            """Internal: routing call with retry + circuit breaker."""
-            session = await self._get_session()
+    async def _get_directions_with_breaker(
+        self,
+        origin: Dict[str, float],
+        destination: Dict[str, float],
+        avoid: List[Dict[str, Any]],
+        alternatives: bool,
+        max_alternatives: int,
+    ) -> Dict[str, Any]:
+        """Internal: routing call with retry + circuit breaker."""
+        session = await self._get_session()
 
-            origin_str = f"{origin['lat']},{origin['lng']}"
-            dest_str = f"{destination['lat']},{destination['lng']}"
-            url = f"{self.ROUTING_BASE_URL}/{origin_str}:{dest_str}/json"
+        origin_str = f"{origin['lat']},{origin['lng']}"
+        dest_str = f"{destination['lat']},{destination['lng']}"
+        url = f"{self.ROUTING_BASE_URL}/{origin_str}:{dest_str}/json"
 
-            avoid_params = build_avoidance_params(avoid) if avoid else []
+        avoid_params = build_avoidance_params(avoid) if avoid else []
 
-            params: Dict[str, Any] = {
-                "key": self.api_key,
-                "traffic": "true",
-                "travelMode": "car",
-                "routeType": "fastest",
-            }
+        params: Dict[str, Any] = {
+            "key": self.api_key,
+            "traffic": "true",
+            "travelMode": "car",
+            "routeType": "fastest",
+        }
 
-            if alternatives:
-                params["maxAlternatives"] = min(max_alternatives, 3)
+        if alternatives:
+            params["maxAlternatives"] = min(max_alternatives, 3)
 
-            payload = {}
-            if avoid_params:
-                payload["avoidAreas"] = {"rectangles": [
-                    a["avoidAreaRectangle"] for a in avoid_params
-                ]}
+        payload = {}
+        if avoid_params:
+            payload["avoidAreas"] = {"rectangles": [
+                a["avoidAreaRectangle"] for a in avoid_params
+            ]}
 
+        if payload:
             async with session.post(
                 url,
                 params=params,
-                json=payload if payload else None,
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=self.timeout),
+            ) as response:
+                response.raise_for_status()
+                data = await response.json()
+        else:
+            async with session.get(
+                url,
+                params=params,
                 timeout=aiohttp.ClientTimeout(total=self.timeout),
             ) as response:
                 response.raise_for_status()
                 data = await response.json()
 
-            routes = parse_routing_response(data)
-            logger.info(f"get_directions: {len(routes)} routes returned")
-            return {"routes": routes}
+        routes = parse_routing_response(data)
+        logger.info(f"get_directions: {len(routes)} routes returned")
+        return {"routes": routes}
 
-        # -------------------------------------------------------------------------
-        # Recomputation helpers (for overrides + multi-incident)
-        # -------------------------------------------------------------------------
+    # -------------------------------------------------------------------------
+    # Recomputation helpers (for overrides + multi-incident)
+    # -------------------------------------------------------------------------
 
-        async def recompute_with_overrides(
-            self,
-            origin: Dict[str, float],
-            destination: Dict[str, float],
-            blocked_roads: List[Dict[str, Any]],
-            active_overrides: List[Dict[str, Any]],
-        ) -> Dict[str, Any]:
-            """
-            Recompute routes factoring in operator overrides.
+    async def recompute_with_overrides(
+        self,
+        origin: Dict[str, float],
+        destination: Dict[str, float],
+        blocked_roads: List[Dict[str, Any]],
+        active_overrides: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """
+        Recompute routes factoring in operator overrides.
 
-            Override types handled:
-            close_lane        — adds the route/segment to avoid list (all traffic blocked)
-            corridor_priority — same as close_lane for general traffic; TomTom avoids
-                                that corridor so only emergency vehicles use it
-            pin_detour        — no avoidance change, just preference hint
-            open_lane         — removes a previously closed segment from avoid list
-            """
-            combined_avoid = list(blocked_roads)
+        Override types handled:
+        close_lane        — adds the route/segment to avoid list (all traffic blocked)
+        corridor_priority — same as close_lane for general traffic; TomTom avoids
+                            that corridor so only emergency vehicles use it
+        pin_detour        — no avoidance change, just preference hint
+        open_lane         — removes a previously closed segment from avoid list
+        """
+        combined_avoid = list(blocked_roads)
 
-            # Track segments/routes to remove from avoid (open_lane override)
-            routes_to_open = set()
+        # Track segments/routes to remove from avoid (open_lane override)
+        routes_to_open = set()
 
-            for override in active_overrides:
-                otype = override.get("type", "")
-                route_id = override.get("route_id")
-                segment_id = override.get("segment_id")
+        for override in active_overrides:
+            otype = override.get("type", "")
+            route_id = override.get("route_id")
+            segment_id = override.get("segment_id")
 
-                if otype in ("close_lane", "corridor_priority"):
-                    # Add segment_id if provided
-                    if segment_id:
-                        combined_avoid.append({"segment_id": segment_id})
-                    # Add route geometry as avoidance area if route_id maps to coords
-                    if route_id:
-                        # Mark route as avoided — TomTom will route around it
-                        # We encode as a segment hint; real implementation would use
-                        # TomTom's avoidVignettes or avoidAreas with the route bbox
-                        combined_avoid.append({
-                            "segment_id": f"operator-closed-{route_id[:8]}",
-                            "route_id": route_id,
-                            "reason": otype,
-                        })
-                        logger.info(
-                            f"recompute_with_overrides: {otype} applied to route {route_id[:8]}"
-                        )
+            if otype in ("close_lane", "corridor_priority"):
+                # Add segment_id if provided
+                if segment_id:
+                    combined_avoid.append({"segment_id": segment_id})
+                # Add route geometry as avoidance area if route_id maps to coords
+                if route_id:
+                    # Mark route as avoided — TomTom will route around it
+                    # We encode as a segment hint; real implementation would use
+                    # TomTom's avoidVignettes or avoidAreas with the route bbox
+                    combined_avoid.append({
+                        "segment_id": f"operator-closed-{route_id[:8]}",
+                        "route_id": route_id,
+                        "reason": otype,
+                    })
+                    logger.info(
+                        f"recompute_with_overrides: {otype} applied to route {route_id[:8]}"
+                    )
 
-                elif otype == "open_lane":
-                    if segment_id:
-                        routes_to_open.add(segment_id)
+            elif otype == "open_lane":
+                if segment_id:
+                    routes_to_open.add(segment_id)
 
-            # Remove any open_lane overrides from combined_avoid
-            if routes_to_open:
-                combined_avoid = [
-                    seg for seg in combined_avoid
-                    if seg.get("segment_id") not in routes_to_open
-                ]
+        # Remove any open_lane overrides from combined_avoid
+        if routes_to_open:
+            combined_avoid = [
+                seg for seg in combined_avoid
+                if seg.get("segment_id") not in routes_to_open
+            ]
 
-            # Bypass cache for overrides — we need fresh routes from TomTom
-            # not the cached pre-override routes
-            cache_key = self._routing_cache_key(origin, destination, combined_avoid)
-            await self._cache_set(cache_key + ':bypass', {'bypass': True}, 1)  # invalidate
+        # Bypass cache for overrides — we need fresh routes from TomTom
+        # not the cached pre-override routes
+        cache_key = self._routing_cache_key(origin, destination, combined_avoid)
+        await self._cache_set(cache_key + ':bypass', {'bypass': True}, 1)  # invalidate
 
-            # Call TomTom directly, skipping cache check
-            try:
-                result = await self._get_directions_with_breaker(
-                    origin, destination, combined_avoid, True, 3
-                )
-                # Cache the new override result
-                await self._cache_set(cache_key, result, self.ROUTING_CACHE_TTL)
-                return result
-            except Exception as e:
-                logger.warning(f"recompute_with_overrides TomTom call failed: {e} — falling back to get_directions")
-                return await self.get_directions(
-                    origin=origin,
-                    destination=destination,
-                    avoid=combined_avoid,
-                    alternatives=True,
-                )
-
-        async def recompute_multi_incident_detours(
-            self,
-            incidents: List[Dict[str, Any]],
-            vehicles: List[Dict[str, Any]],
-        ) -> Dict[str, Any]:
-            """
-            Compute routes for a multi-incident scenario.
-
-            Aggregates all blocked roads from all active incidents and
-            computes a combined routing solution.
-
-            Phase 5 implementation — stub for Phase 1.
-            """
-            all_blocked = []
-            for incident in incidents:
-                all_blocked.extend(incident.get("blocked_roads", []))
-
-            if not vehicles:
-                return {"routes": [], "mode": "multi_incident_stub"}
-
-            # Use first vehicle's destination as representative
-            sample_vehicle = vehicles[0]
-            origin = sample_vehicle.get("current_location", {"lat": 53.3498, "lng": -6.2603})
-            destination = sample_vehicle.get("destination", {"lat": 53.4000, "lng": -6.2000})
-
+        # Call TomTom directly, skipping cache check
+        try:
+            result = await self._get_directions_with_breaker(
+                origin, destination, combined_avoid, True, 3
+            )
+            # Cache the new override result
+            await self._cache_set(cache_key, result, self.ROUTING_CACHE_TTL)
+            return result
+        except Exception as e:
+            logger.warning(f"recompute_with_overrides TomTom call failed: {e} — falling back to get_directions")
             return await self.get_directions(
                 origin=origin,
                 destination=destination,
-                avoid=all_blocked,
+                avoid=combined_avoid,
                 alternatives=True,
             )
 
-        # -------------------------------------------------------------------------
-        # Health check
-        # -------------------------------------------------------------------------
+    async def recompute_multi_incident_detours(
+        self,
+        incidents: List[Dict[str, Any]],
+        vehicles: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """
+        Compute routes for a multi-incident scenario.
 
-        async def health_check(self) -> Dict[str, Any]:
-            """Return current status of the integration service."""
-            return {
-                "mode": self.mode,
-                "circuit_breaker_state": str(_circuit_breaker.current_state),
-                "api_key_configured": bool(self.api_key),
-            }
+        Aggregates all blocked roads from all active incidents and
+        computes a combined routing solution.
+
+        Phase 5 implementation — stub for Phase 1.
+        """
+        all_blocked = []
+        for incident in incidents:
+            all_blocked.extend(incident.get("blocked_roads", []))
+
+        if not vehicles:
+            return {"routes": [], "mode": "multi_incident_stub"}
+
+        # Use first vehicle's destination as representative
+        sample_vehicle = vehicles[0]
+        origin = sample_vehicle.get("current_location", {"lat": 53.3498, "lng": -6.2603})
+        destination = sample_vehicle.get("destination", {"lat": 53.4000, "lng": -6.2000})
+
+        return await self.get_directions(
+            origin=origin,
+            destination=destination,
+            avoid=all_blocked,
+            alternatives=True,
+        )
+
+    # -------------------------------------------------------------------------
+    # Health check
+    # -------------------------------------------------------------------------
+
+    async def health_check(self) -> Dict[str, Any]:
+        """Return current status of the integration service."""
+        return {
+            "mode": self.mode,
+            "circuit_breaker_state": str(_circuit_breaker.current_state),
+            "api_key_configured": bool(self.api_key),
+        }
 
 # ---------------------------------------------------------------------------
 # Module-level singleton (FastAPI lifespan will init this properly)

@@ -114,7 +114,20 @@ class RerouteService:
                 blocked_roads = []
                 for i, road in enumerate(meta_roads):
                     if isinstance(road, dict):
-                        blocked_roads.append(road)
+                        blocked_roads.append({
+                            "segment_id": road.get(
+                                "segment_id",
+                                f"eval-seg-{disaster_id[:8]}-{i}"
+                            ),
+                            "road_name":  road.get("road_name", f"Road {i}"),
+                            "start_lat":  road.get("start_lat", lat),
+                            "start_lng":  road.get("start_lng", lon),
+                            "end_lat":    road.get("end_lat", lat),
+                            "end_lng":    road.get("end_lng", lon),
+                            "status":     road.get("status", "closed"),
+                            "reason":     road.get("reason", "disaster"),
+                            "capacity":   road.get("capacity", 300),
+                        })
                     else:
                         # String fallback — use disaster lat/lon as coords
                         blocked_roads.append({
@@ -167,6 +180,7 @@ class RerouteService:
         alternative_routes = await self.calculate_alternative_routes(
             blocked_roads=blocked_roads,
             destinations=destination_dicts,
+            vehicles=vehicles,
         )
 
         # Step 7 — feasibility check
@@ -276,23 +290,56 @@ class RerouteService:
         segments: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
         """
-        Fetch road-following geometry from TomTom for each blocked segment
-        and attach points + geojson directly to the segment dict.
+        Fetch road-following geometry from TomTom for each blocked segment.
+        Runs in parallel. Results stored in DB so subsequent reads are free.
 
-        Runs in parallel — one TomTom call per segment.
-        Falls back to straight line silently if TomTom is unavailable.
-        Called once at trigger time; results are stored in the DB.
+        Zero-length segments (start == end, from evaluation string fallback)
+        get a small circle drawn around the disaster point instead of a
+        TomTom call — gives the frontend something meaningful to render.
         """
+        import math
+
         async def _enrich_one(seg: Dict[str, Any]) -> Dict[str, Any]:
-            # Skip if geometry already present (re-trigger scenario)
+            # Skip if already enriched (re-trigger scenario)
             if seg.get("points"):
                 return seg
 
+            start_lat = seg["start_lat"]
+            start_lng = seg["start_lng"]
+            end_lat   = seg["end_lat"]
+            end_lng   = seg["end_lng"]
+
+            # Zero-length segment — evaluation gave us only a centre point
+            # Draw a small circle so the frontend shows a blocked zone
+            if start_lat == end_lat and start_lng == end_lng:
+                radius_deg = 0.005  # ~500m radius
+                points = [
+                    [
+                        start_lat + radius_deg * math.cos(math.radians(a)),
+                        start_lng + radius_deg * math.sin(math.radians(a)),
+                    ]
+                    for a in range(0, 360, 45)
+                ]
+                points.append(points[0])  # close the ring
+                return {
+                    **seg,
+                    "points": points,
+                    "geojson": {
+                        "type": "Feature",
+                        "geometry": {
+                            "type": "LineString",
+                            "coordinates": [[p[1], p[0]] for p in points],
+                        },
+                        "properties": {},
+                    },
+                }
+
+            # Real segment — ask TomTom for road-following geometry
             geometry = await self.external.fetch_segment_geometry(
-                start_lat=seg["start_lat"],
-                start_lng=seg["start_lng"],
-                end_lat=seg["end_lat"],
-                end_lng=seg["end_lng"],
+                start_lat=start_lat,
+                start_lng=start_lng,
+                end_lat=end_lat,
+                end_lng=end_lng,
             )
             return {**seg, **geometry}
 
@@ -335,20 +382,45 @@ class RerouteService:
         self,
         blocked_roads: List[Dict[str, Any]],
         destinations: List[Dict[str, float]],
+        vehicles: List[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
-        # Origin: south of M50 J6 — vehicles coming from southwest Dublin
-        # heading north through the M50. When flooded, routes detour around it.
-        REROUTE_ORIGIN = {"lat": 53.2900, "lng": -6.3800}
 
-        tasks = [
-            self.external.get_directions(
-                origin=REROUTE_ORIGIN,
-                destination=dest,
-                avoid=blocked_roads,
-                alternatives=True,
-            )
-            for dest in destinations
-        ]
+        if vehicles:
+            # Pair each unique origin+destination combination
+            # so each vehicle only gets routes relevant to their journey
+            seen_pairs: set = set()
+            tasks = []
+            for v in vehicles:
+                loc = v.get("current_location", {})
+                dest = v.get("destination", {})
+                if not (loc.get("lat") and loc.get("lng") and dest.get("lat") and dest.get("lng")):
+                    continue
+                pair = (
+                    round(loc["lat"], 3), round(loc["lng"], 3),
+                    round(dest["lat"], 3), round(dest["lng"], 3),
+                )
+                if pair in seen_pairs:
+                    continue
+                seen_pairs.add(pair)
+                tasks.append(
+                    self.external.get_directions(
+                        origin={"lat": loc["lat"], "lng": loc["lng"]},
+                        destination={"lat": dest["lat"], "lng": dest["lng"]},
+                        avoid=blocked_roads,
+                        alternatives=True,
+                    )
+                )
+        else:
+            # Fallback: fixed origin to all destinations
+            tasks = [
+                self.external.get_directions(
+                    origin={"lat": 53.2900, "lng": -6.3800},
+                    destination=dest,
+                    avoid=blocked_roads,
+                    alternatives=True,
+                )
+                for dest in destinations
+            ]
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -368,7 +440,7 @@ class RerouteService:
                 unique_routes.append(route)
 
         return unique_routes
-
+    
     # -------------------------------------------------------------------------
     # Step 7 — Feasibility + temporary controls
     # -------------------------------------------------------------------------
@@ -795,7 +867,7 @@ class RerouteService:
         deregister_active_region(disaster_id)
 
         logger.info(
-            f"restore_normal_flow: disaster={disaster_id} "
+            f"restore_normal_flow: disaster={disaster_id}"
             f"segments={len(cleared_segments)} users_notified={len(users)}"
         )
 

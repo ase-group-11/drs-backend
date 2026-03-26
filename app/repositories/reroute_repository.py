@@ -360,6 +360,7 @@ class RerouteRepository:
         return [
             {
                 "user_id": trip.user_id,
+                "current_location": {"lat": trip.current_lat, "lng": trip.current_lng},
                 "destination": {"lat": trip.dest_lat, "lng": trip.dest_lng},
                 "type": trip.vehicle_type,
                 "phone_number": None,  # extend: join users table for SMS
@@ -373,15 +374,21 @@ class RerouteRepository:
         Used by the admin dashboard to show the full operational picture.
         """
         from sqlalchemy import select
+        from app.db.models.disaster import Disaster
+
         result = await self.db.execute(
-            select(ReroutePlan)
+            select(ReroutePlan, Disaster)
+            .join(Disaster, ReroutePlan.disaster_id == Disaster.id)
             .where(ReroutePlan.status == "active")
             .order_by(ReroutePlan.created_at.desc())
         )
-        plans = result.scalars().all()
-    
-        return [
-            {
+
+        rows = result.all()   # ← not scalars()
+
+        plans = []
+        for p, d in rows:   
+            meta = (d.disaster_metadata or {}).get("evaluation", {})
+            plans.append({
                 "id": p.id,
                 "disaster_id": p.disaster_id,
                 "status": p.status,
@@ -394,9 +401,12 @@ class RerouteRepository:
                 "capacity_usage": p.capacity_usage,
                 "estimated_times": p.estimated_times,
                 "created_at": p.created_at.isoformat() if p.created_at else None,
-            }
-            for p in plans
-        ]
+                "impact_radius_km": meta.get("impact_radius_km", 3.0),
+                "disaster_lat": d.disaster_metadata.get("lat") if d.disaster_metadata else None,
+                "disaster_lng": d.disaster_metadata.get("lon") if d.disaster_metadata else None,
+            })
+
+        return plans
 
     async def resolve_disaster(self, disaster_id: str) -> None:
         """
@@ -438,6 +448,6 @@ class RerouteRepository:
             "reason": segment.reason,
             "capacity": segment.capacity,
             "disaster_id": segment.disaster_id,
-            "points":      segment.points,  
-            "geojson":     segment.geojson,   
+            "points":  segment.points,  
+            "geojson": segment.geojson,   
         }

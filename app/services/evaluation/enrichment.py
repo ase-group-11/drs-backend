@@ -16,7 +16,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
-import aiohttp
+import aiohttp, math
 
 from app.providers.image_analysis import CLIPImageAnalysisProvider
 from app.providers.infrastructure import InfrastructureProvider
@@ -40,6 +40,8 @@ class WeatherContext:
     wind_speed_kmh: float
     source: str              # "mock" | "openweathermap" | etc.
 
+def _dist_km(lat1, lng1, lat2, lng2):
+    return math.sqrt(((lat1-lat2)*111)**2 + ((lng1-lng2)*73)**2)
 
 class BaseWeatherProvider(ABC):
     """
@@ -241,6 +243,83 @@ class EnrichmentPipeline:
         bounds = f"{lat - delta_lat},{lon - delta_lon},{lat + delta_lat},{lon + delta_lon}"
         return await self._live_map.get_traffic(bounds=bounds)
 
+    async def _fetch_traffic_at_point(
+        self,
+        lat: float,
+        lon: float,
+    ) -> Optional[dict]:
+        """Query TomTom flow directly at the disaster point and 4 nearby offsets."""
+        import aiohttp
+
+        api_key = self._tomtom_api_key
+        if not api_key:
+            return None
+
+        offset = 0.002  # ~200m
+        sample_points = [
+            (lat,          lon),
+            (lat + offset, lon),
+            (lat - offset, lon),
+            (lat,          lon + offset),
+            (lat,          lon - offset),
+        ]
+
+        url = "https://api.tomtom.com/traffic/services/4/flowSegmentData/relative/14/json"
+
+        async with aiohttp.ClientSession() as session:
+            tasks = [
+                self._fetch_flow_at_exact_point(session, url, api_key, p_lat, p_lon)
+                for p_lat, p_lon in sample_points
+            ]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        all_segments = []
+        seen = set()
+        for result in results:
+            if isinstance(result, Exception) or not result:
+                continue
+            for seg in result:
+                key = str(seg.get("coordinates", ""))
+                if key not in seen:
+                    seen.add(key)
+                    all_segments.append(seg)
+
+        return {"flow": all_segments, "source": "tomtom_direct"} if all_segments else None
+
+
+    async def _fetch_flow_at_exact_point(
+        self,
+        session: aiohttp.ClientSession,
+        url: str,
+        api_key: str,
+        lat: float,
+        lon: float,
+    ) -> list:
+        """Single TomTom flow segment call for one coordinate point."""
+        try:
+            async with session.get(
+                url,
+                params={"key": api_key, "point": f"{lat},{lon}", "unit": "KMPH"},
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as resp:
+                if resp.status != 200:
+                    return []
+                data = await resp.json()
+                flow_data = data.get("flowSegmentData", {})
+                coords_raw = flow_data.get("coordinates", {}).get("coordinate", [])
+                if not coords_raw:
+                    return []
+                coords = [[c["latitude"], c["longitude"]] for c in coords_raw]
+                return [{
+                    "coordinates": coords,
+                    "road_name": flow_data.get("roadName", ""),
+                    "current_speed": flow_data.get("currentSpeed", 0),
+                    "free_flow_speed": flow_data.get("freeFlowSpeed", 0),
+                }]
+        except Exception as exc:
+            logger.debug(f"_fetch_flow_at_exact_point failed ({lat},{lon}): {exc}")
+            return []
+
     async def identify_affected_roads_async(
         self,
         traffic_context: Optional[dict],
@@ -266,32 +345,54 @@ class EnrichmentPipeline:
         Falls back to coordinate-only descriptors if geocoding fails.
         Returns at most 5 unique roads.
         """
-        if not traffic_context:
-            return [{"road_name": f"Road network near ({lat:.4f}, {lon:.4f})",
-                     "start_lat": lat, "start_lng": lon,
-                     "end_lat": lat, "end_lng": lon}]
+        
+        # Query disaster point directly for immediate roads
+        direct_traffic = await self._fetch_traffic_at_point(lat, lon)
+        flow = (direct_traffic or {}).get("flow", [])
+        
+        if not flow:
+            flow = (traffic_context or {}).get("flow", [])
 
-        flow = traffic_context.get("flow", [])
         if not flow:
             return [{"road_name": f"Road network near ({lat:.4f}, {lon:.4f})",
-                     "start_lat": lat, "start_lng": lon,
-                     "end_lat": lat, "end_lng": lon}]
+                    "start_lat": lat, "start_lng": lon,
+                    "end_lat": lat, "end_lng": lon}]
+        
+        nearby_flow = [
+            seg for seg in flow
+            if seg.get("coordinates") and
+            _dist_km(seg["coordinates"][0][0], seg["coordinates"][0][1], lat, lon) <= 2.0
+        ]
 
         # Collect unique sample coords from flow segments (max 5)
         # Keep the full segment so we have start + end coords
         sample_segments = []
         seen_coords: set = set()
-        for segment in flow:
-            coords = segment.get("coordinates", [])
-            if coords and len(coords) >= 2:
-                key = (round(coords[0][0], 3), round(coords[0][1], 3))
-                if key not in seen_coords:
-                    seen_coords.add(key)
-                    sample_segments.append({
-                        "start": coords[0],
-                        "end": coords[-1],
-                        "mid": coords[len(coords) // 2],
-                    })
+        for nearby_flow in flow:
+            coords = nearby_flow.get("coordinates", [])
+            if not coords:
+                continue
+            key = (round(coords[0][0], 3), round(coords[0][1], 3))
+            if key in seen_coords:
+                continue
+            seen_coords.add(key)
+            if len(coords) >= 2:
+                # Normal segment — use actual start/end
+                sample_segments.append({
+                    "start": coords[0],
+                    "end":   coords[-1],
+                    "mid":   coords[len(coords) // 2],
+                })
+            else:
+                # Single-point segment — create a small offset so
+                # start != end and TomTom routing call is valid
+                mid = coords[0]
+                offset = 0.001  # ~100m
+                sample_segments.append({
+                    "start": [mid[0] - offset, mid[1]],
+                    "end":   [mid[0] + offset, mid[1]],
+                    "mid":   mid,
+                })
             if len(sample_segments) >= 5:
                 break
 

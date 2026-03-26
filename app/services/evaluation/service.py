@@ -275,7 +275,14 @@ class DisasterEvaluationService:
                     "evaluated_at": evaluated_at.isoformat(),
                     "impact_radius_km": impact_radius_km,
                     "estimated_population": estimated_population,
-                    "affected_roads": [r["road_name"] if isinstance(r, dict) else r for r in (affected_roads or [])],
+                    "affected_roads": [
+                        r if isinstance(r, dict) else {
+                            "road_name": r,
+                            "start_lat": lat, "start_lng": lon,
+                            "end_lat": lat, "end_lng": lon,
+                        }
+                        for r in (affected_roads or [])
+                    ],
                     "affected_facilities": affected_facilities or [],
                     "response_scale": response_scale,
                 })
@@ -602,7 +609,14 @@ class DisasterEvaluationService:
                     "evaluated_at": evaluated_at.isoformat(),
                     "impact_radius_km": impact_radius_km,
                     "estimated_population": estimated_population,
-                    "affected_roads": [r["road_name"] if isinstance(r, dict) else r for r in (affected_roads or [])],
+                    "affected_roads": [
+                        r if isinstance(r, dict) else {
+                            "road_name": r,
+                            "start_lat": lat, "start_lng": lon,
+                            "end_lat": lat, "end_lng": lon,
+                        }
+                        for r in (affected_roads or [])
+                    ],
                     "affected_facilities": affected_facilities or [],
                     "response_scale": response_scale,
                 },
@@ -867,7 +881,14 @@ class DisasterEvaluationService:
             "evaluated_at": evaluated_at.isoformat(),
             "impact_radius_km": impact_radius_km,
             "estimated_population": estimated_population,
-            "affected_roads": [r["road_name"] if isinstance(r, dict) else r for r in (affected_roads or [])],
+            "affected_roads": [
+                r if isinstance(r, dict) else {
+                    "road_name": r,
+                    "start_lat": lat, "start_lng": lon,
+                    "end_lat": lat, "end_lng": lon,
+                }
+                for r in (affected_roads or [])
+            ],
             "affected_facilities": affected_facilities or [],
             "corroboration_count": len(linked_reports),
             "reassessed_at": evaluated_at.isoformat(),

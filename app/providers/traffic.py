@@ -583,7 +583,7 @@ class TrafficProvider:
     STYLE_RELATIVE_DELAY = "relative-delay"
 
     # Zoom levels for traffic data
-    MIN_ZOOM = 10 # Don't fetch traffic below this zoom
+    MIN_ZOOM = 12 # Don't fetch traffic below this zoom
     MAX_ZOOM = 18
 
     def __init__(
@@ -788,7 +788,7 @@ class TrafficProvider:
         session: aiohttp.ClientSession, 
         lat: float, 
         lon: float,
-        zoom: int = 10, 
+        zoom: int = 14, 
         style: str = "relative"
     ) -> List[Dict[str, Any]]:
         
