@@ -1253,6 +1253,18 @@ class EmergencyUnitService:
                 raise HTTPException(status_code=404, detail="Emergency unit not found.")
 
             now = datetime.utcnow()
+            
+            # FIX: Cancel all active deployments for this unit before decommission
+            await self.db.execute(text("""
+                UPDATE deployments
+                SET deployment_status = 'CANCELLED',
+                    completed_at = :now,
+                    assessment_notes = 'Auto-cancelled: unit decommissioned',
+                    updated_at = :now
+                WHERE unit_id = :unit_id
+                  AND deployment_status NOT IN ('COMPLETED', 'CANCELLED')
+                  AND deleted_at IS NULL
+            """), {"unit_id": unit_id, "now": now})
 
             # FIX #5: Atomic conditional UPDATE — the WHERE clause on unit_status NOT IN
             # (DEPLOYED, ON_SCENE) is evaluated inside the same lock as the write, so a

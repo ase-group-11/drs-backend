@@ -22,6 +22,10 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
 from app.core.config import settings
 from app.db.session import async_session_factory
 from app.providers.map_provider import MapProvider

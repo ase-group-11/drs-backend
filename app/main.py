@@ -23,7 +23,9 @@ from app.api.v1 import emergency_team_auth
 from app.api.v1 import live_map
 from app.api.v1 import scenario_engine
 from app.api.v1 import reroute
+from app.api.v1 import evacuation   
 from app.api.v1 import disaster_report
+from app.api.v1 import vehicles
 from app.api.v1.disaster import router as disaster_router
 from app.api.v1 import disaster_evaluation
 
@@ -47,12 +49,10 @@ setup_logging()
 logger = logging.getLogger(__name__)
 
 
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
     Application lifespan manager.
-    
     Handles startup and shutdown events.
     """
     # Startup
@@ -69,21 +69,37 @@ async def lifespan(app: FastAPI):
     set_live_map_providers(map_provider, traffic_provider)
     set_evaluation_providers(map_provider, traffic_provider)
     logger.info("🗺️  Map and traffic providers initialized")
-    
-    _listener = asyncio.create_task(redis_listener())                   # ← ADD
-    logger.info("Redis notification listener started")
-    
+
+    # Connect RabbitMQ publisher
+    publisher = get_publisher()
+    await publisher.connect()
+    if publisher.is_connected:
+        logger.info("🐇 RabbitMQ publisher connected")
+    else:
+        logger.warning("⚠️  RabbitMQ publisher not connected — running in degraded mode (notifications disabled)")
+
+    # Start Redis pub/sub listener for WebSocket notifications
+    listener_task = asyncio.create_task(redis_listener())
+    logger.info("📡 Redis notification listener started")
+
     yield
 
     # Shutdown
     logger.info("=" * 70)
     logger.info("Shutting down...")
-    _listener.cancel()
+
+    listener_task.cancel()
+    try:
+        await listener_task
+    except asyncio.CancelledError:
+        pass
+
     await close_redis_connection()
     await traffic_provider.close()
     await publisher.close()
     logger.info("Cleanup complete")
     logger.info("=" * 70)
+
 
 
 # Create FastAPI application
@@ -160,11 +176,14 @@ app.include_router(emergency_team_auth.router, prefix="/api/v1")
 app.include_router(live_map.router, prefix="/api/v1")
 app.include_router(scenario_engine.router, prefix="/api/v1")
 app.include_router(reroute.router, prefix="/api/v1")
+app.include_router(evacuation.router, prefix="/api/v1")
 app.include_router(disaster_report.router, prefix="/api/v1")
 app.include_router(disaster_router, prefix="/api/v1")
 app.include_router(disaster_evaluation.router, prefix="/api/v1")
 
 app.include_router(emergency_unit_router, prefix="/api/v1")
+app.include_router(vehicles.router, prefix = "/api/v1")
+
 app.include_router(deployment_router, prefix="/api/v1")
 app.include_router(user_management_router, prefix="/api/v1")
 
@@ -248,5 +267,3 @@ if __name__ == "__main__":
         reload=settings.DEBUG,
         log_level="info" if not settings.DEBUG else "debug"
     )
-    
-    

@@ -204,6 +204,7 @@ class IntegrationService:
                 encoding="utf-8",
                 decode_responses=True,
                 socket_connect_timeout=2,
+                socket_timeout=2,
             )
             return self._redis
         except Exception as e:
@@ -283,34 +284,35 @@ class IntegrationService:
     # Traffic Flow — fetch + parse for reroute scoring
     # -------------------------------------------------------------------------
 
-    async def fetch_traffic_data(self, region_id: str) -> Dict[str, Any]:
+    async def fetch_traffic_data(
+        self,
+        lat: float,
+        lon: float,
+        radius_km: float = 3.0,
+    ) -> dict:
         """
-        Fetch traffic flow data for a region.
-
-        Returns parsed segments with congestion_ratio for route scoring.
-        Falls back to degraded mode if circuit breaker is open.
-
-        Args:
-            region_id: Region identifier (used to derive bounding box)
-
-        Returns:
-            Dict with 'segments' list and optional 'mode' key
+        Fetch traffic flow data for a circular area around (lat, lon).
+    
+        radius_km comes from disaster_metadata["evaluation"]["impact_radius_km"]
+        so the bounding box is proportional to the actual disaster scale:
+            flood HIGH      → 8 km
+            flood CRITICAL  → 15 km
+            fire MEDIUM     → 1 km
+            fire HIGH       → 2 km
+    
+        Cache key is rounded to 3dp (~100m precision) so nearby queries reuse
+        the same cached response — avoids hammering TomTom on every monitoring cycle.
         """
         if self.is_mock:
-            logger.debug("fetch_traffic_data: mock mode")
-            return {
-                "segments": parse_flow_for_reroute(MOCK_TRAFFIC_RESPONSE),
-                "mode": "mock",
-            }
-
-        # Cache-first — monitoring loop serves from cache, no TomTom wait
-        cache_key = f"integration:traffic:{region_id}"
+            return {"segments": parse_flow_for_reroute(MOCK_TRAFFIC_RESPONSE), "mode": "mock"}
+    
+        cache_key = f"integration:traffic:{lat:.3f}:{lon:.3f}:{radius_km:.1f}"
         cached = await self._cache_get(cache_key)
         if cached:
             return cached
-
+    
         try:
-            result = await self._fetch_traffic_with_breaker(region_id)
+            result = await self._fetch_traffic_with_breaker(lat, lon, radius_km)
             await self._cache_set(cache_key, result, self.TRAFFIC_CACHE_TTL)
             return result
         except pybreaker.CircuitBreakerError:
@@ -319,7 +321,7 @@ class IntegrationService:
         except Exception as e:
             logger.error(f"fetch_traffic_data failed: {e}")
             return self._degraded_traffic_response()
-
+    
     @_circuit_breaker
     @retry(
         stop=stop_after_attempt(3),
@@ -328,13 +330,24 @@ class IntegrationService:
         before_sleep=before_sleep_log(logger, logging.WARNING),
         reraise=True,
     )
-    async def _fetch_traffic_with_breaker(self, region_id: str) -> Dict[str, Any]:
-        """Internal: fetch with retry + circuit breaker applied."""
-        bounds = _region_id_to_bounds(region_id)
+
+    async def _fetch_traffic_with_breaker(
+        self,
+        lat: float,
+        lon: float,
+        radius_km: float,
+    ) -> dict:
+        lat_offset = radius_km / 111.0
+        lon_offset = radius_km / 73.0
+        bounds = (
+            f"{lat - lat_offset:.6f},"
+            f"{lon - lon_offset:.6f},"
+            f"{lat + lat_offset:.6f},"
+            f"{lon + lon_offset:.6f}"
+        )
         raw = await self._traffic_provider.get_traffic(bounds)
         segments = []
         for seg in raw.get("flow", []):
-            # Re-parse with reroute fields (congestion_ratio)
             mock_flow = {"flowSegmentData": {
                 "currentSpeed": seg.get("current_speed", 0),
                 "freeFlowSpeed": seg.get("free_flow_speed", 0),
@@ -344,10 +357,9 @@ class IntegrationService:
                     for c in seg.get("coordinates", [])
                 ]},
             }}
-            parsed = parse_flow_for_reroute(mock_flow)
-            segments.extend(parsed)
+            segments.extend(parse_flow_for_reroute(mock_flow))
         return {"segments": segments, "mode": "live"}
-
+    
     def _degraded_traffic_response(self) -> Dict[str, Any]:
         """Return a degraded mode response using cached/stub data."""
         return {
@@ -404,14 +416,84 @@ class IntegrationService:
             logger.error(f"get_directions failed: {e}")
             return {"routes": parse_routing_response(MOCK_ROUTING_RESPONSE), "mode": "degraded"}
 
+
+    async def fetch_segment_geometry(
+        self,
+        start_lat: float,
+        start_lng: float,
+        end_lat: float,
+        end_lng: float,
+    ) -> Dict[str, Any]:
+        """
+        Call TomTom calculateRoute between segment start and end points
+        to get the actual road-following geometry.
+
+        Called once at trigger time — result is stored in road_segments
+        table so subsequent reads are free from DB.
+
+        Returns:
+            {
+                "points": [[lat, lng], ...],
+                "geojson": GeoJSON LineString Feature
+            }
+        Falls back to straight line if TomTom is unavailable.
+        """
+        # Straight-line fallback used in mock mode or on error
+        def _straight_line():
+            points = [[start_lat, start_lng], [end_lat, end_lng]]
+            return {
+                "points": points,
+                "geojson": {
+                    "type": "Feature",
+                    "geometry": {
+                        "type": "LineString",
+                        "coordinates": [
+                            [start_lng, start_lat],
+                            [end_lng, end_lat],
+                        ],
+                    },
+                    "properties": {},
+                },
+            }
+
+        if self.is_mock:
+            logger.debug("fetch_segment_geometry: mock mode — returning straight line")
+            return _straight_line()
+
+        origin = {"lat": start_lat, "lng": start_lng}
+        destination = {"lat": end_lat, "lng": end_lng}
+
+        try:
+            result = await self.get_directions(
+                origin=origin,
+                destination=destination,
+                avoid=[],
+                alternatives=False,   # only need one route for the segment path
+                max_alternatives=1,
+            )
+            routes = result.get("routes", [])
+            if routes:
+                return {
+                    "points": routes[0]["points"],
+                    "geojson": routes[0]["geojson"],
+                }
+        except Exception as exc:
+            logger.warning(
+                f"fetch_segment_geometry failed for "
+                f"({start_lat},{start_lng})→({end_lat},{end_lng}): "
+                f"{exc} — falling back to straight line"
+            )
+
+        return _straight_line()
+
     @_circuit_breaker
     @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=8),
-        retry=retry_if_exception_type((aiohttp.ClientError, asyncio.TimeoutError)),
-        before_sleep=before_sleep_log(logger, logging.WARNING),
-        reraise=True,
-    )
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=1, min=1, max=8),
+            retry=retry_if_exception_type((aiohttp.ClientError, asyncio.TimeoutError)),
+            before_sleep=before_sleep_log(logger, logging.WARNING),
+            reraise=True,
+        )
     async def _get_directions_with_breaker(
         self,
         origin: Dict[str, float],
@@ -445,14 +527,23 @@ class IntegrationService:
                 a["avoidAreaRectangle"] for a in avoid_params
             ]}
 
-        async with session.post(
-            url,
-            params=params,
-            json=payload if payload else None,
-            timeout=aiohttp.ClientTimeout(total=self.timeout),
-        ) as response:
-            response.raise_for_status()
-            data = await response.json()
+        if payload:
+            async with session.post(
+                url,
+                params=params,
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=self.timeout),
+            ) as response:
+                response.raise_for_status()
+                data = await response.json()
+        else:
+            async with session.get(
+                url,
+                params=params,
+                timeout=aiohttp.ClientTimeout(total=self.timeout),
+            ) as response:
+                response.raise_for_status()
+                data = await response.json()
 
         routes = parse_routing_response(data)
         logger.info(f"get_directions: {len(routes)} routes returned")
@@ -472,22 +563,73 @@ class IntegrationService:
         """
         Recompute routes factoring in operator overrides.
 
-        Merges override constraints (additional closed segments, pinned routes)
-        with blocked roads before calling get_directions.
+        Override types handled:
+        close_lane        — adds the route/segment to avoid list (all traffic blocked)
+        corridor_priority — same as close_lane for general traffic; TomTom avoids
+                            that corridor so only emergency vehicles use it
+        pin_detour        — no avoidance change, just preference hint
+        open_lane         — removes a previously closed segment from avoid list
         """
         combined_avoid = list(blocked_roads)
 
-        for override in active_overrides:
-            if override.get("type") == "close_lane" and override.get("segment_id"):
-                # Treat operator-closed lane as an additional blocked road
-                combined_avoid.append({"segment_id": override["segment_id"]})
+        # Track segments/routes to remove from avoid (open_lane override)
+        routes_to_open = set()
 
-        return await self.get_directions(
-            origin=origin,
-            destination=destination,
-            avoid=combined_avoid,
-            alternatives=True,
-        )
+        for override in active_overrides:
+            otype = override.get("type", "")
+            route_id = override.get("route_id")
+            segment_id = override.get("segment_id")
+
+            if otype in ("close_lane", "corridor_priority"):
+                # Add segment_id if provided
+                if segment_id:
+                    combined_avoid.append({"segment_id": segment_id})
+                # Add route geometry as avoidance area if route_id maps to coords
+                if route_id:
+                    # Mark route as avoided — TomTom will route around it
+                    # We encode as a segment hint; real implementation would use
+                    # TomTom's avoidVignettes or avoidAreas with the route bbox
+                    combined_avoid.append({
+                        "segment_id": f"operator-closed-{route_id[:8]}",
+                        "route_id": route_id,
+                        "reason": otype,
+                    })
+                    logger.info(
+                        f"recompute_with_overrides: {otype} applied to route {route_id[:8]}"
+                    )
+
+            elif otype == "open_lane":
+                if segment_id:
+                    routes_to_open.add(segment_id)
+
+        # Remove any open_lane overrides from combined_avoid
+        if routes_to_open:
+            combined_avoid = [
+                seg for seg in combined_avoid
+                if seg.get("segment_id") not in routes_to_open
+            ]
+
+        # Bypass cache for overrides — we need fresh routes from TomTom
+        # not the cached pre-override routes
+        cache_key = self._routing_cache_key(origin, destination, combined_avoid)
+        await self._cache_set(cache_key + ':bypass', {'bypass': True}, 1)  # invalidate
+
+        # Call TomTom directly, skipping cache check
+        try:
+            result = await self._get_directions_with_breaker(
+                origin, destination, combined_avoid, True, 3
+            )
+            # Cache the new override result
+            await self._cache_set(cache_key, result, self.ROUTING_CACHE_TTL)
+            return result
+        except Exception as e:
+            logger.warning(f"recompute_with_overrides TomTom call failed: {e} — falling back to get_directions")
+            return await self.get_directions(
+                origin=origin,
+                destination=destination,
+                avoid=combined_avoid,
+                alternatives=True,
+            )
 
     async def recompute_multi_incident_detours(
         self,
@@ -532,29 +674,6 @@ class IntegrationService:
             "circuit_breaker_state": str(_circuit_breaker.current_state),
             "api_key_configured": bool(self.api_key),
         }
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _region_id_to_bounds(region_id: str) -> str:
-    """
-    Map a region_id string to a TomTom bounding box string.
-
-    Format: "south,west,north,east"
-    Defaults to Dublin if region not found.
-    """
-    REGION_BOUNDS = {
-        "region-dublin-m50":    "53.280,-6.420,53.410,-6.220",
-        "region-dublin-city":   "53.330,-6.290,53.360,-6.240",
-        "region-dublin-port":   "53.340,-6.250,53.380,-6.200",
-        "region-dublin-south":  "53.270,-6.380,53.340,-6.180",
-    }
-    bounds = REGION_BOUNDS.get(region_id, "53.280,-6.420,53.410,-6.220")
-    logger.debug(f"_region_id_to_bounds: {region_id} → {bounds}")
-    return bounds
-
 
 # ---------------------------------------------------------------------------
 # Module-level singleton (FastAPI lifespan will init this properly)

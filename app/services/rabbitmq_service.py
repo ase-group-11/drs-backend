@@ -35,8 +35,11 @@ EXCHANGE_NAME = "disaster_events"
 QUEUE_BINDINGS = {
     "evaluation_queue": ["disaster.verified"],
     "coordination_queue": ["disaster.verified", "disaster.evaluated", "disaster.backup_requested"],
-    "notification_queue": ["disaster.dispatched", "disaster.verified", "disaster.evaluated", "disaster.updated",
-                           "disaster.resolved", "disaster.backup_requested", "disaster.unit_completed"],
+    "notification_queue": [
+        "disaster.dispatched", "disaster.verified", "disaster.evaluated",
+        "disaster.updated", "disaster.resolved", "disaster.backup_requested",
+        "disaster.unit_completed", "disaster.false_alarm",
+    ],
     "reroute_queue": ["disaster.verified", "disaster.evaluated", "disaster.resolved", "disaster.unit_completed"],
 }
 
@@ -47,7 +50,6 @@ class RabbitMQService:
     def __init__(self):
         self.connection: Optional[pika.BlockingConnection] = None
         self.channel: Optional[pika.channel.Channel] = None
-        # self.rabbitmq_url = os.getenv("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/")
         self.rabbitmq_url = settings.RABBITMQ_URL
 
     def connect(self):

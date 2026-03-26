@@ -20,6 +20,10 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
 from app.core.config import settings
 from app.db.session import async_session_factory
 from app.providers.map_provider import MapProvider
@@ -33,7 +37,7 @@ from app.providers.traffic import TrafficProvider
 from app.repositories.disaster_repository import DisasterRepository
 from app.repositories.disaster_report_repository import DisasterReportRepository
 from app.repositories.user_repository import UserRepository
-from app.services.evaluation.downstream import NoopCoordinationClient, NoopRerouteClient
+from app.services.evaluation.downstream import NoopCoordinationClient, NoopRerouteClient, HttpRerouteClient
 from app.services.evaluation.enrichment import EnrichmentPipeline, OpenWeatherMapProvider
 from app.services.evaluation.service import DisasterEvaluationService
 from app.services.live_map_service import LiveMapService
@@ -113,10 +117,11 @@ async def process_pending_reports(
                         surveillance_provider=SurveillanceProvider(),
                         population_provider=population_provider,
                         infrastructure_provider=InfrastructureProvider(),
+                        tomtom_api_key=settings.TRAFFIC_API_KEY,
                     ),
                     user_repo=UserRepository(db),
                     coordination_client=NoopCoordinationClient(),
-                    reroute_client=NoopRerouteClient(),
+                    reroute_client=NoopRerouteClient(),  # reroute triggered manually by operator
                 )
 
                 result = await service.evaluate(report_id)

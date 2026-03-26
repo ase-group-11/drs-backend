@@ -3,688 +3,1923 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>DRS — Reroute Live Demo</title>
+  <title>DRS — Reroute Command Centre</title>
 
-  <!-- Mapbox GL JS -->
   <link href="https://api.mapbox.com/mapbox-gl-js/v3.1.0/mapbox-gl.css" rel="stylesheet" />
   <script src="https://api.mapbox.com/mapbox-gl-js/v3.1.0/mapbox-gl.js"></script>
-
-  <!-- Socket.IO client -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.6.1/socket.io.min.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
 
   <style>
+    :root {
+      --bg:        #060810;
+      --surface:   #0d1117;
+      --surface2:  #131922;
+      --border:    #1e2a3a;
+      --accent:    #00d4ff;
+      --accent2:   #ff4d6d;
+      --accent3:   #39ff88;
+      --warn:      #ffb830;
+      --text:      #cdd9e5;
+      --muted:     #5a6a7a;
+      --mono:      'JetBrains Mono', monospace;
+      --sans:      'Syne', sans-serif;
+
+      /* Route colours */
+      --r1: #00d4ff;
+      --r2: #39ff88;
+      --r3: #ffb830;
+      --r4: #ff4d6d;
+      --r5: #a855f7;
+      --r6: #fb923c;
+      --r7: #34d399;
+      --r8: #818cf8;
+      --r9: #f472b6;
+      --r10: #fbbf24;
+      --r11: #60a5fa;
+      --r12: #4ade80;
+    }
+
     * { margin: 0; padding: 0; box-sizing: border-box; }
 
     body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-      background: #0f1117;
-      color: #e2e8f0;
+      font-family: var(--sans);
+      background: var(--bg);
+      color: var(--text);
       height: 100vh;
-      display: flex;
-      flex-direction: column;
+      display: grid;
+      grid-template-rows: 48px 1fr;
+      grid-template-columns: 320px 1fr 300px;
+      grid-template-areas:
+        "header header header"
+        "left   map    right";
+      overflow: hidden;
     }
 
-    /* ── Header ── */
+    /* ── HEADER ── */
     header {
+      grid-area: header;
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding: 12px 20px;
-      background: #1a1d2e;
-      border-bottom: 1px solid #2d3148;
-      z-index: 10;
+      padding: 0 16px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      z-index: 100;
     }
 
     .logo {
       display: flex;
       align-items: center;
       gap: 10px;
-      font-size: 16px;
-      font-weight: 700;
-      letter-spacing: 0.5px;
+      font-size: 14px;
+      font-weight: 800;
+      letter-spacing: 2px;
+      text-transform: uppercase;
     }
 
-    .logo-icon {
-      width: 32px;
-      height: 32px;
-      background: linear-gradient(135deg, #e53e3e, #fc8181);
-      border-radius: 8px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 16px;
+    .logo-pulse {
+      width: 10px; height: 10px;
+      border-radius: 50%;
+      background: var(--accent2);
+      box-shadow: 0 0 8px var(--accent2);
+      animation: pulse 2s infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.5; transform: scale(0.8); }
     }
 
     .status-bar {
       display: flex;
-      align-items: center;
       gap: 16px;
-      font-size: 13px;
-    }
-
-    .status-dot {
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      background: #4a5568;
-      display: inline-block;
-      margin-right: 6px;
-      transition: background 0.3s;
-    }
-    .status-dot.connected { background: #48bb78; box-shadow: 0 0 6px #48bb78; }
-    .status-dot.active    { background: #f6ad55; box-shadow: 0 0 6px #f6ad55; animation: pulse 1s infinite; }
-    .status-dot.rerouted  { background: #63b3ed; box-shadow: 0 0 6px #63b3ed; }
-
-    @keyframes pulse {
-      0%, 100% { opacity: 1; }
-      50%       { opacity: 0.4; }
-    }
-
-    /* ── Main layout ── */
-    .main {
-      display: flex;
-      flex: 1;
-      overflow: hidden;
-    }
-
-    /* ── Map ── */
-    #map {
-      flex: 1;
-      position: relative;
-    }
-
-    /* ── Sidebar ── */
-    .sidebar {
-      width: 320px;
-      background: #1a1d2e;
-      border-left: 1px solid #2d3148;
-      display: flex;
-      flex-direction: column;
-      overflow: hidden;
-    }
-
-    .sidebar-section {
-      padding: 16px;
-      border-bottom: 1px solid #2d3148;
-    }
-
-    .sidebar-section h3 {
+      font-family: var(--mono);
       font-size: 11px;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 1px;
-      color: #718096;
-      margin-bottom: 12px;
     }
 
-    /* ── Controls ── */
-    .control-group {
+    .status-pill {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 3px 10px;
+      border-radius: 20px;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+    }
+
+    .dot {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: var(--muted);
+    }
+    .dot.on { background: var(--accent3); box-shadow: 0 0 6px var(--accent3); }
+    .dot.warn { background: var(--warn); box-shadow: 0 0 6px var(--warn); }
+    .dot.err { background: var(--accent2); box-shadow: 0 0 6px var(--accent2); }
+
+    /* ── LEFT PANEL ── */
+    .left-panel {
+      grid-area: left;
+      background: var(--surface);
+      border-right: 1px solid var(--border);
       display: flex;
       flex-direction: column;
-      gap: 8px;
+      overflow: hidden;
     }
 
-    select {
-      background: #2d3148;
-      border: 1px solid #3d4168;
-      color: #e2e8f0;
-      padding: 8px 12px;
-      border-radius: 6px;
-      font-size: 13px;
+    .panel-section {
+      border-bottom: 1px solid var(--border);
+      padding: 12px 14px;
+    }
+
+    .section-label {
+      font-family: var(--mono);
+      font-size: 9px;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 10px;
+    }
+
+    /* ── SCENARIO SELECTOR ── */
+    .scenario-select {
       width: 100%;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      font-family: var(--sans);
+      font-size: 13px;
+      padding: 8px 10px;
       cursor: pointer;
+      margin-bottom: 8px;
     }
 
+    .scenario-select:focus { outline: none; border-color: var(--accent); }
+
+    /* ── BUTTONS ── */
     .btn {
-      padding: 10px 16px;
+      width: 100%;
+      padding: 9px 12px;
       border-radius: 6px;
       border: none;
-      font-size: 13px;
-      font-weight: 600;
       cursor: pointer;
-      transition: all 0.2s;
-      width: 100%;
+      font-family: var(--sans);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+      transition: all 0.15s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      margin-bottom: 6px;
     }
 
-    .btn-primary {
-      background: linear-gradient(135deg, #e53e3e, #c53030);
-      color: white;
-    }
-    .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(229,62,62,0.4); }
-    .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn-red { background: var(--accent2); color: #fff; }
+    .btn-red:hover:not(:disabled) { filter: brightness(1.15); transform: translateY(-1px); }
+    .btn-cyan { background: var(--accent); color: #060810; }
+    .btn-cyan:hover:not(:disabled) { filter: brightness(1.1); transform: translateY(-1px); }
+    .btn-green { background: var(--accent3); color: #060810; }
+    .btn-green:hover:not(:disabled) { filter: brightness(1.1); transform: translateY(-1px); }
+    .btn-ghost { background: var(--surface2); color: var(--text); border: 1px solid var(--border); }
+    .btn-ghost:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+    .btn-warn { background: var(--warn); color: #060810; }
+    .btn-warn:hover:not(:disabled) { filter: brightness(1.1); transform: translateY(-1px); }
 
-    .btn-secondary {
-      background: #2d3148;
-      color: #a0aec0;
-      border: 1px solid #3d4168;
+    /* ── OVERRIDE SECTION ── */
+    .override-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
     }
-    .btn-secondary:hover { background: #3d4168; color: #e2e8f0; }
 
-    .btn-green {
-      background: linear-gradient(135deg, #276749, #2f855a);
-      color: white;
+    .override-btn {
+      padding: 8px 8px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: var(--surface2);
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 10px;
+      cursor: pointer;
+      transition: all 0.15s;
+      text-align: center;
+      line-height: 1.4;
     }
-    .btn-green:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(72,187,120,0.3); }
 
-    /* ── Stats ── */
+    .override-btn:hover:not(:disabled) { border-color: var(--warn); color: var(--warn); }
+    .override-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .override-btn.active { border-color: var(--warn); background: rgba(255,184,48,0.1); color: var(--warn); }
+
+    /* ── STATS ── */
     .stats-grid {
       display: grid;
       grid-template-columns: 1fr 1fr;
       gap: 8px;
     }
 
-    .stat-card {
-      background: #2d3148;
-      border-radius: 8px;
-      padding: 10px 12px;
-      border: 1px solid #3d4168;
+    .stat-box {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 10px;
     }
 
     .stat-label {
-      font-size: 10px;
-      color: #718096;
+      font-family: var(--mono);
+      font-size: 9px;
+      letter-spacing: 1px;
       text-transform: uppercase;
-      letter-spacing: 0.5px;
+      color: var(--muted);
       margin-bottom: 4px;
     }
 
     .stat-value {
-      font-size: 20px;
+      font-family: var(--mono);
+      font-size: 22px;
       font-weight: 700;
-      color: #e2e8f0;
+      color: var(--accent);
+      line-height: 1;
     }
 
-    .stat-value.green { color: #68d391; }
-    .stat-value.amber { color: #f6ad55; }
-    .stat-value.blue  { color: #63b3ed; }
+    .stat-value.warn { color: var(--warn); }
+    .stat-value.err { color: var(--accent2); }
+    .stat-value.ok { color: var(--accent3); }
 
-    /* ── Route legend ── */
-    .route-legend {
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
+    /* ── ROUTE LEGEND ── */
+    .route-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 10px 14px;
+      scrollbar-width: thin;
+      scrollbar-color: var(--border) transparent;
     }
 
     .route-item {
       display: flex;
       align-items: center;
-      gap: 10px;
-      padding: 8px 10px;
-      background: #2d3148;
-      border-radius: 6px;
-      font-size: 12px;
-      border: 1px solid #3d4168;
-      opacity: 0.4;
-      transition: opacity 0.3s;
-    }
-    .route-item.active { opacity: 1; }
-
-    .route-line {
-      width: 24px;
-      height: 3px;
-      border-radius: 2px;
+      gap: 8px;
+      padding: 7px 8px;
+      border-radius: 5px;
+      border: 1px solid transparent;
+      cursor: pointer;
+      transition: all 0.15s;
+      margin-bottom: 4px;
     }
 
-    .route-info { flex: 1; }
-    .route-name { font-weight: 600; color: #e2e8f0; }
-    .route-time { font-size: 11px; color: #718096; margin-top: 2px; }
+    .route-item:hover { background: var(--surface2); border-color: var(--border); }
+    .route-item.active { background: var(--surface2); border-color: var(--border); }
 
-    /* ── Event log ── */
-    .event-log {
-      flex: 1;
-      overflow-y: auto;
-      padding: 12px;
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
+    .route-swatch {
+      width: 14px; height: 14px;
+      border-radius: 3px;
+      flex-shrink: 0;
     }
 
-    .event-log h3 {
-      font-size: 11px;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 1px;
-      color: #718096;
-      margin-bottom: 6px;
-      padding: 0 4px;
+    .route-info { flex: 1; min-width: 0; }
+    .route-name { font-size: 11px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .route-meta { font-family: var(--mono); font-size: 10px; color: var(--muted); }
+
+    .route-badge {
+      font-family: var(--mono);
+      font-size: 9px;
+      padding: 2px 6px;
+      border-radius: 10px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--muted);
+      white-space: nowrap;
     }
 
-    .log-entry {
+    /* ── MAP ── */
+    #map {
+      grid-area: map;
+      width: 100%;
+      height: 100%;
+    }
+
+    /* ── MAP OVERLAY BUTTONS ── */
+    .map-controls {
+      position: absolute;
+      top: 12px;
+      left: 50%;
+      transform: translateX(-50%);
       display: flex;
       gap: 8px;
-      padding: 8px 10px;
-      background: #2d3148;
-      border-radius: 6px;
+      z-index: 10;
+    }
+
+    .map-pill {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 14px;
+      background: rgba(13,17,23,0.92);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      font-family: var(--mono);
       font-size: 11px;
-      border-left: 3px solid #3d4168;
+      color: var(--text);
+      backdrop-filter: blur(8px);
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    .map-pill:hover { border-color: var(--accent); color: var(--accent); }
+    .map-pill.active { border-color: var(--accent3); color: var(--accent3); background: rgba(57,255,136,0.08); }
+
+    /* ── DISASTER BANNER ── */
+    #disaster-banner {
+      position: absolute;
+      bottom: 30px;
+      left: 50%;
+      transform: translateX(-50%) translateY(80px);
+      background: rgba(255,77,109,0.95);
+      border: 1px solid var(--accent2);
+      border-radius: 8px;
+      padding: 10px 18px;
+      font-family: var(--mono);
+      font-size: 12px;
+      font-weight: 700;
+      color: #fff;
+      text-align: center;
+      backdrop-filter: blur(8px);
+      transition: transform 0.4s cubic-bezier(0.34,1.56,0.64,1);
+      z-index: 20;
+      display: none;
+    }
+
+    #disaster-banner.show { transform: translateX(-50%) translateY(0); display: block; }
+
+    /* ── RIGHT PANEL ── */
+    .right-panel {
+      grid-area: right;
+      background: var(--surface);
+      border-left: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* ── NOTIFICATION FEED ── */
+    .notif-feed {
+      flex: 1;
+      overflow-y: auto;
+      padding: 8px;
+      scrollbar-width: thin;
+      scrollbar-color: var(--border) transparent;
+    }
+
+    .notif-item {
+      padding: 8px 10px;
+      border-radius: 6px;
+      border-left: 3px solid var(--border);
+      background: var(--surface2);
+      margin-bottom: 6px;
       animation: slideIn 0.3s ease;
     }
 
     @keyframes slideIn {
-      from { opacity: 0; transform: translateX(10px); }
-      to   { opacity: 1; transform: translateX(0); }
+      from { opacity: 0; transform: translateX(20px); }
+      to { opacity: 1; transform: translateX(0); }
     }
 
-    .log-entry.info    { border-left-color: #63b3ed; }
-    .log-entry.success { border-left-color: #68d391; }
-    .log-entry.warning { border-left-color: #f6ad55; }
-    .log-entry.clear   { border-left-color: #9f7aea; }
+    .notif-item.HIGH { border-color: var(--warn); }
+    .notif-item.CRITICAL { border-color: var(--accent2); }
+    .notif-item.INFO { border-color: var(--accent3); }
+    .notif-item.MEDIUM { border-color: var(--accent); }
+    .notif-item.LOW { border-color: var(--muted); }
 
-    .log-time  { color: #718096; white-space: nowrap; }
-    .log-text  { color: #cbd5e0; }
+    .notif-title {
+      font-size: 11px;
+      font-weight: 700;
+      margin-bottom: 2px;
+    }
 
-    /* ── Map overlay badge ── */
-    .map-badge {
-      position: absolute;
-      top: 16px;
-      left: 16px;
-      background: rgba(26, 29, 46, 0.92);
-      backdrop-filter: blur(8px);
-      border: 1px solid #2d3148;
-      border-radius: 8px;
-      padding: 10px 14px;
+    .notif-msg { font-family: var(--mono); font-size: 10px; color: var(--muted); line-height: 1.5; }
+    .notif-time { font-family: var(--mono); font-size: 9px; color: var(--muted); margin-top: 3px; }
+
+    /* ── EVENT LOG ── */
+    .event-log {
+      height: 200px;
+      overflow-y: auto;
+      padding: 8px;
+      border-top: 1px solid var(--border);
+      scrollbar-width: thin;
+      scrollbar-color: var(--border) transparent;
+    }
+
+    .log-line {
+      font-family: var(--mono);
+      font-size: 10px;
+      padding: 2px 4px;
+      line-height: 1.6;
+      color: var(--muted);
+    }
+
+    .log-line .ts { color: var(--border); }
+    .log-line .ok { color: var(--accent3); }
+    .log-line .warn { color: var(--warn); }
+    .log-line .err { color: var(--accent2); }
+    .log-line .info { color: var(--accent); }
+
+    /* ── BLOCKED ROADS PANEL ── */
+    .road-list { padding: 4px 0; }
+
+    .road-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 8px;
+      border-radius: 5px;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      margin-bottom: 4px;
+      font-family: var(--mono);
+      font-size: 10px;
+    }
+
+    .road-closed { border-color: var(--accent2); color: var(--accent2); }
+    .road-open { border-color: var(--accent3); color: var(--accent3); }
+
+    /* ── SPINNER ── */
+    .spinner {
+      display: inline-block;
+      width: 12px; height: 12px;
+      border: 2px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    @keyframes emergencyPulse {
+      0%, 100% { box-shadow: 0 0 8px #ff4d6d, 0 0 0 0 rgba(255,77,109,0.6); }
+      50% { box-shadow: 0 0 12px #ff4d6d, 0 0 0 6px rgba(255,77,109,0); }
+    }
+
+    /* ── Picker Modal ── */
+    .picker-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(6,8,16,0.85);
+      z-index: 200;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      backdrop-filter: blur(4px);
+      animation: fadeIn 0.2s ease;
+    }
+
+    .picker-modal {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 20px;
+      min-width: 320px;
+      max-width: 420px;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.6);
+    }
+
+    .picker-title {
+      font-size: 13px;
+      font-weight: 800;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      margin-bottom: 6px;
+    }
+
+    .picker-subtitle {
+      font-family: var(--mono);
+      font-size: 10px;
+      color: var(--muted);
+      margin-bottom: 14px;
+    }
+
+    .picker-list { display: flex; flex-direction: column; gap: 6px; }
+
+    .picker-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 12px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: var(--surface2);
+      cursor: pointer;
+      transition: all 0.15s;
       font-size: 12px;
-      z-index: 5;
-      display: none;
     }
-    .map-badge.visible { display: block; }
-    .map-badge-title { font-weight: 700; color: #fc8181; margin-bottom: 4px; }
-    .map-badge-sub   { color: #718096; }
 
-    /* scrollbar */
-    ::-webkit-scrollbar { width: 4px; }
-    ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb { background: #3d4168; border-radius: 4px; }
+    .picker-item:hover { border-color: var(--warn); color: var(--warn); }
+    .picker-item .picker-swatch { width: 12px; height: 12px; border-radius: 3px; flex-shrink: 0; }
+    .picker-item .picker-meta { font-family: var(--mono); font-size: 10px; color: var(--muted); }
+
+    .picker-cancel {
+      margin-top: 10px;
+      width: 100%;
+      padding: 8px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--muted);
+      font-family: var(--sans);
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .picker-cancel:hover { border-color: var(--accent2); color: var(--accent2); }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(-4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    /* ── VEHICLE TYPE INDICATOR ── */
+    .vtype-row {
+      display: flex;
+      gap: 8px;
+      margin-top: 6px;
+    }
+
+    .vtype-pill {
+      flex: 1;
+      padding: 5px 8px;
+      border-radius: 5px;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      font-family: var(--mono);
+      font-size: 10px;
+      text-align: center;
+    }
   </style>
 </head>
 <body>
 
-<!-- ── Header ── -->
+<!-- ── HEADER ── -->
 <header>
   <div class="logo">
-    <div class="logo-icon">🚨</div>
-    Dublin Disaster Response — Reroute Live Demo
+    <div class="logo-pulse"></div>
+    DRS · Reroute Command Centre
   </div>
   <div class="status-bar">
-    <span><span class="status-dot" id="dot-socket"></span>Socket.IO</span>
-    <span><span class="status-dot" id="dot-disaster"></span><span id="txt-disaster">No active disaster</span></span>
+    <div class="status-pill"><div class="dot" id="dot-api"></div><span>API</span></div>
+    <div class="status-pill"><div class="dot" id="dot-socket"></div><span>Socket.IO</span></div>
+    <div class="status-pill"><div class="dot" id="dot-ws"></div><span>Notifications</span></div>
+    <div class="status-pill" id="phase-pill" style="color: var(--muted)"><span id="phase-label">IDLE</span></div>
   </div>
 </header>
 
-<!-- ── Main ── -->
-<div class="main">
+<!-- ── LEFT PANEL ── -->
+<div class="left-panel">
 
-  <!-- Map -->
-  <div id="map">
-    <div class="map-badge" id="disaster-badge">
-      <div class="map-badge-title" id="badge-title">🔴 Active Disaster</div>
-      <div class="map-badge-sub" id="badge-sub">Loading...</div>
+  <!-- Scenario -->
+  <div class="panel-section">
+    <div class="section-label">Scenario</div>
+    <select class="scenario-select" id="scenario-select">
+      <option value="m50_flooding">🌊 M50 Northbound Flooding</option>
+      <option value="port_tunnel_fire">🔥 Port Tunnel Fire</option>
+      <option value="n11_accident">🚗 N11 Major Accident</option>
+    </select>
+    <button class="btn btn-red" id="btn-trigger" onclick="triggerReroute()">
+      🚨 Trigger Disaster & Reroute
+    </button>
+    <button class="btn btn-green" id="btn-restore" onclick="restoreFlow()" disabled>
+      ✅ Restore Normal Flow
+    </button>
+    <button class="btn btn-ghost" onclick="seedVehicles()" id="btn-seed">
+      🚗 Seed 200 Vehicles
+    </button>
+    <button class="btn btn-ghost" onclick="triggerMonitoring()" id="btn-monitor">
+      🔄 Manual Monitoring Cycle
+    </button>
+  </div>
+
+  <!-- Stats -->
+  <div class="panel-section">
+    <div class="section-label">Live Stats</div>
+    <div class="stats-grid">
+      <div class="stat-box">
+        <div class="stat-label">Vehicles</div>
+        <div class="stat-value" id="stat-vehicles">0</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-label">Routes</div>
+        <div class="stat-value" id="stat-routes">0</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-label">Overflow</div>
+        <div class="stat-value warn" id="stat-overflow">0</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-label">Pipeline ms</div>
+        <div class="stat-value ok" id="stat-pipeline">—</div>
+      </div>
+    </div>
+    <div class="vtype-row">
+      <div class="vtype-pill" style="border-color: var(--accent2); color: var(--accent2)">🚑 Emergency: <span id="stat-emergency">0</span></div>
+      <div class="vtype-pill" style="border-color: var(--accent); color: var(--accent)">🚗 General: <span id="stat-general">0</span></div>
     </div>
   </div>
 
-  <!-- Sidebar -->
-  <div class="sidebar">
+  <!-- Operator Overrides -->
+  <div class="panel-section">
+    <div class="section-label">Operator Overrides</div>
 
-    <!-- Controls -->
-    <div class="sidebar-section">
-      <h3>Scenario Controls</h3>
-      <div class="control-group">
-        <select id="scenario-select">
-          <option value="m50_flooding">🌊 M50 Northbound Flooding</option>
-          <option value="city_center_fire">🔥 City Centre Fire</option>
-          <option value="port_tunnel_closure">🚧 Port Tunnel Closure</option>
-          <option value="multi_incident">⚡ Multi-Incident</option>
-        </select>
-        <button class="btn btn-primary" id="btn-trigger" onclick="triggerReroute()">
-          🚨 Trigger Disaster &amp; Reroute
-        </button>
-        <button class="btn btn-green" id="btn-restore" onclick="restoreFlow()" disabled>
-          ✅ Restore Normal Flow
-        </button>
-        <button class="btn btn-secondary" onclick="seedVehicles()">
-          🚗 Seed 200 Vehicles
-        </button>
+    <!-- Lane selector — shown only when needed -->
+    <div id="lane-selector" style="display:none; margin-bottom:8px;">
+      <div style="font-family:var(--mono);font-size:9px;letter-spacing:1px;color:var(--muted);margin-bottom:4px;" id="lane-selector-label">SELECT ROUTE TO CLOSE</div>
+      <select id="lane-select" class="scenario-select" style="margin-bottom:4px;">
+        <option value="">— choose route —</option>
+      </select>
+      <button class="btn btn-warn" id="lane-confirm-btn" onclick="confirmLaneAction()" style="margin-bottom:0;">
+        Confirm
+      </button>
+    </div>
+
+    <div class="override-grid">
+      <button class="override-btn" id="ovr-corridor" onclick="applyOverride('corridor_priority')" disabled>
+        🚨 Corridor<br>Priority
+      </button>
+      <button class="override-btn" id="ovr-close" onclick="showLaneSelector('close_lane')" disabled>
+        🚫 Close<br>Lane
+      </button>
+      <button class="override-btn" id="ovr-open" onclick="applyOverride('open_lane')" disabled>
+        ✅ Open<br>Lane
+      </button>
+      <button class="override-btn" id="ovr-pin" onclick="applyOverride('pin_detour')" disabled>
+        📌 Pin<br>Detour
+      </button>
+    </div>
+  </div>
+
+  <!-- Blocked Roads -->
+  <div class="panel-section" style="flex:1; overflow:hidden; display:flex; flex-direction:column;">
+    <div class="section-label">Road Segments</div>
+    <div class="road-list" id="road-list" style="overflow-y:auto; flex:1;">
+      <div style="font-family: var(--mono); font-size:11px; color:var(--muted); text-align:center; padding:20px 0;">
+        No active segments
       </div>
     </div>
+  </div>
 
-    <!-- Stats -->
-    <div class="sidebar-section">
-      <h3>Live Stats</h3>
-      <div class="stats-grid">
-        <div class="stat-card">
-          <div class="stat-label">Vehicles Affected</div>
-          <div class="stat-value blue" id="stat-vehicles">—</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-label">Alt Routes</div>
-          <div class="stat-value green" id="stat-routes">—</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-label">Overflow</div>
-          <div class="stat-value amber" id="stat-overflow">—</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-label">Pipeline (ms)</div>
-          <div class="stat-value" id="stat-time">—</div>
-        </div>
-      </div>
-    </div>
+</div>
 
-    <!-- Route legend -->
-    <div class="sidebar-section">
-      <h3>Alternative Routes</h3>
-      <div class="route-legend" id="route-legend">
-        <div class="route-item" id="route-0">
-          <div class="route-line" style="background:#48bb78"></div>
-          <div class="route-info">
-            <div class="route-name">Route 1 — Fastest</div>
-            <div class="route-time" id="route-0-time">Awaiting data...</div>
-          </div>
-        </div>
-        <div class="route-item" id="route-1">
-          <div class="route-line" style="background:#f6ad55"></div>
-          <div class="route-info">
-            <div class="route-name">Route 2 — Alternative</div>
-            <div class="route-time" id="route-1-time">Awaiting data...</div>
-          </div>
-        </div>
-        <div class="route-item" id="route-2">
-          <div class="route-line" style="background:#fc8181"></div>
-          <div class="route-info">
-            <div class="route-name">Route 3 — Backup</div>
-            <div class="route-time" id="route-2-time">Awaiting data...</div>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- Event log -->
-    <div class="event-log">
-      <h3>Event Log</h3>
-      <div id="log-container"></div>
-    </div>
-
+<!-- ── MAP ── -->
+<div style="grid-area: map; position: relative;">
+  <div id="map"></div>
+  <div class="map-controls">
+    <div class="map-pill active" id="pill-routes" onclick="toggleLayer('routes')">📍 Routes</div>
+    <div class="map-pill active" id="pill-blocked" onclick="toggleLayer('blocked')">🚧 Blocked</div>
+    <div class="map-pill active" id="pill-vehicles" onclick="toggleLayer('vehicles')">🚗 Vehicles</div>
+    <div class="map-pill" id="pill-heatmap" onclick="toggleLayer('heatmap')">🌡 Heat Map</div>
+  </div>
+  <div id="disaster-banner">
+    🚨 <span id="banner-text">DISASTER ACTIVE</span>
   </div>
 </div>
 
+<!-- ── RIGHT PANEL ── -->
+<div class="right-panel">
+
+  <!-- Notifications -->
+  <div class="panel-section" style="padding-bottom:8px;">
+    <div class="section-label" style="margin-bottom:0; display:flex; justify-content:space-between; align-items:center;">
+      <span>Live Notifications</span>
+      <span style="cursor:pointer; color:var(--muted); font-size:10px;" onclick="clearNotifs()">CLEAR</span>
+    </div>
+  </div>
+
+  <div class="notif-feed" id="notif-feed">
+    <div style="font-family:var(--mono); font-size:11px; color:var(--muted); text-align:center; padding:20px 0;">
+      Waiting for events...
+    </div>
+  </div>
+
+  <!-- Route Legend -->
+  <div style="border-top:1px solid var(--border); padding: 8px 14px 6px;">
+    <div class="section-label">Alternative Routes</div>
+  </div>
+  <div class="route-list" id="route-legend">
+    <div style="font-family:var(--mono); font-size:11px; color:var(--muted); text-align:center; padding:10px 0;">
+      Trigger a reroute to see routes
+    </div>
+  </div>
+
+  <!-- Event Log -->
+  <div class="event-log" id="event-log">
+    <div class="log-line"><span class="ts">[00:00:00]</span> <span class="info">System ready</span></div>
+  </div>
+
+</div>
+
 <script>
-  // ── Config ──────────────────────────────────────────────────────────────
-  const API = 'http://localhost:8000';
-  const MAPBOX_TOKEN = ''; 
-  const REGION_ID = 'region-dublin-m50';
-  const ROUTE_COLORS = ['#48bb78', '#f6ad55', '#fc8181', '#63b3ed'];
+const API       = 'http://localhost:8000';
+const MAPBOX_TOKEN = '';   // ← paste your token here
+const REGION_ID = 'region-dublin-m50';
 
-  // ── State ────────────────────────────────────────────────────────────────
-  let map, socket;
-  let activeDisasterId = null;
-  let activeScenario   = null;
-  let activeRoads      = null;
-  let triggerStart     = null;
+const ROUTE_COLOURS = [
+  '#00d4ff','#39ff88','#ffb830','#ff4d6d',
+  '#a855f7','#fb923c','#34d399','#818cf8',
+  '#f472b6','#fbbf24','#60a5fa','#4ade80'
+];
 
-  // ── Map init ─────────────────────────────────────────────────────────────
+let map, socket, wsNotif;
+let disasterId = null;
+let activeRoads = [];
+let activeRoutes = [];
+let routeLayers = [];
+let vehicleMarkers = [];
+let startTime = null;
+let layerVisible = { routes: true, blocked: true, vehicles: true, heatmap: false };
+
+// ── TRAFFIC ANIMATION ─────────────────────────────────────────────────────
+// Animates car dots along each route proportional to vehicle assignments
+let trafficDots = [];        // { el, coords, progress, speed, colour, type }
+let animationFrame = null;
+let animationRunning = false;
+
+const MAX_DOTS_PER_ROUTE = 12;  // Cap for performance
+
+function extractCoords(route) {
+  // Get [lng, lat] coordinate array from route GeoJSON
+  const geojson = route.geojson;
+  if (!geojson) return [];
+  if (geojson.type === 'Feature' && geojson.geometry) {
+    return geojson.geometry.coordinates || [];
+  }
+  if (geojson.type === 'FeatureCollection') {
+    const feat = geojson.features && geojson.features[0];
+    return feat ? (feat.geometry && feat.geometry.coordinates || []) : [];
+  }
+  if (geojson.type === 'LineString') return geojson.coordinates || [];
+  return [];
+}
+
+function interpolateAlongRoute(coords, t) {
+  // t: 0.0 → 1.0 position along route
+  // Returns [lng, lat] pixel position
+  if (!coords || coords.length < 2) return null;
+  const total = coords.length - 1;
+  const pos = t * total;
+  const idx = Math.min(Math.floor(pos), total - 1);
+  const frac = pos - idx;
+  const a = coords[idx];
+  const b = coords[idx + 1] || coords[idx];
+  return [
+    a[0] + (b[0] - a[0]) * frac,
+    a[1] + (b[1] - a[1]) * frac
+  ];
+}
+
+function getRouteHeading(coords, t) {
+  // Returns heading angle in degrees for the car dot rotation
+  if (!coords || coords.length < 2) return 0;
+  const total = coords.length - 1;
+  const pos = t * total;
+  const idx = Math.min(Math.floor(pos), total - 1);
+  const a = coords[idx];
+  const b = coords[Math.min(idx + 1, coords.length - 1)];
+  const dx = b[0] - a[0];
+  const dy = b[1] - a[1];
+  return Math.atan2(dy, dx) * (180 / Math.PI);
+}
+
+function spawnTrafficDots(routes, assignments) {
+  clearTrafficDots();
+  if (!routes || !routes.length) return;
+
+  // Count vehicles per route from backend assignments
+  const vPerRoute = {};
+  Object.entries(assignments).forEach(([uid, rid]) => {
+    vPerRoute[rid] = (vPerRoute[rid] || 0) + 1;
+  });
+
+  // Read active override state
+  const corridorActive = !!activeOverrides['corridor_priority'];
+  const corridorIdx    = corridorActive ? (activeOverrides['corridor_route_idx'] ?? 0) : -1;
+  const closedIdx      = activeOverrides['close_lane']
+    ? (activeOverrides['closed_route_idx'] ?? -1) : -1;
+
+  // Total dots displaced from closed/corridor routes → redistribute to others
+  const openRoutes = routes.filter((_, i) => i !== closedIdx &&
+    !(corridorActive && i === corridorIdx));
+  const openCount  = openRoutes.length || 1;
+
+  routes.forEach((route, routeIdx) => {
+    const coords = extractCoords(route);
+    if (coords.length < 2) return;
+
+    const isCorridorRoute = corridorActive && routeIdx === corridorIdx;
+    const isClosedRoute   = routeIdx === closedIdx;
+
+    // Closed route → no dots (traffic blocked)
+    if (isClosedRoute) return;
+
+    const totalVehicles = vPerRoute[route.route_id] || 0;
+    const travelTime    = route.travel_time_seconds || 1800;
+    const speed         = 0.00015 * (1800 / travelTime);
+    const colour        = ROUTE_COLOURS[routeIdx % ROUTE_COLOURS.length];
+
+    let dotCount;
+
+    if (isCorridorRoute) {
+      // Emergency corridor — only red emergency dots, small count
+      dotCount = Math.max(1, Math.min(4, Math.ceil(totalVehicles * 0.1 / 8)));
+    } else {
+      // Normal route — own vehicles plus any redistributed from closed/corridor
+      let base = Math.ceil(totalVehicles / 10);
+
+      // Add bonus dots from displaced routes spread evenly across open routes
+      if (closedIdx >= 0) {
+        const displaced = vPerRoute[routes[closedIdx]?.route_id] || 0;
+        base += Math.ceil(displaced / 10 / openCount);
+      }
+      if (corridorActive && corridorIdx >= 0) {
+        const displaced = vPerRoute[routes[corridorIdx]?.route_id] || 0;
+        // Normal vehicles from corridor spread to open routes
+        base += Math.ceil(displaced * 0.9 / 10 / openCount);
+      }
+      dotCount = Math.max(1, Math.min(MAX_DOTS_PER_ROUTE, base));
+    }
+
+    for (let d = 0; d < dotCount; d++) {
+      const isEmergency = isCorridorRoute;
+      const dotColour   = isEmergency ? '#ff4d6d' : colour;
+      const startProgress = (d / dotCount) + (Math.random() * 0.08);
+
+      const el = document.createElement('div');
+      el.style.cssText = `
+        position: absolute;
+        width: ${isEmergency ? 10 : 8}px;
+        height: ${isEmergency ? 10 : 8}px;
+        border-radius: 50%;
+        background: ${dotColour};
+        border: 1.5px solid rgba(255,255,255,0.6);
+        box-shadow: 0 0 ${isEmergency ? 8 : 5}px ${dotColour};
+        pointer-events: none;
+        transform: translate(-50%, -50%);
+        z-index: 5;
+      `;
+      if (isEmergency) el.style.animation = 'emergencyPulse 1s infinite';
+
+      document.getElementById('map').appendChild(el);
+      trafficDots.push({
+        el, coords,
+        progress: startProgress,
+        speed: speed * (0.8 + Math.random() * 0.4),
+        colour: dotColour,
+        routeIdx, isEmergency,
+      });
+    }
+  });
+
+  startAnimation();
+  log('ok', `Traffic: ${trafficDots.length} dots — corridor=${corridorIdx >= 0 ? 'Route '+(corridorIdx+1) : 'none'}, closed=${closedIdx >= 0 ? 'Route '+(closedIdx+1) : 'none'}`);
+}
+
+function startAnimation() {
+  if (animationRunning) return;
+  animationRunning = true;
+
+  function animate() {
+    if (!animationRunning) return;
+
+    trafficDots.forEach(dot => {
+      dot.progress += dot.speed;
+
+      // ── CORRIDOR ENFORCEMENT ──────────────────────────────────────
+      // If a normal (non-emergency) dot reaches the corridor route,
+      // divert it immediately to the next best open route.
+      const corridorActive = !!activeOverrides['corridor_priority'];
+      const corridorIdx    = corridorActive ? (activeOverrides['corridor_route_idx'] ?? 0) : -1;
+      const closedIdx      = activeOverrides['close_lane']
+        ? (activeOverrides['closed_route_idx'] ?? -1) : -1;
+
+      // Normal dot on restricted route → divert
+      const onCorridor = corridorActive && dot.routeIdx === corridorIdx && !dot.isEmergency;
+      const onClosed   = closedIdx >= 0 && dot.routeIdx === closedIdx;
+
+      if ((onCorridor || onClosed) && dot.progress > 1) {
+        // Dot has completed a loop — divert it now instead of looping
+        // Pick best open alternative route (lowest travel time)
+        const openRoutes = activeRoutes
+          .map((r, i) => ({ r, i }))
+          .filter(({ i }) => i !== corridorIdx && i !== closedIdx);
+
+        if (openRoutes.length > 0) {
+          // Sort by travel time — normal traffic goes to fastest available
+          openRoutes.sort((a, b) =>
+            (a.r.travel_time_seconds || 9999) - (b.r.travel_time_seconds || 9999)
+          );
+          // Spread across all open routes not just the fastest to avoid jamming
+          const targetEntry = openRoutes[Math.floor(Math.random() * Math.min(3, openRoutes.length))];
+          const newCoords   = extractCoords(targetEntry.r);
+
+          if (newCoords.length > 1) {
+            dot.routeIdx = targetEntry.i;
+            dot.coords   = newCoords;
+            dot.progress = Math.random() * 0.3;  // start near beginning of new route
+
+            const newColour = ROUTE_COLOURS[targetEntry.i % ROUTE_COLOURS.length];
+            dot.colour      = newColour;
+            dot.el.style.background  = newColour;
+            dot.el.style.boxShadow   = `0 0 5px ${newColour}`;
+            dot.el.style.animation   = '';
+
+            // Slightly slower on detour — represents longer journey time
+            const detourTime = targetEntry.r.travel_time_seconds || 2400;
+            dot.speed = 0.00015 * (1800 / detourTime) * (0.8 + Math.random() * 0.4);
+          }
+        }
+        return;  // skip position update this frame
+      }
+
+      // Normal loop
+      if (dot.progress > 1) dot.progress = 0;
+
+      const lngLat = interpolateAlongRoute(dot.coords, dot.progress);
+      if (!lngLat || !map) return;
+
+      const point = map.project(lngLat);
+      dot.el.style.left = `${point.x}px`;
+      dot.el.style.top  = `${point.y}px`;
+
+      dot.el.style.display = layerVisible.vehicles ? 'block' : 'none';
+    });
+
+    animationFrame = requestAnimationFrame(animate);
+  }
+
+  animationFrame = requestAnimationFrame(animate);
+}
+
+function clearTrafficDots() {
+  animationRunning = false;
+  if (animationFrame) {
+    cancelAnimationFrame(animationFrame);
+    animationFrame = null;
+  }
+  trafficDots.forEach(dot => {
+    if (dot.el && dot.el.parentNode) dot.el.parentNode.removeChild(dot.el);
+  });
+  trafficDots = [];
+}
+
+// ── INIT ──────────────────────────────────────────────────────────────────
+
+window.onload = () => {
+  initMap();
+  connectSocket();
+  connectNotifWS();
+  checkAPI();
+};
+
+function initMap() {
   mapboxgl.accessToken = MAPBOX_TOKEN;
-
   map = new mapboxgl.Map({
     container: 'map',
     style: 'mapbox://styles/mapbox/dark-v11',
-    center: [-6.2603, 53.3498],
+    center: [-6.35, 53.32],
     zoom: 11,
+    pitch: 20,
   });
-
   map.addControl(new mapboxgl.NavigationControl(), 'bottom-right');
+  map.on('load', () => log('info', 'Map loaded'));
+}
 
-  map.on('load', () => {
-    log('info', 'Map loaded — Dublin, Ireland');
-    connectSocket();
+async function checkAPI() {
+  try {
+    const r = await fetch(`${API}/health`);
+    if (r.ok) setDot('dot-api', 'on');
+    else setDot('dot-api', 'err');
+  } catch { setDot('dot-api', 'err'); }
+}
+
+function connectSocket() {
+  socket = io(API, { transports: ['websocket', 'polling'] });
+  socket.on('connect', () => {
+    setDot('dot-socket', 'on');
+    socket.emit('join_region', { region_id: REGION_ID });
+    log('info', `Socket.IO connected — joined ${REGION_ID}`);
   });
-
-  // ── Socket.IO ─────────────────────────────────────────────────────────────
-  function connectSocket() {
-    socket = io(API, { transports: ['websocket', 'polling'] });
-
-    socket.on('connect', () => {
-      document.getElementById('dot-socket').classList.add('connected');
-      socket.emit('join_region', { region_id: REGION_ID });
-      log('info', 'Connected to Socket.IO — joined region-dublin-m50');
-    });
-
-    socket.on('disconnect', () => {
-      document.getElementById('dot-socket').classList.remove('connected');
-      log('warning', 'Socket.IO disconnected');
-    });
-
-    socket.on('reroute_alert', (data) => {
-      log('success', `Reroute alert received — ${data.routes_count} routes`);
-      renderRoutes(data.geojson);
-    });
-
-    socket.on('updated_recommendation', (data) => {
-      log('warning', `Routes updated — reason: ${data.reason || 'congestion'}`);
-      if (data.geojson) renderRoutes(data.geojson);
-    });
-
-    socket.on('all_clear', () => {
-      log('clear', 'All clear — normal flow restored');
-      clearRoutes();
-    });
-  }
-
-  // ── Render routes on map ──────────────────────────────────────────────────
-  function renderRoutes(geojson) {
+  socket.on('disconnect', () => {
+    setDot('dot-socket', 'err');
+    log('warn', 'Socket.IO disconnected');
+  });
+  socket.on('reroute_alert', (data) => {
+    log('ok', `reroute_alert received — ${data.routes_count} routes`);
+    if (data.geojson) renderRoutes(data.geojson);
+  });
+  socket.on('updated_recommendation', (data) => {
+    log('info', `Routes updated — reason: ${data.reason || 'recalculation'}`);
+    if (data.geojson) renderRoutes(data.geojson);
+  });
+  socket.on('all_clear', () => {
+    log('ok', 'All clear received — routes cleared');
     clearRoutes();
+  });
+}
 
-    if (!geojson || !geojson.features || geojson.features.length === 0) return;
+function connectNotifWS() {
+  try {
+    wsNotif = new WebSocket(`ws://localhost:8000/api/v1/ws/notifications`);
+    wsNotif.onopen = () => {
+      setDot('dot-ws', 'on');
+      log('info', 'Notification WebSocket connected');
+    };
+    wsNotif.onclose = () => {
+      setDot('dot-ws', 'err');
+      setTimeout(connectNotifWS, 3000);
+    };
+    wsNotif.onmessage = (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        if (data.type === 'ping') return;
+        addNotification(data);
+        // Update stats from reroute.triggered
+        if (data.event_type === 'reroute.triggered' && data.data) {
+          document.getElementById('stat-vehicles').textContent = data.data.vehicles_count || 0;
+          document.getElementById('stat-routes').textContent = (data.data.routes || []).length;
+          document.getElementById('stat-overflow').textContent = data.data.overflow_count || 0;
+        }
+      } catch {}
+    };
+  } catch (e) { log('warn', `Notification WS: ${e.message}`); }
+}
 
-    map.addSource('reroute-routes', { type: 'geojson', data: geojson });
+// ── MAIN ACTIONS ──────────────────────────────────────────────────────────
 
-    // Glow layer
-    map.addLayer({
-      id: 'reroute-glow',
-      type: 'line',
-      source: 'reroute-routes',
-      paint: {
-        'line-color': ['get', 'route_color'],
-        'line-width': 12,
-        'line-opacity': 0.15,
-        'line-blur': 8,
-      }
-    });
-
-    // Main line
-    map.addLayer({
-      id: 'reroute-lines',
-      type: 'line',
-      source: 'reroute-routes',
-      paint: {
-        'line-color': ['get', 'route_color'],
-        'line-width': 3,
-        'line-opacity': 0.9,
-      }
-    });
-
-    // Animated dash
-    map.addLayer({
-      id: 'reroute-dash',
-      type: 'line',
-      source: 'reroute-routes',
-      paint: {
-        'line-color': ['get', 'route_color'],
-        'line-width': 2,
-        'line-dasharray': [2, 4],
-        'line-opacity': 0.6,
-      }
-    });
-
-    // Update legend
-    geojson.features.forEach((f, i) => {
-      const props  = f.properties || {};
-      const color  = ROUTE_COLORS[i] || '#888';
-      const secs   = props.travel_time_seconds;
-      const mins   = secs ? `${Math.round(secs / 60)} min` : '—';
-      const delay  = props.traffic_delay_seconds
-        ? ` (+${Math.round(props.traffic_delay_seconds / 60)} min delay)`
-        : '';
-
-      // Add color to feature for the paint expression
-      f.properties.route_color = color;
-
-      const item = document.getElementById(`route-${i}`);
-      if (item) {
-        item.classList.add('active');
-        document.getElementById(`route-${i}-time`).textContent = mins + delay;
-      }
-    });
-
-    // Force source update with colors
-    map.getSource('reroute-routes').setData(geojson);
-
-    // Fit map to routes
-    const coords = geojson.features.flatMap(f => f.geometry.coordinates);
-    if (coords.length > 0) {
-      const bounds = coords.reduce(
-        (b, c) => b.extend(c),
-        new mapboxgl.LngLatBounds(coords[0], coords[0])
-      );
-      map.fitBounds(bounds, { padding: 80, duration: 1000 });
-    }
-
-    // Update stats from pipeline timing
-    if (triggerStart) {
-      const elapsed = Date.now() - triggerStart;
-      document.getElementById('stat-time').textContent = elapsed;
-      document.getElementById('stat-routes').textContent = geojson.features.length;
-      triggerStart = null;
-    }
-  }
-
-  function clearRoutes() {
-    ['reroute-dash', 'reroute-lines', 'reroute-glow'].forEach(id => {
-      if (map.getLayer(id)) map.removeLayer(id);
-    });
-    if (map.getSource('reroute-routes')) map.removeSource('reroute-routes');
-
-    document.querySelectorAll('.route-item').forEach(el => el.classList.remove('active'));
-    ['route-0-time', 'route-1-time', 'route-2-time'].forEach(id => {
-      document.getElementById(id).textContent = 'Awaiting data...';
-    });
-  }
-
-  // ── API calls ─────────────────────────────────────────────────────────────
-  async function seedVehicles() {
-    log('info', 'Seeding 200 vehicles...');
+async function seedVehicles() {
+  const btn = document.getElementById('btn-seed');
+  btn.disabled = true;
+  btn.innerHTML = '<div class="spinner"></div> Seeding...';
+  try {
     const r = await fetch(`${API}/api/v1/scenarios/seed-vehicles?count=200`, { method: 'POST' });
     const d = await r.json();
-    log('success', `Seeded ${d.registered} vehicles`);
+    const total = d.summary?.total_users || 200;
+    log('ok', `Seeded ${total} vehicles`);
+    document.getElementById('stat-general').textContent = Math.floor(total * 0.9);
+    document.getElementById('stat-emergency').textContent = Math.floor(total * 0.1);
+    btn.innerHTML = `✅ ${total} Vehicles Seeded`;
+  } catch (e) {
+    log('err', `Seed failed: ${e.message}`);
+    btn.innerHTML = '🚗 Seed 200 Vehicles';
+    btn.disabled = false;
   }
+}
 
-  async function triggerReroute() {
+async function triggerReroute() {
+  const btn = document.getElementById('btn-trigger');
+  btn.disabled = true;
+  btn.innerHTML = '<div class="spinner"></div> Activating...';
+  setPhase('ACTIVATING', 'warn');
+  startTime = Date.now();
+
+  try {
+    // 1. Activate scenario
     const scenario = document.getElementById('scenario-select').value;
-    document.getElementById('btn-trigger').disabled = true;
-
-    try {
-      // Step 1 — activate
-      log('info', `Activating scenario: ${scenario}...`);
-      const ar = await fetch(`${API}/api/v1/scenarios/activate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ scenario_type: scenario }),
-      });
-      const ad = await ar.json();
-      activeDisasterId = ad.disaster_id;
-      activeScenario   = ad;
-      activeRoads      = ad.affected_roads;
-
-      document.getElementById('dot-disaster').classList.add('active');
-      document.getElementById('txt-disaster').textContent = ad.name;
-      document.getElementById('disaster-badge').classList.add('visible');
-      document.getElementById('badge-title').textContent = `🔴 ${ad.name}`;
-      document.getElementById('badge-sub').textContent =
-        `Severity: ${ad.severity} — ${ad.affected_roads.length} roads blocked`;
-
-      log('warning', `Disaster activated: ${ad.name} (${activeDisasterId.slice(0, 8)}...)`);
-
-      // Add blocked road markers
-      ad.affected_roads.forEach(road => {
-        new mapboxgl.Marker({ color: '#e53e3e' })
-          .setLngLat([road.start_lng, road.start_lat])
-          .setPopup(new mapboxgl.Popup().setText(`🚫 ${road.road_name} — ${road.reason}`))
-          .addTo(map);
-      });
-
-      // Step 2 — trigger reroute
-      log('info', 'Triggering reroute pipeline...');
-      triggerStart = Date.now();
-
-      const tr = await fetch(`${API}/api/v1/reroute/trigger`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          disaster_id: activeDisasterId,
-          region_id: REGION_ID,
-        }),
-      });
-      const td = await tr.json();
-
-      document.getElementById('stat-vehicles').textContent = td.vehicles_affected || '—';
-      document.getElementById('stat-overflow').textContent = td.overflow_count ?? '—';
-      document.getElementById('dot-disaster').classList.remove('active');
-      document.getElementById('dot-disaster').classList.add('rerouted');
-      document.getElementById('btn-restore').disabled = false;
-
-      log('success',
-        `✅ Rerouted ${td.vehicles_affected} vehicles across ${td.routes_count} routes`);
-
-    } catch (e) {
-      log('warning', `Error: ${e.message}`);
-      document.getElementById('btn-trigger').disabled = false;
-    }
-  }
-
-  async function restoreFlow() {
-    if (!activeDisasterId || !activeRoads) return;
-    document.getElementById('btn-restore').disabled = true;
-
-    log('info', 'Restoring normal flow...');
-    const r = await fetch(`${API}/api/v1/reroute/restore`, {
+    const ar = await fetch(`${API}/api/v1/scenarios/activate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        disaster_id: activeDisasterId,
-        cleared_segments: activeRoads,
-      }),
+      body: JSON.stringify({ scenario_type: scenario })
+    });
+    const ad = await ar.json();
+    disasterId = ad.disaster_id;
+    activeRoads = ad.affected_roads || ad.road_segments || [];
+
+    // Show disaster on map
+    showDisasterBanner(ad.scenario_name || scenario, ad.severity || 'HIGH');
+    renderBlockedRoads(activeRoads);
+    enableOverrides(true);
+
+    log('warn', `Scenario activated: ${scenario} — ${activeRoads.length} roads blocked`);
+    setPhase('TRIGGERING', 'warn');
+
+    // 2. Trigger reroute
+    const tr = await fetch(`${API}/api/v1/reroute/trigger`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ disaster_id: disasterId, region_id: REGION_ID })
+    });
+    const td = await tr.json();
+
+    const elapsed = Date.now() - startTime;
+    document.getElementById('stat-vehicles').textContent = td.vehicles_affected || 0;
+    document.getElementById('stat-routes').textContent = td.routes_count || 0;
+    document.getElementById('stat-overflow').textContent = td.overflow_count || 0;
+    document.getElementById('stat-pipeline').textContent = elapsed;
+
+    // 3. Fetch full plan for route details
+    await fetchAndRenderPlan(disasterId);
+
+    document.getElementById('btn-restore').disabled = false;
+    setPhase('ACTIVE', 'on');
+    log('ok', `Reroute complete — ${td.vehicles_affected} vehicles, ${td.routes_count} routes, ${elapsed}ms`);
+
+  } catch (e) {
+    log('err', `Trigger failed: ${e.message}`);
+    btn.disabled = false;
+    setPhase('ERROR', 'err');
+  }
+  btn.innerHTML = '🚨 Trigger Disaster & Reroute';
+}
+
+async function fetchAndRenderPlan(dId) {
+  try {
+    const r = await fetch(`${API}/api/v1/reroute/status/${dId}`);
+    const plan = await r.json();
+    activeRoutes = plan.chosen_routes || [];
+    renderAllRoutes(activeRoutes, plan.route_assignments || {});
+    renderRouteLegend(activeRoutes, plan.route_assignments || {});
+  } catch (e) {
+    log('warn', `Could not fetch plan: ${e.message}`);
+  }
+}
+
+async function restoreFlow() {
+  const btn = document.getElementById('btn-restore');
+  btn.disabled = true;
+  btn.innerHTML = '<div class="spinner"></div> Restoring...';
+  setPhase('RESTORING', 'warn');
+
+  try {
+    const segments = activeRoads.length > 0 ? activeRoads : [{
+      segment_id: 'seg-m50-j6-j7-nb', road_name: 'M50 Northbound J6-J7',
+      start_lat: 53.302, start_lng: -6.3615, end_lat: 53.312, end_lng: -6.358
+    }];
+
+    await fetch(`${API}/api/v1/reroute/restore`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ disaster_id: disasterId, cleared_segments: segments })
+    });
+
+    clearRoutes();
+    hideDisasterBanner();
+    enableOverrides(false);
+    document.getElementById('lane-selector').style.display = 'none';
+    pendingLaneAction = null;
+    updateRoadList([]);
+    setPhase('IDLE', null);
+    document.getElementById('stat-vehicles').textContent = '0';
+    document.getElementById('stat-routes').textContent = '0';
+    document.getElementById('stat-overflow').textContent = '0';
+    document.getElementById('route-legend').innerHTML =
+      '<div style="font-family:var(--mono);font-size:11px;color:var(--muted);text-align:center;padding:10px 0;">Trigger a reroute to see routes</div>';
+    disasterId = null;
+    activeRoads = [];
+    log('ok', 'Normal flow restored');
+
+  } catch (e) {
+    log('err', `Restore failed: ${e.message}`);
+    btn.disabled = false;
+  }
+  btn.innerHTML = '✅ Restore Normal Flow';
+}
+
+async function triggerMonitoring() {
+  const btn = document.getElementById('btn-monitor');
+  btn.disabled = true;
+  btn.innerHTML = '<div class="spinner"></div>';
+  try {
+    const r = await fetch(`${API}/api/v1/scenarios/trigger-monitoring-cycle?speed_threshold_kmh=200`, { method: 'POST' });
+    const d = await r.json();
+    log('info', `Monitoring cycle: ${d.status || 'ok'}`);
+    if (disasterId) await fetchAndRenderPlan(disasterId);
+  } catch (e) { log('err', `Monitoring failed: ${e.message}`); }
+  btn.innerHTML = '🔄 Manual Monitoring Cycle';
+  btn.disabled = false;
+}
+
+// Track active overrides for visual state
+// (and which route is pending for lane selector)
+let pendingLaneAction = null;
+
+function showLaneSelector(action) {
+  if (!activeRoutes.length) {
+    log('warn', 'No active routes — trigger a reroute first');
+    return;
+  }
+  pendingLaneAction = action;
+
+  // Populate dropdown with current routes
+  const sel = document.getElementById('lane-select');
+  sel.innerHTML = '<option value="">— choose route —</option>';
+  activeRoutes.forEach((route, i) => {
+    const mins = Math.round((route.travel_time_seconds || 0) / 60);
+    const label = i === 0 ? 'Route 1 — Fastest' : i === 1 ? 'Route 2 — Alternative' : `Route ${i+1}`;
+    const opt = document.createElement('option');
+    opt.value = i;
+    opt.textContent = `${label} (${mins} min)`;
+    sel.appendChild(opt);
+  });
+
+  // Update label
+  document.getElementById('lane-selector-label').textContent =
+    action === 'close_lane' ? 'SELECT ROUTE TO CLOSE' : 'SELECT ROUTE';
+
+  // Show the selector
+  document.getElementById('lane-selector').style.display = 'block';
+  document.getElementById('lane-select').focus();
+}
+
+function confirmLaneAction() {
+  const sel = document.getElementById('lane-select');
+  const routeIdx = parseInt(sel.value);
+
+  if (isNaN(routeIdx)) {
+    log('warn', 'Please select a route first');
+    return;
+  }
+
+  // Hide selector
+  document.getElementById('lane-selector').style.display = 'none';
+
+  // Store selected route index for use in applyOverrideVisuals
+  if (pendingLaneAction === 'close_lane') {
+    activeOverrides['closed_route_idx'] = routeIdx;
+  } else {
+    activeOverrides['corridor_route_idx'] = routeIdx;
+  }
+
+  // Apply the action
+  applyOverride(pendingLaneAction);
+  pendingLaneAction = null;
+}
+
+// Track active overrides for visual state
+const activeOverrides = {};
+let selectedRouteIdx = 0;   // which route is the emergency corridor / pin
+let selectedRoadIdx  = 0;   // which road segment is being closed
+
+// ── PICKER MODAL ─────────────────────────────────────────────────────────
+
+function showPicker(title, subtitle, items, onSelect) {
+  document.getElementById('picker-title').textContent = title;
+  document.getElementById('picker-subtitle').textContent = subtitle;
+  const list = document.getElementById('picker-list');
+  list.innerHTML = items.map((item, i) => `
+    <div class="picker-item" onclick="pickerSelected(${i})">
+      ${item.swatch ? `<div class="picker-swatch" style="background:${item.swatch}; box-shadow: 0 0 6px ${item.swatch}44;"></div>` : item.icon || ''}
+      <div>
+        <div>${item.label}</div>
+        <div class="picker-meta">${item.meta || ''}</div>
+      </div>
+    </div>
+  `).join('');
+  document.getElementById('picker-overlay').style.display = 'flex';
+  document.getElementById('picker-overlay')._onSelect = onSelect;
+}
+
+function pickerSelected(idx) {
+  const cb = document.getElementById('picker-overlay')._onSelect;
+  closePicker();
+  if (cb) cb(idx);
+}
+
+function closePicker(e) {
+  if (e && e.target !== document.getElementById('picker-overlay')) return;
+  document.getElementById('picker-overlay').style.display = 'none';
+}
+
+// ── OVERRIDE ENTRY POINTS ────────────────────────────────────────────────
+
+function applyOverride(type) {
+  if (!disasterId) return;
+
+  if (type === 'corridor_priority') {
+    // Show route picker — user selects which route becomes emergency corridor
+    const items = activeRoutes.map((r, i) => ({
+      swatch: ROUTE_COLOURS[i % ROUTE_COLOURS.length],
+      label: i === 0 ? 'Route 1 — Fastest' : i === 1 ? 'Route 2 — Alternative' : `Route ${i+1}`,
+      meta: `${Math.round((r.travel_time_seconds||0)/60)} min · ${((r.length_meters||0)/1000).toFixed(1)} km`,
+    }));
+    showPicker(
+      '🚨 Select Emergency Corridor',
+      'Normal traffic will be blocked. Only emergency vehicles allowed.',
+      items,
+      (idx) => executeOverride('corridor_priority', idx)
+    );
+  }
+  else if (type === 'close_lane') {
+    // Always show routes picker — user picks which ROUTE to close
+    const items = activeRoutes.map((r, i) => ({
+      swatch: ROUTE_COLOURS[i % ROUTE_COLOURS.length],
+      label: i === 0 ? 'Route 1 — Fastest' : i === 1 ? 'Route 2 — Alternative' : `Route ${i+1}`,
+      meta: `${Math.round((r.travel_time_seconds||0)/60)} min · ${((r.length_meters||0)/1000).toFixed(1)} km — ALL traffic blocked`,
+    }));
+    showPicker(
+      '🚫 Select Route to Close',
+      'Both emergency and normal vehicles will be rerouted away from this route.',
+      items,
+      (idx) => executeOverride('close_lane', idx)
+    );
+  }
+  else {
+    executeOverride(type, 0);
+  }
+}
+
+async function executeOverride(type, selIdx) {
+  selectedRouteIdx = selIdx;
+  selectedRoadIdx  = selIdx;
+
+  const btnMap = {
+    'corridor_priority': 'ovr-corridor',
+    'close_lane':        'ovr-close',
+    'open_lane':         'ovr-open',
+    'pin_detour':        'ovr-pin',
+  };
+  const btn = document.getElementById(btnMap[type]);
+  if (btn) btn.classList.add('active');
+
+  // ── Set override flags BEFORE fetchAndRenderPlan ──────────────────
+  // spawnTrafficDots runs 400ms after renderAllRoutes — it must see these
+  // flags already set so it skips closed/corridor routes from the start.
+  if (type === 'close_lane') {
+    activeOverrides['close_lane'] = true;
+    activeOverrides['closed_route_idx'] = selIdx;
+  } else if (type === 'corridor_priority') {
+    activeOverrides['corridor_priority'] = true;
+    activeOverrides['corridor_route_idx'] = selIdx;
+  } else if (type === 'open_lane') {
+    // Clear all restriction flags
+    delete activeOverrides['close_lane'];
+    delete activeOverrides['closed_route_idx'];
+    delete activeOverrides['corridor_priority'];
+    delete activeOverrides['corridor_route_idx'];
+  }
+
+  const payload = {
+    disaster_id: disasterId,
+    type: type,
+    operator_id: 'demo-operator-001',
+    priority: type === 'corridor_priority' ? 'high' : undefined,
+    route_id: activeRoutes[selIdx]?.route_id || null,
+  };
+
+  try {
+    const r = await fetch(`${API}/api/v1/reroute/override`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
     });
     const d = await r.json();
+    log('warn', `Override applied: ${type} on index ${selIdx} — ${d.routes_recomputed || 0} routes recomputed`);
 
-    document.getElementById('dot-disaster').classList.remove('active', 'rerouted');
-    document.getElementById('txt-disaster').textContent = 'No active disaster';
-    document.getElementById('disaster-badge').classList.remove('visible');
-    document.getElementById('stat-vehicles').textContent = '—';
-    document.getElementById('stat-routes').textContent = '—';
-    document.getElementById('stat-overflow').textContent = '—';
-    document.getElementById('stat-time').textContent = '—';
-    document.getElementById('btn-trigger').disabled = false;
+    await fetchAndRenderPlan(disasterId);
+    // Apply visuals then respawn dots respecting the override state
+    setTimeout(async () => {
+      await applyOverrideVisuals(type, selIdx);
+      const freshPlan = await fetch(`${API}/api/v1/reroute/status/${disasterId}`)
+        .then(r => r.json()).catch(() => ({ route_assignments: {} }));
+      spawnTrafficDots(activeRoutes, freshPlan.route_assignments || {});
+    }, 600);
 
-    activeDisasterId = null;
-    activeRoads = null;
+  } catch (e) {
+    log('err', `Override failed: ${e.message}`);
+    if (btn) btn.classList.remove('active');
+  }
+}
 
-    // Remove markers
-    document.querySelectorAll('.mapboxgl-marker').forEach(m => m.remove());
-    clearRoutes();
+async function applyOverrideVisuals(type, selIdx = 0) {
+  // Flags already set in executeOverride before fetchAndRenderPlan
 
-    log('clear', `Normal flow restored — ${d.users_notified} users notified`);
+  if (type === 'corridor_priority') {
+    // Route 0 = EMERGENCY ONLY corridor
+    // All normal vehicles on corridor route get pushed to slower alternatives
+    activeRoutes.forEach((_, i) => {
+      const lineId = `route-line-${i}`;
+      const glowId = `route-line-${i}-glow`;
+      if (!map.getLayer(lineId)) return;
+      if (i === selIdx) {
+        // Emergency corridor — bright cyan thick pulsing line
+        map.setPaintProperty(lineId, 'line-color', '#00d4ff');
+        map.setPaintProperty(lineId, 'line-width', 7);
+        map.setPaintProperty(lineId, 'line-opacity', 1);
+        map.setPaintProperty(lineId, 'line-dasharray', [1, 0]);
+        map.setPaintProperty(glowId, 'line-color', '#00d4ff');
+        map.setPaintProperty(glowId, 'line-width', 18);
+        map.setPaintProperty(glowId, 'line-opacity', 0.3);
+      } else {
+        // Alternative routes — slightly brighter as normal traffic fills them
+        map.setPaintProperty(lineId, 'line-opacity', 0.7);
+        map.setPaintProperty(lineId, 'line-width', 3.5);
+        if (map.getLayer(glowId)) map.setPaintProperty(glowId, 'line-opacity', 0.12);
+      }
+    });
+
+    // Place EMERGENCY CORRIDOR label on selected route
+    const corridorIdx = selIdx;
+    const r0Coords = activeRoutes[corridorIdx] ? extractCoords(activeRoutes[corridorIdx]) : null;
+    const corridorPos = r0Coords && r0Coords.length > 1
+      ? r0Coords[Math.floor(r0Coords.length * 0.4)]
+      : null;
+    addOverrideMarker('corridor', '#00d4ff', `🚨 EMERGENCY ONLY — Route ${corridorIdx+1}`, corridorPos);
+
+    // Redistribute dots:
+    // - Keep ONLY emergency dots (red) on selected corridor route
+    // - Move ALL normal dots off corridor → distribute to other routes
+    const normalDotsOnCorridor = trafficDots.filter(d => d.routeIdx === corridorIdx && !d.isEmergency);
+    const altRouteIndices = activeRoutes.map((_,i)=>i).filter(i => i !== corridorIdx);
+    const altRouteCount = Math.max(1, altRouteIndices.length);
+
+    normalDotsOnCorridor.forEach((dot, i) => {
+      // Round-robin across alternative routes
+      const targetIdx = altRouteIndices[i % altRouteCount];
+      const targetRoute = activeRoutes[targetIdx];
+      if (targetRoute) {
+        const newCoords = extractCoords(targetRoute);
+        if (newCoords.length > 1) {
+          dot.routeIdx = targetIdx;
+          dot.coords = newCoords;
+          const travelTime = targetRoute.travel_time_seconds || 2400;
+          dot.speed = 0.00015 * (1800 / travelTime);
+          dot.colour = ROUTE_COLOURS[targetIdx % ROUTE_COLOURS.length];
+          dot.el.style.background = dot.colour;
+          dot.el.style.boxShadow = `0 0 5px ${dot.colour}`;
+          dot.progress = Math.random();
+        }
+      }
+    });
+
+    // Mark remaining corridor dots as emergency (red pulsing)
+    trafficDots.filter(d => d.routeIdx === corridorIdx).forEach(dot => {
+      dot.isEmergency = true;
+      dot.colour = '#ff4d6d';
+      dot.el.style.background = '#ff4d6d';
+      dot.el.style.boxShadow = '0 0 8px #ff4d6d';
+      dot.el.style.width = '10px';
+      dot.el.style.height = '10px';
+      dot.el.style.animation = 'emergencyPulse 1s infinite';
+    });
+
+    log('info', `Visual: Emergency corridor — ${normalDotsOnCorridor.length} normal vehicles rerouted to slower alternatives`);
   }
 
-  // ── Logging ───────────────────────────────────────────────────────────────
-  function log(type, text) {
-    const container = document.getElementById('log-container');
-    const now = new Date().toLocaleTimeString('en-IE', { hour12: false });
+  else if (type === 'close_lane') {
+    const closedIdx = selIdx;
+    const closedRoute = activeRoutes[closedIdx];
+
+    // Visually mark the closed route — red dashed line
+    const lineId = `route-line-${closedIdx}`;
+    const glowId = `route-line-${closedIdx}-glow`;
+    if (map.getLayer(lineId)) {
+      map.setPaintProperty(lineId, 'line-color', '#ff4d6d');
+      map.setPaintProperty(lineId, 'line-width', 2);
+      map.setPaintProperty(lineId, 'line-opacity', 0.5);
+      map.setPaintProperty(lineId, 'line-dasharray', [3, 3]);
+    }
+    if (map.getLayer(glowId)) map.setPaintProperty(glowId, 'line-opacity', 0.05);
+
+    // Place CLOSED marker at midpoint of closed route
+    const closedCoords = closedRoute ? extractCoords(closedRoute) : null;
+    const closedPos = closedCoords && closedCoords.length > 1
+      ? closedCoords[Math.floor(closedCoords.length * 0.5)]
+      : null;
+    addOverrideMarker('close', '#ff4d6d', '🚫 ROUTE CLOSED', closedPos);
+
+    // Move ALL dots (emergency + normal) off closed route → other routes
+    const closedDots = trafficDots.filter(d => d.routeIdx === closedIdx);
+    const openRouteIdxs = activeRoutes
+      .map((_, i) => i)
+      .filter(i => i !== closedIdx);
+    const altCount = openRouteIdxs.length;
+
+    closedDots.forEach((dot, i) => {
+      const targetIdx = openRouteIdxs[i % altCount];
+      const targetRoute = activeRoutes[targetIdx];
+      if (targetRoute) {
+        const newCoords = extractCoords(targetRoute);
+        if (newCoords.length > 1) {
+          dot.routeIdx = targetIdx;
+          dot.coords = newCoords;
+          const travelTime = targetRoute.travel_time_seconds || 2400;
+          dot.speed = 0.00015 * (1800 / travelTime);  // slower on detour routes
+          dot.colour = ROUTE_COLOURS[targetIdx % ROUTE_COLOURS.length];
+          dot.el.style.background = dot.colour;
+          dot.el.style.boxShadow = `0 0 5px ${dot.colour}`;
+          dot.el.style.animation = '';  // remove emergency pulse if any
+          dot.progress = Math.random();
+        }
+      }
+    });
+
+    // Brighten open routes slightly to show increased traffic
+    openRouteIdxs.forEach(idx => {
+      if (map.getLayer(`route-line-${idx}`)) {
+        map.setPaintProperty(`route-line-${idx}`, 'line-width', 4);
+        map.setPaintProperty(`route-line-${idx}`, 'line-opacity', 0.95);
+      }
+    });
+
+    log('info', `Visual: Route ${closedIdx + 1} closed — ${closedDots.length} vehicles (emergency + normal) rerouted to ${altCount} alternatives`);
+  }
+
+  else if (type === 'open_lane') {
+    // Place marker on road midpoint
+    const road = activeRoads[0];
+    const markerPos = road
+      ? [(road.start_lng + road.end_lng) / 2, (road.start_lat + road.end_lat) / 2]
+      : null;
+    addOverrideMarker('open', '#39ff88', '✅ LANE OPENED', markerPos);
+
+    // Restore all route styles
+    activeRoutes.forEach((_, i) => {
+      const lineId = `route-line-${i}`;
+      const glowId = `route-line-${i}-glow`;
+      if (map.getLayer(lineId)) {
+        map.setPaintProperty(lineId, 'line-opacity', 0.9);
+        map.setPaintProperty(lineId, 'line-width', 3);
+        map.setPaintProperty(lineId, 'line-color', ROUTE_COLOURS[i % ROUTE_COLOURS.length]);
+        map.setPaintProperty(lineId, 'line-dasharray', [1, 0]);
+      }
+      if (map.getLayer(glowId)) map.setPaintProperty(glowId, 'line-opacity', 0.15);
+    });
+
+    // Respawn dots evenly across all routes
+    const plan = await fetch(`${API}/api/v1/reroute/status/${disasterId}`)
+      .then(r => r.json()).catch(() => ({ route_assignments: {} }));
+    setTimeout(() => spawnTrafficDots(activeRoutes, plan.route_assignments || {}), 200);
+    log('info', 'Visual: Lane opened — traffic redistributed across all routes');
+  }
+
+  else if (type === 'pin_detour') {
+    // Highlight route 1 (second fastest) as the pinned detour
+    activeRoutes.forEach((_, i) => {
+      const lineId = `route-line-${i}`;
+      if (!map.getLayer(lineId)) return;
+      if (i === 1) {
+        map.setPaintProperty(lineId, 'line-color', '#ffb830');
+        map.setPaintProperty(lineId, 'line-width', 5);
+        map.setPaintProperty(lineId, 'line-opacity', 1);
+        map.setPaintProperty(lineId, 'line-dasharray', [2, 1]);
+      } else {
+        map.setPaintProperty(lineId, 'line-opacity', 0.3);
+        map.setPaintProperty(lineId, 'line-width', 2);
+      }
+    });
+    // Place pin marker near start of route 1 (second route)
+    const route1Coords = activeRoutes[1] ? extractCoords(activeRoutes[1]) : null;
+    const pinPos = route1Coords && route1Coords.length > 1
+      ? route1Coords[Math.floor(route1Coords.length * 0.3)]  // 30% along route
+      : null;
+    addOverrideMarker('pin', '#ffb830', '📌 PINNED DETOUR', pinPos);
+    log('info', 'Visual: Route 2 pinned as preferred detour');
+  }
+}
+
+// Store override markers for cleanup
+const overrideMarkers = {};
+
+function addOverrideMarker(key, colour, label, lngLat) {
+  // Remove existing marker of same type
+  if (overrideMarkers[key]) {
+    overrideMarkers[key].remove();
+    delete overrideMarkers[key];
+  }
+
+  // Default position — first blocked road midpoint, or map centre
+  let pos = lngLat;
+  if (!pos && activeRoads.length > 0) {
+    const r = activeRoads[0];
+    pos = [(r.start_lng + r.end_lng) / 2, (r.start_lat + r.end_lat) / 2];
+  }
+  if (!pos) pos = [map.getCenter().lng, map.getCenter().lat + 0.01];
+
+  const el = document.createElement('div');
+  el.style.cssText = `
+    background: ${colour}22;
+    border: 2px solid ${colour};
+    border-radius: 6px;
+    padding: 4px 10px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    font-weight: 700;
+    color: ${colour};
+    white-space: nowrap;
+    backdrop-filter: blur(4px);
+    box-shadow: 0 0 12px ${colour}44;
+    animation: fadeIn 0.3s ease;
+  `;
+  el.textContent = label;
+
+  const marker = new mapboxgl.Marker({ element: el, anchor: 'bottom' })
+    .setLngLat(pos)
+    .addTo(map);
+
+  overrideMarkers[key] = marker;
+}
+
+// ── MAP RENDERING ─────────────────────────────────────────────────────────
+
+function renderAllRoutes(routes, assignments) {
+  clearRoutes();
+  if (!routes || !routes.length) return;
+
+  // Count vehicles per route
+  const vPerRoute = {};
+  Object.values(assignments).forEach(rid => {
+    vPerRoute[rid] = (vPerRoute[rid] || 0) + 1;
+  });
+
+  routes.forEach((route, i) => {
+    const colour = ROUTE_COLOURS[i % ROUTE_COLOURS.length];
+    const geojson = route.geojson;
+    if (!geojson) return;
+
+    const sourceId = `route-${i}`;
+    const layerId  = `route-line-${i}`;
+    const labelId  = `route-label-${i}`;
+
+    if (map.getSource(sourceId)) {
+      map.getSource(sourceId).setData(geojson);
+    } else {
+      map.addSource(sourceId, { type: 'geojson', data: geojson });
+      // Glow effect
+      map.addLayer({
+        id: `${layerId}-glow`,
+        type: 'line',
+        source: sourceId,
+        layout: { 'line-join': 'round', 'line-cap': 'round' },
+        paint: {
+          'line-color': colour,
+          'line-width': 8,
+          'line-opacity': 0.15,
+          'line-blur': 4,
+        }
+      });
+      // Main line
+      map.addLayer({
+        id: layerId,
+        type: 'line',
+        source: sourceId,
+        layout: { 'line-join': 'round', 'line-cap': 'round' },
+        paint: {
+          'line-color': colour,
+          'line-width': 3,
+          'line-opacity': 0.9,
+        }
+      });
+    }
+    routeLayers.push(sourceId, layerId, `${layerId}-glow`);
+  });
+
+  log('ok', `Rendered ${routes.length} routes on map`);
+
+  // Spawn animated traffic dots after map settles
+  // Store the spawn timeout so override visuals can wait for it
+  window._spawnTimeout = setTimeout(() => {
+    spawnTrafficDots(routes, assignments);
+    window._dotsReady = true;
+  }, 400);
+}
+
+function renderRoutes(geojson) {
+  // Called from Socket.IO events — simple single geojson render
+  const sourceId = 'socket-routes';
+  if (map.getSource(sourceId)) {
+    map.getSource(sourceId).setData(geojson);
+  } else {
+    map.addSource(sourceId, { type: 'geojson', data: geojson });
+    map.addLayer({
+      id: 'socket-routes-glow',
+      type: 'line',
+      source: sourceId,
+      layout: { 'line-join': 'round', 'line-cap': 'round' },
+      paint: { 'line-color': '#00d4ff', 'line-width': 8, 'line-opacity': 0.12 }
+    });
+    map.addLayer({
+      id: 'socket-routes-line',
+      type: 'line',
+      source: sourceId,
+      layout: { 'line-join': 'round', 'line-cap': 'round' },
+      paint: { 'line-color': '#00d4ff', 'line-width': 2.5, 'line-opacity': 0.8 }
+    });
+  }
+}
+
+function renderBlockedRoads(roads) {
+  roads.forEach((road, i) => {
+    // Red marker for blocked road midpoint
+    const lat = (road.start_lat + road.end_lat) / 2;
+    const lng = (road.start_lng + road.end_lng) / 2;
+
     const el = document.createElement('div');
-    el.className = `log-entry ${type}`;
-    el.innerHTML = `<span class="log-time">${now}</span><span class="log-text">${text}</span>`;
-    container.prepend(el);
-    // Keep max 50 entries
-    while (container.children.length > 50) container.removeChild(container.lastChild);
+    el.style.cssText = `
+      width: 14px; height: 14px; border-radius: 50%;
+      background: #ff4d6d; border: 2px solid #fff;
+      box-shadow: 0 0 12px #ff4d6d;
+    `;
+
+    new mapboxgl.Marker(el)
+      .setLngLat([lng, lat])
+      .setPopup(new mapboxgl.Popup({ closeButton: false })
+        .setHTML(`<div style="font-family:monospace;font-size:12px;background:#0d1117;color:#ff4d6d;padding:6px 10px;border-radius:4px;">
+          🚧 <strong>${road.road_name || 'Blocked Road'}</strong><br>
+          <span style="color:#5a6a7a">Status: CLOSED</span>
+        </div>`))
+      .addTo(map);
+    vehicleMarkers.push({ marker: el, type: 'blocked' });
+  });
+
+  updateRoadList(roads);
+  log('warn', `${roads.length} blocked road segments marked`);
+}
+
+function updateRoadList(roads) {
+  const el = document.getElementById('road-list');
+  if (!roads.length) {
+    el.innerHTML = '<div style="font-family:var(--mono);font-size:11px;color:var(--muted);text-align:center;padding:20px 0;">No active segments</div>';
+    return;
   }
+  el.innerHTML = roads.map(r => `
+    <div class="road-item road-closed">
+      <span>🚧 ${r.road_name || r.segment_id}</span>
+      <span>CLOSED</span>
+    </div>
+  `).join('');
+}
+
+function renderRouteLegend(routes, assignments) {
+  const vPerRoute = {};
+  Object.values(assignments).forEach(rid => {
+    vPerRoute[rid] = (vPerRoute[rid] || 0) + 1;
+  });
+
+  const legend = document.getElementById('route-legend');
+  if (!routes.length) {
+    legend.innerHTML = '<div style="font-family:var(--mono);font-size:11px;color:var(--muted);text-align:center;padding:10px 0;">No routes</div>';
+    return;
+  }
+
+  legend.innerHTML = routes.map((r, i) => {
+    const colour = ROUTE_COLOURS[i % ROUTE_COLOURS.length];
+    const mins = Math.round((r.travel_time_seconds || 0) / 60);
+    const km = ((r.length_meters || 0) / 1000).toFixed(1);
+    const count = vPerRoute[r.route_id] || 0;
+    const label = i === 0 ? 'Fastest' : i === 1 ? 'Alternative' : i === 2 ? 'Backup' : `Route ${i+1}`;
+    return `
+      <div class="route-item" onclick="highlightRoute(${i})">
+        <div class="route-swatch" style="background:${colour}; box-shadow: 0 0 6px ${colour}40;"></div>
+        <div class="route-info">
+          <div class="route-name" style="color:${colour}">${label}</div>
+          <div class="route-meta">${mins} min · ${km} km</div>
+        </div>
+        <div class="route-badge">${count} veh</div>
+      </div>
+    `;
+  }).join('');
+}
+
+function highlightRoute(idx) {
+  // Dim all, brighten selected
+  activeRoutes.forEach((_, i) => {
+    const layerId = `route-line-${i}`;
+    if (map.getLayer(layerId)) {
+      map.setPaintProperty(layerId, 'line-opacity', i === idx ? 1 : 0.25);
+      map.setPaintProperty(layerId, 'line-width', i === idx ? 5 : 2);
+    }
+  });
+}
+
+function clearRoutes() {
+  // Remove indexed route layers
+  for (let i = 0; i < 20; i++) {
+    [`route-line-${i}`, `route-line-${i}-glow`, `route-${i}`].forEach(id => {
+      try {
+        if (map.getLayer(id)) map.removeLayer(id);
+        if (map.getSource(id)) map.removeSource(id);
+      } catch {}
+    });
+  }
+  // Remove socket routes
+  ['socket-routes-line','socket-routes-glow'].forEach(id => {
+    try { if (map.getLayer(id)) map.removeLayer(id); } catch {}
+  });
+  try { if (map.getSource('socket-routes')) map.removeSource('socket-routes'); } catch {}
+
+  routeLayers = [];
+
+  // Clear vehicle/road markers
+  vehicleMarkers.forEach(m => {
+    if (m.marker && m.marker.remove) m.marker.remove();
+    else if (m.remove) m.remove();
+  });
+  vehicleMarkers = [];
+
+  // Clear override markers
+  Object.values(overrideMarkers).forEach(m => m.remove());
+  Object.keys(overrideMarkers).forEach(k => delete overrideMarkers[k]);
+  Object.keys(activeOverrides).forEach(k => delete activeOverrides[k]);
+
+  // Clear traffic animation dots
+  clearTrafficDots();
+  window._dotsReady = false;
+  if (window._spawnTimeout) { clearTimeout(window._spawnTimeout); window._spawnTimeout = null; }
+}
+
+// ── LAYER TOGGLE ─────────────────────────────────────────────────────────
+
+function toggleLayer(name) {
+  layerVisible[name] = !layerVisible[name];
+  const pill = document.getElementById(`pill-${name}`);
+  pill.classList.toggle('active', layerVisible[name]);
+
+  if (name === 'routes') {
+    for (let i = 0; i < 20; i++) {
+      const vis = layerVisible[name] ? 'visible' : 'none';
+      try { if (map.getLayer(`route-line-${i}`)) map.setLayoutProperty(`route-line-${i}`, 'visibility', vis); } catch {}
+      try { if (map.getLayer(`route-line-${i}-glow`)) map.setLayoutProperty(`route-line-${i}-glow`, 'visibility', vis); } catch {}
+    }
+  }
+}
+
+// ── UI HELPERS ────────────────────────────────────────────────────────────
+
+function showDisasterBanner(name, severity) {
+  const el = document.getElementById('disaster-banner');
+  document.getElementById('banner-text').textContent = `🚨 ${name.toUpperCase()} — Severity: ${severity}`;
+  el.style.display = 'block';
+  setTimeout(() => el.classList.add('show'), 10);
+}
+
+function hideDisasterBanner() {
+  const el = document.getElementById('disaster-banner');
+  el.classList.remove('show');
+  setTimeout(() => el.style.display = 'none', 400);
+}
+
+function enableOverrides(on) {
+  ['ovr-corridor','ovr-close','ovr-open','ovr-pin'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) {
+      el.disabled = !on;
+      el.classList.remove('active');
+    }
+  });
+}
+
+function setDot(id, state) {
+  const el = document.getElementById(id);
+  el.className = `dot ${state || ''}`;
+}
+
+function setPhase(label, state) {
+  document.getElementById('phase-label').textContent = label;
+  const pill = document.getElementById('phase-pill');
+  pill.style.color = state === 'on' ? 'var(--accent3)'
+    : state === 'warn' ? 'var(--warn)'
+    : state === 'err' ? 'var(--accent2)'
+    : 'var(--muted)';
+}
+
+function addNotification(data) {
+  const feed = document.getElementById('notif-feed');
+  // Remove empty state
+  if (feed.querySelector('div[style]')) feed.innerHTML = '';
+
+  const sev = data.severity || 'INFO';
+  const time = new Date().toLocaleTimeString();
+  const item = document.createElement('div');
+  item.className = `notif-item ${sev}`;
+  item.innerHTML = `
+    <div class="notif-title">${data.title || data.event_type}</div>
+    <div class="notif-msg">${data.message || ''}</div>
+    <div class="notif-time">${time} · ${data.service || 'system'}</div>
+  `;
+  feed.insertBefore(item, feed.firstChild);
+  // Keep max 20
+  while (feed.children.length > 20) feed.removeChild(feed.lastChild);
+}
+
+function clearNotifs() {
+  document.getElementById('notif-feed').innerHTML =
+    '<div style="font-family:var(--mono);font-size:11px;color:var(--muted);text-align:center;padding:20px 0;">Waiting for events...</div>';
+}
+
+function log(type, text) {
+  const el = document.getElementById('event-log');
+  const time = new Date().toLocaleTimeString();
+  const line = document.createElement('div');
+  line.className = 'log-line';
+  line.innerHTML = `<span class="ts">[${time}]</span> <span class="${type}">${text}</span>`;
+  el.insertBefore(line, el.firstChild);
+  while (el.children.length > 50) el.removeChild(el.lastChild);
+}
 </script>
+<!-- ── PICKER MODAL ── -->
+<div id="picker-overlay" class="picker-overlay" style="display:none" onclick="closePicker(event)">
+  <div class="picker-modal">
+    <div class="picker-title" id="picker-title">Select Route</div>
+    <div class="picker-subtitle" id="picker-subtitle"></div>
+    <div class="picker-list" id="picker-list"></div>
+    <button class="picker-cancel" onclick="closePicker()">Cancel</button>
+  </div>
+</div>
+
 </body>
 </html>

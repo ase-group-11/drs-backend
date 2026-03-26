@@ -19,6 +19,7 @@ API convention (matches test spec):
 """
 
 import logging
+import math
 from typing import Dict, Any, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -149,6 +150,42 @@ def analyze_route_capacity(
     return enriched
 
 
+def _dest_matches_route(
+    vehicle: Dict[str, Any],
+    route: Dict[str, Any],
+    threshold_km: float = 2.0,
+) -> bool:
+    """
+    Check if a route's endpoint is within threshold_km of the vehicle's destination.
+
+    Emergency vehicles heading to the disaster point will only match routes
+    that end near the disaster. Civilian vehicles match routes ending near
+    their actual destination (city centre, etc.).
+
+    Returns True (any route acceptable) when destination is unset.
+    """
+    dest = vehicle.get("destination", {})
+    if not dest:
+        return True
+
+    dest_lat = dest.get("lat")
+    dest_lng = dest.get("lng")
+    if dest_lat is None or dest_lng is None:
+        return True
+
+    points = route.get("points", [])
+    if not points:
+        return True
+
+    end_lat, end_lng = points[-1][0], points[-1][1]
+
+    dlat = (end_lat - dest_lat) * 111
+    dlng = (end_lng - dest_lng) * 73
+    dist_km = math.sqrt(dlat ** 2 + dlng ** 2)
+
+    return dist_km <= threshold_km
+
+
 def optimize_traffic_distribution(
     routes: List[Dict[str, Any]],
     vehicles: List[Dict[str, Any]],
@@ -196,7 +233,7 @@ def optimize_traffic_distribution(
         key=lambda v: PRIORITY_ORDER.get(v.get("type", "general"), 2),
     )
 
-    # Step 4 — greedy assignment with live load tracking
+    # Step 4 — greedy assignment with destination-aware routing
     live_remaining: Dict[str, int] = {
         r["route_id"]: r["remaining_capacity"]
         for r in enriched_routes
@@ -209,18 +246,38 @@ def optimize_traffic_distribution(
         user_id = vehicle.get("user_id")
         if not user_id:
             continue
+
         assigned = False
 
+        # First pass: destination-aware — only assign routes whose endpoint
+        # is close to this vehicle's destination.
+        # Emergency vehicles (dest = disaster point) get routes ending near
+        # the disaster. Civilians get routes heading away from it.
         for route in scored:
             route_id = route["route_id"]
-            if live_remaining.get(route_id, 0) > 0:
-                route_assignments[user_id] = route_id
-                live_remaining[route_id] = max(0, live_remaining[route_id] - 1)
-                assigned = True
-                break
+            if live_remaining.get(route_id, 0) <= 0:
+                continue
+            if not _dest_matches_route(vehicle, route, threshold_km=2.0):
+                continue
+
+            route_assignments[user_id] = route_id
+            live_remaining[route_id] = max(0, live_remaining[route_id] - 1)
+            assigned = True
+            break
 
         if not assigned:
-            # Overflow: assign to least loaded route by utilization
+            # Second pass: relax destination constraint — assign any route
+            # with remaining capacity (covers edge case: no route matches dest)
+            for route in scored:
+                route_id = route["route_id"]
+                if live_remaining.get(route_id, 0) > 0:
+                    route_assignments[user_id] = route_id
+                    live_remaining[route_id] = max(0, live_remaining[route_id] - 1)
+                    assigned = True
+                    break
+
+        if not assigned:
+            # Overflow: all routes at capacity
             overflow_route = min(
                 enriched_routes,
                 key=lambda r: score_route(r, traffic_segments),

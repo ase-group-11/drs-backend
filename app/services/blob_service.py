@@ -77,6 +77,54 @@ def _generate_sas_url(blob_name: str, account_name: str, account_key: str) -> st
     return sas_url
 
 
+def refresh_sas_url(stored_url: str, refresh_threshold_hours: int = 2) -> str:
+    """
+    Return a fresh SAS URL only if the existing one expires within
+    refresh_threshold_hours (default 2 hours). Otherwise return as-is.
+
+    Logic:
+      - Parse the 'se' (signed expiry) query param from the stored URL
+      - If expiry > now + threshold → still valid, return original
+      - If expiry <= now + threshold → regenerate fresh SAS URL
+      - If URL has no 'se' param (not a SAS URL) → return original unchanged
+    """
+    try:
+        from urllib.parse import urlparse, unquote, parse_qs
+        from datetime import timezone
+
+        parsed = urlparse(stored_url)
+        qs = parse_qs(parsed.query)
+
+        # Not a SAS URL — return as-is
+        if 'se' not in qs:
+            return stored_url
+
+        # Parse expiry from SAS token — format: 2026-03-23T10%3A30%3A00Z
+        expiry_str = qs['se'][0]
+        expiry_dt = datetime.fromisoformat(expiry_str.replace('Z', '+00:00'))
+        threshold_dt = datetime.now(timezone.utc) + timedelta(hours=refresh_threshold_hours)
+
+        # Still valid with comfortable margin — return original
+        if expiry_dt > threshold_dt:
+            return stored_url
+
+        # Expiring soon or already expired — regenerate
+        account_name, account_key = _get_account_name_and_key()
+        container = settings.AZURE_CONTAINER_NAME
+        path = unquote(parsed.path)
+        prefix = f"/{container}/"
+        if prefix not in path:
+            return stored_url
+        blob_name = path.split(prefix, 1)[1]
+        new_url = _generate_sas_url(blob_name, account_name, account_key)
+        logger.info(f"refresh_sas_url: refreshed expiring SAS for {blob_name[:40]}...")
+        return new_url
+
+    except Exception as e:
+        logger.warning(f"refresh_sas_url: could not refresh — returning original. Error: {e}")
+        return stored_url
+
+
 async def upload_single_file(file: UploadFile) -> dict:
     """
     Upload one file to Azure Blob Storage (async, private container).

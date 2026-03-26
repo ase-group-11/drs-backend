@@ -134,7 +134,7 @@ class DisasterEvaluationService:
             "response_scale": meta.get("response_scale"),
         }
 
-    async def evaluate(self, report_id: str) -> Dict[str, Any]:
+    async def evaluate(self, report_id: str, trigger_reroute_override: Optional[bool] = None) -> Dict[str, Any]:
         """
         Evaluate a disaster report and return the fixed-schema result dict.
 
@@ -225,7 +225,7 @@ class DisasterEvaluationService:
         estimated_population = estimate_affected_population(
             impact_radius_km, report.get("people_affected", 0), population_ctx
         )
-        affected_roads = self._enrichment.identify_affected_roads(
+        affected_roads = await self._enrichment.identify_affected_roads_async(
             traffic_ctx, lat or 0.0, lon or 0.0
         )
         affected_facilities = _extract_facility_names(infrastructure_ctx)
@@ -241,6 +241,14 @@ class DisasterEvaluationService:
             impact_radius_km, estimated_population, affected_roads, affected_facilities,
             image_analysis_ctx, response_scale,
         )
+
+        # 9b. Update result.disaster_id to the real created disaster UUID
+        # result.disaster_id defaults to report_id (set in rules_engine/base.py)
+        # After persist, the real disaster UUID is stored on the report row
+        if tracking_id is not None:
+            updated_report = await self._report_repo.get_report_by_id(report_id)
+            if updated_report and updated_report.get("disaster_id"):
+                result.disaster_id = str(updated_report["disaster_id"])
 
         # 10. Publish evaluation result to message queue — fire-and-forget
         #     FALSE_ALARM and DUPLICATE don't create new disasters, so skip the queue.
@@ -267,7 +275,14 @@ class DisasterEvaluationService:
                     "evaluated_at": evaluated_at.isoformat(),
                     "impact_radius_km": impact_radius_km,
                     "estimated_population": estimated_population,
-                    "affected_roads": affected_roads or [],
+                    "affected_roads": [
+                        r if isinstance(r, dict) else {
+                            "road_name": r,
+                            "start_lat": lat, "start_lng": lon,
+                            "end_lat": lat, "end_lng": lon,
+                        }
+                        for r in (affected_roads or [])
+                    ],
                     "affected_facilities": affected_facilities or [],
                     "response_scale": response_scale,
                 })
@@ -276,13 +291,28 @@ class DisasterEvaluationService:
                     "Failed to publish evaluation to queue for report %s", report_id
                 )
 
-        # 11. Fire downstream triggers — fire-and-forget; never blocks the response
+        # 11. Commit evaluation session BEFORE firing downstream triggers.
+        # HttpRerouteClient makes a separate HTTP request which opens its own
+        # DB session — it cannot see the disaster until this session commits.
+        try:
+            await self._disaster_repo.db.commit()
+            logger.debug("Evaluation session committed before downstream dispatch")
+        except Exception:
+            logger.warning("Could not commit before downstream dispatch — reroute may fail with FK error")
+
+        # Fire downstream triggers — fire-and-forget; never blocks the response
+        # trigger_reroute_override=False suppresses reroute regardless of model decision
+        # trigger_reroute_override=True forces reroute regardless of model decision
+        # trigger_reroute_override=None uses model's own result.trigger_reroute
         await self._dispatch_downstream(
             disaster_id=result.disaster_id,
             result=result,
             impact_radius_km=impact_radius_km,
             estimated_population=estimated_population,
             affected_roads=affected_roads,
+            lat = lat or 0.0,
+            lon = lon or 0.0,
+            trigger_reroute_override=trigger_reroute_override,
         )
 
         # 12. Notify reporter — spec steps 10 (notifyReporter) and 8.5 (notifyFalseAlarmReporter)
@@ -292,6 +322,12 @@ class DisasterEvaluationService:
             tracking_id=tracking_id,
             response_scale=response_scale,
         )
+
+        # Extract road names for the response (dicts → strings for display)
+        affected_road_names = [
+            r["road_name"] if isinstance(r, dict) else r
+            for r in affected_roads
+        ]
 
         # 13. Return response dict (matches EvaluationResponse schema)
         return {
@@ -307,7 +343,7 @@ class DisasterEvaluationService:
             "evaluated_at": evaluated_at,
             "impact_radius_km": impact_radius_km,
             "estimated_population": estimated_population,
-            "affected_roads": affected_roads,
+            "affected_roads": affected_road_names,
             "affected_facilities": affected_facilities,
             "response_scale": response_scale,
         }
@@ -550,7 +586,7 @@ class DisasterEvaluationService:
         disaster = Disaster(
             tracking_id=tracking_id,
             type=DisasterType(report["disaster_type"]),
-            severity=DisasterSeverity(result.severity.lower()),
+            severity=DisasterSeverity(result.severity.upper()),
             disaster_status=initial_status,
             location=WKTElement(f"POINT({lon} {lat})", srid=4326),
             location_address=report.get("location_address"),
@@ -560,6 +596,8 @@ class DisasterEvaluationService:
             structural_damage=report.get("structural_damage", False),
             road_blocked=report.get("road_blocked", False),
             disaster_metadata={
+                "lat" : lat,
+                "lon" : lon,
                 "evaluation": {
                     "confidence": result.confidence,
                     "recommended_services": result.recommended_services,
@@ -571,7 +609,14 @@ class DisasterEvaluationService:
                     "evaluated_at": evaluated_at.isoformat(),
                     "impact_radius_km": impact_radius_km,
                     "estimated_population": estimated_population,
-                    "affected_roads": affected_roads or [],
+                    "affected_roads": [
+                        r if isinstance(r, dict) else {
+                            "road_name": r,
+                            "start_lat": lat, "start_lng": lon,
+                            "end_lat": lat, "end_lng": lon,
+                        }
+                        for r in (affected_roads or [])
+                    ],
                     "affected_facilities": affected_facilities or [],
                     "response_scale": response_scale,
                 },
@@ -610,6 +655,9 @@ class DisasterEvaluationService:
         impact_radius_km: float,
         estimated_population: int,
         affected_roads: list,
+        lat: float, 
+        lon: float,
+        trigger_reroute_override: Optional[bool] = None,
     ) -> None:
         """
         Fire downstream triggers after a successful evaluation.
@@ -626,8 +674,14 @@ class DisasterEvaluationService:
                 await self._coordination.trigger_deploy(
                     disaster_id, result.recommended_services, result.severity
                 )
-            if result.trigger_reroute:
-                await self._reroute.trigger_reroute(disaster_id, affected_roads)
+            # Respect API override: None = use model, True = force, False = suppress
+            should_reroute = (
+                trigger_reroute_override
+                if trigger_reroute_override is not None
+                else result.trigger_reroute
+            )
+            if should_reroute:
+                await self._reroute.trigger_reroute(disaster_id, affected_roads, lat, lon)
             if result.trigger_evacuation:
                 await self._coordination.trigger_evacuation(
                     disaster_id, estimated_population, impact_radius_km
@@ -810,7 +864,7 @@ class DisasterEvaluationService:
         estimated_population = estimate_affected_population(
             impact_radius_km, merged_report.get("people_affected", 0), population_ctx
         )
-        affected_roads = self._enrichment.identify_affected_roads(
+        affected_roads = await self._enrichment.identify_affected_roads_async(
             traffic_ctx, lat or 0.0, lon or 0.0
         )
         affected_facilities = _extract_facility_names(infrastructure_ctx)
@@ -827,7 +881,14 @@ class DisasterEvaluationService:
             "evaluated_at": evaluated_at.isoformat(),
             "impact_radius_km": impact_radius_km,
             "estimated_population": estimated_population,
-            "affected_roads": affected_roads or [],
+            "affected_roads": [
+                r if isinstance(r, dict) else {
+                    "road_name": r,
+                    "start_lat": lat, "start_lng": lon,
+                    "end_lat": lat, "end_lng": lon,
+                }
+                for r in (affected_roads or [])
+            ],
             "affected_facilities": affected_facilities or [],
             "corroboration_count": len(linked_reports),
             "reassessed_at": evaluated_at.isoformat(),

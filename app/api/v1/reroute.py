@@ -75,7 +75,6 @@ class RoadSegmentInput(BaseModel):
 
 class TriggerRerouteRequest(BaseModel):
     disaster_id: str = Field(..., description="ID of the active disaster")
-    region_id: str = Field(..., description="Region identifier for traffic data")
     affected_roads: Optional[List[RoadSegmentInput]] = Field(
         None,
         description="Blocked road segments. If omitted, fetched from DB by disaster_id."
@@ -84,8 +83,8 @@ class TriggerRerouteRequest(BaseModel):
 
 class RestoreFlowRequest(BaseModel):
     disaster_id: str = Field(..., description="ID of the disaster being cleared")
-    cleared_segments: List[RoadSegmentInput] = Field(
-        ..., description="Road segments that have been cleared"
+    cleared_segments: Optional[List[RoadSegmentInput]] = Field(
+        None, description="Road segments that have been cleared"
     )
 
 
@@ -143,7 +142,6 @@ async def trigger_reroute(
     try:
         result = await service.trigger_reroute_traffic(
             disaster_id=request.disaster_id,
-            region_id=request.region_id,
             affected_roads=affected_roads,
         )
         return result
@@ -163,13 +161,18 @@ async def trigger_reroute(
 async def restore_flow(
     request: RestoreFlowRequest,
     service: RerouteService = Depends(get_reroute_service),
+    db: AsyncSession = Depends(get_db)
 ):
     """
     Restore normal traffic flow when a disaster is cleared.
 
     Updates road status → open, clears map overlays, sends all-clear to users.
     """
-    cleared_segments = [s.model_dump() for s in request.cleared_segments]
+    if request.cleared_segments:
+        cleared_segments = [s.model_dump() for s in request.cleared_segments]
+    else:
+        repo = RerouteRepository(db)
+        cleared_segments = await repo.get_blocked_roads(request.disaster_id)
 
     try:
         result = await service.restore_normal_flow(
@@ -236,6 +239,21 @@ async def get_reroute_status(
         )
     return plan
 
+@router.get(
+        "/plans",
+        summary="Get all active reroute plans across all disasters",
+        response_model=List[Dict[str, Any]]
+)
+async def get_all_active_plans(
+    db: AsyncSession = Depends(get_db),
+) -> List[Dict[str, Any]]:
+    """
+        Admin dashboard gets all reroute plans in one call
+    
+    """
+
+    repo = RerouteRepository(db)
+    return await repo.get_all_active_plans()
 
 @router.get(
     "/health",
