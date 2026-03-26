@@ -37,15 +37,9 @@ UNIT_TYPE_TO_DEPARTMENT = {
 }
 
 
-<<<<<<< Updated upstream
-class UpdateUserStatusRequest(BaseModel):
-    status: str = Field(..., description="New status: ACTIVE, INACTIVE, SUSPENDED, PENDING, DELETED")
-    reason: Optional[str] = Field(None, description="Reason for status change")
-=======
 class UpdateUserRequest(BaseModel):
     """
     Merged update schema — handles profile fields AND status in one request.
->>>>>>> Stashed changes
 
     All fields are optional. Provide only what you want to change.
     - full_name, email, phone_number  → profile fields
@@ -101,6 +95,7 @@ class UpdateUserRequest(BaseModel):
             ]
         }
     }
+
 
 class CreateCitizenRequest(BaseModel):
     phone_number: str = Field(..., description="Phone number (E.164 format: +353851234567)")
@@ -176,8 +171,6 @@ async def create_user(
         user_id = str(uuid.uuid4())
 
         if data.user_type == "citizen":
-            # ── Create Citizen ──
-            # Check phone uniqueness (only among non-deleted users)
             check = await db.execute(
                 text("SELECT id FROM users WHERE phone_number = :phone AND deleted_at IS NULL"),
                 {"phone": data.phone_number}
@@ -185,7 +178,6 @@ async def create_user(
             if check.first():
                 raise HTTPException(status_code=400, detail=f"Phone number {data.phone_number} already registered.")
 
-            # Check email uniqueness if provided (only among non-deleted users)
             if data.email:
                 check = await db.execute(
                     text("SELECT id FROM users WHERE email = :email AND deleted_at IS NULL"),
@@ -204,9 +196,7 @@ async def create_user(
                 "name": data.full_name,
                 "email": data.email,
             })
-
             await db.flush()
-
             return {
                 "id": user_id,
                 "full_name": data.full_name,
@@ -219,7 +209,6 @@ async def create_user(
             }
 
         elif data.user_type == "team":
-            # ── Create Team Member ──
             if not data.email:
                 raise HTTPException(status_code=400, detail="Email is required for team members.")
             if not data.password:
@@ -237,7 +226,6 @@ async def create_user(
             if department not in ("FIRE", "MEDICAL", "POLICE", "IT"):
                 raise HTTPException(status_code=400, detail="Department must be FIRE, MEDICAL, POLICE, or IT.")
 
-            # Check phone uniqueness (only among non-deleted)
             check = await db.execute(
                 text("SELECT id FROM emergency_teams WHERE phone_number = :phone AND deleted_at IS NULL"),
                 {"phone": data.phone_number}
@@ -245,7 +233,6 @@ async def create_user(
             if check.first():
                 raise HTTPException(status_code=400, detail=f"Phone number {data.phone_number} already registered.")
 
-            # Check email uniqueness (only among non-deleted)
             check = await db.execute(
                 text("SELECT id FROM emergency_teams WHERE email = :email AND deleted_at IS NULL"),
                 {"email": data.email}
@@ -253,7 +240,6 @@ async def create_user(
             if check.first():
                 raise HTTPException(status_code=400, detail=f"Email {data.email} already registered.")
 
-            # Check employee_id uniqueness
             if data.employee_id:
                 check = await db.execute(
                     text("SELECT id FROM emergency_teams WHERE employee_id = :emp_id AND deleted_at IS NULL"),
@@ -284,9 +270,7 @@ async def create_user(
                 "role": role,
                 "dept": department,
             })
-
             await db.flush()
-
             return {
                 "id": user_id,
                 "full_name": data.full_name,
@@ -336,16 +320,13 @@ async def list_all_users(
     current_user: Dict[str, Any] = Depends(get_current_team_member),
 ):
     try:
-        # Auto-map unit_type to department
         effective_department = department
         if unit_type and not department:
             effective_department = UNIT_TYPE_TO_DEPARTMENT.get(unit_type.upper())
 
         results = []
 
-        # ── Citizens ──
         if user_type is None or user_type == "citizen":
-            # Skip citizens if filtering by department/unit_type/role/exclude_assigned (team-only filters)
             if not effective_department and not role and not exclude_assigned:
                 citizen_where = ["u.email IS NOT NULL"]
                 citizen_params = {"limit": limit}
@@ -391,7 +372,6 @@ async def list_all_users(
                         "created_at": row["created_at"].isoformat() if row["created_at"] else None,
                     })
 
-        # ── Emergency Team ──
         if user_type is None or user_type == "team":
             team_where = ["et.email IS NOT NULL"]
             team_params = {"limit": limit}
@@ -433,11 +413,8 @@ async def list_all_users(
             result = await db.execute(team_sql, team_params)
             for row in result.mappings().all():
                 is_assigned = (row["assigned_units_count"] or 0) > 0
-
-                # Skip if exclude_assigned and already assigned
                 if exclude_assigned and is_assigned:
                     continue
-
                 results.append({
                     "id": str(row["id"]),
                     "full_name": row["full_name"],
@@ -456,7 +433,6 @@ async def list_all_users(
                     "created_at": row["created_at"].isoformat() if row["created_at"] else None,
                 })
 
-        # Summary
         citizens = [u for u in results if u["user_type"] == "citizen"]
         team = [u for u in results if u["user_type"] == "team"]
 
@@ -503,7 +479,6 @@ async def get_user(
     current_user: Dict[str, Any] = Depends(get_current_team_member),
 ):
     try:
-        # Try citizens first
         citizen_sql = text("""
             SELECT
                 u.id, u.full_name, u.email, u.phone_number,
@@ -514,7 +489,6 @@ async def get_user(
             FROM users u
             WHERE u.id = :user_id AND u.deleted_at IS NULL
         """)
-
         result = await db.execute(citizen_sql, {"user_id": user_id})
         row = result.mappings().first()
 
@@ -538,7 +512,6 @@ async def get_user(
                 "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
             }
 
-        # Try emergency team
         team_sql = text("""
             SELECT
                 et.id, et.full_name, et.email, et.phone_number,
@@ -553,7 +526,6 @@ async def get_user(
             FROM emergency_teams et
             WHERE et.id = :user_id AND et.deleted_at IS NULL
         """)
-
         result = await db.execute(team_sql, {"user_id": user_id})
         row = result.mappings().first()
 
@@ -605,34 +577,10 @@ async def update_user(
     db: AsyncSession = Depends(get_db),
     current_user: Dict[str, Any] = Depends(get_current_team_member),
 ):
-    """
-    Single endpoint to update a user's profile and/or status.
-
-    Supply any combination of fields — only those provided are updated:
-    - **full_name** — new display name
-    - **email** — new email, must be unique
-    - **phone_number** — new phone in E.164 format, must be unique
-    - **status** — ACTIVE, INACTIVE, SUSPENDED, PENDING, DELETED
-    - **reason** — optional note recorded alongside a status change
-
-    Errors:
-    - 400: no fields provided / email or phone already in use / invalid status
-    - 404: user not found
-    """
     try:
         from datetime import datetime
         now = datetime.utcnow()
-<<<<<<< Updated upstream
-        new_status = data.status.upper()
 
-        valid_statuses = ("ACTIVE", "INACTIVE", "SUSPENDED", "PENDING", "DELETED")
-        if new_status not in valid_statuses:
-            raise HTTPException(status_code=400, detail=f"Status must be one of: {', '.join(valid_statuses)}")
-
-        # Try citizens first
-=======
-
-        # At least one field must be provided
         if all(v is None for v in [data.full_name, data.email, data.phone_number, data.status]):
             raise HTTPException(
                 status_code=400,
@@ -640,7 +588,6 @@ async def update_user(
             )
 
         # ── Try citizens table first ──────────────────────────────────────────
->>>>>>> Stashed changes
         result = await db.execute(
             text("SELECT id, full_name, email, phone_number, role, status FROM users WHERE id = :id AND deleted_at IS NULL"),
             {"id": user_id}
@@ -648,7 +595,6 @@ async def update_user(
         user = result.mappings().first()
 
         if user:
-            # Uniqueness checks — exclude current user
             if data.email:
                 dup = await db.execute(
                     text("SELECT id FROM users WHERE email = :email AND id != :id AND deleted_at IS NULL"),
@@ -665,7 +611,6 @@ async def update_user(
                 if dup.first():
                     raise HTTPException(status_code=400, detail=f"Phone number {data.phone_number} is already in use.")
 
-            # Build SET clause dynamically
             set_parts = ["updated_at = :updated_at"]
             params: Dict[str, Any] = {"id": user_id, "updated_at": now}
 
@@ -682,16 +627,15 @@ async def update_user(
                 params["phone_number"] = data.phone_number
 
             if data.status is not None:
-                new_status = data.status
-                if new_status == "DELETED":
+                if data.status == "DELETED":
                     set_parts.append("status = CAST(:status AS user_status)")
                     set_parts.append("deleted_at = :now")
-                    params["status"] = new_status
+                    params["status"] = data.status
                     params["now"] = now
                 else:
                     set_parts.append("status = CAST(:status AS user_status)")
                     set_parts.append("deleted_at = NULL")
-                    params["status"] = new_status
+                    params["status"] = data.status
 
             await db.execute(
                 text(f"UPDATE users SET {', '.join(set_parts)} WHERE id = :id AND deleted_at IS NULL"),
@@ -699,10 +643,7 @@ async def update_user(
             )
             await db.flush()
 
-            updated_fields = [
-                f for f in ["full_name", "email", "phone_number", "status"]
-                if getattr(data, f) is not None
-            ]
+            updated_fields = [f for f in ["full_name", "email", "phone_number", "status"] if getattr(data, f) is not None]
             return {
                 "id": user_id,
                 "user_type": "citizen",
@@ -716,11 +657,7 @@ async def update_user(
                 "message": "User updated successfully.",
             }
 
-<<<<<<< Updated upstream
-        # Try emergency team
-=======
         # ── Try emergency_teams table ─────────────────────────────────────────
->>>>>>> Stashed changes
         result = await db.execute(
             text("SELECT id, full_name, email, phone_number, role, department, status FROM emergency_teams WHERE id = :id AND deleted_at IS NULL"),
             {"id": user_id}
@@ -760,21 +697,16 @@ async def update_user(
                 params["phone_number"] = data.phone_number
 
             if data.status is not None:
-                new_status = data.status
-                if new_status == "DELETED":
+                if data.status == "DELETED":
                     set_parts.append("status = CAST(:status AS user_status)")
                     set_parts.append("deleted_at = :now")
-                    params["status"] = new_status
+                    params["status"] = data.status
                     params["now"] = now
-                    # Remove from unit crews when deleted
-                    await db.execute(
-                        text("DELETE FROM unit_crew WHERE team_member_id = :id"),
-                        {"id": user_id}
-                    )
+                    await db.execute(text("DELETE FROM unit_crew WHERE team_member_id = :id"), {"id": user_id})
                 else:
                     set_parts.append("status = CAST(:status AS user_status)")
                     set_parts.append("deleted_at = NULL")
-                    params["status"] = new_status
+                    params["status"] = data.status
 
             await db.execute(
                 text(f"UPDATE emergency_teams SET {', '.join(set_parts)} WHERE id = :id AND deleted_at IS NULL"),
@@ -782,10 +714,7 @@ async def update_user(
             )
             await db.flush()
 
-            updated_fields = [
-                f for f in ["full_name", "email", "phone_number", "status"]
-                if getattr(data, f) is not None
-            ]
+            updated_fields = [f for f in ["full_name", "email", "phone_number", "status"] if getattr(data, f) is not None]
             return {
                 "id": user_id,
                 "user_type": "team",
@@ -805,13 +734,8 @@ async def update_user(
     except HTTPException:
         raise
     except Exception as e:
-<<<<<<< Updated upstream
-        logger.exception(f"Error updating user status: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to update status: {str(e)[:200]}")
-=======
         logger.exception(f"Error updating user: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to update user: {str(e)[:200]}")
->>>>>>> Stashed changes
 
 
 # ══════════════════════════════════════════════
@@ -832,7 +756,6 @@ async def delete_user(
         from datetime import datetime
         now = datetime.utcnow()
 
-        # Try citizens
         result = await db.execute(
             text("SELECT id, full_name FROM users WHERE id = :id AND deleted_at IS NULL"),
             {"id": user_id}
@@ -846,7 +769,6 @@ async def delete_user(
             await db.flush()
             return {"id": user_id, "full_name": user["full_name"], "user_type": "citizen", "status": "DELETED"}
 
-        # Try emergency team
         result = await db.execute(
             text("SELECT id, full_name FROM emergency_teams WHERE id = :id AND deleted_at IS NULL"),
             {"id": user_id}
