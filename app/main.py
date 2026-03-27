@@ -28,21 +28,28 @@ from app.api.v1 import disaster_report
 from app.api.v1 import vehicles
 from app.api.v1.disaster import router as disaster_router
 from app.api.v1 import disaster_evaluation
-
+from app.api.v1.incident_log import router as incident_log_router
 from cache.redis_client import close_redis_connection
 from app.providers.map_provider import MapProvider
 from app.providers.traffic import TrafficProvider
 from app.api.v1.live_map import set_live_map_providers
 from app.socket.manager import sio
+
+
+from pathlib import Path
 from app.workers.reroute_publisher import get_publisher
 import socketio
 from app.api.v1.emergency_unit import router as emergency_unit_router
 from app.api.v1.deployment import router as deployment_router
+
 from app.api.v1.disaster_evaluation import set_evaluation_providers
 from app.api.v1.user_management import router as user_management_router
 
 from app.api.v1.notifications_ws import router as notifications_router
 from app.api.v1.notifications_ws import redis_listener                  
+
+from app.api.v1.user_management import router as user_management_router
+
 
 # Setup logging FIRST
 setup_logging()
@@ -180,8 +187,12 @@ app.include_router(evacuation.router, prefix="/api/v1")
 app.include_router(disaster_report.router, prefix="/api/v1")
 app.include_router(disaster_router, prefix="/api/v1")
 app.include_router(disaster_evaluation.router, prefix="/api/v1")
-
+app.include_router(incident_log_router, prefix="/api/v1")
 app.include_router(emergency_unit_router, prefix="/api/v1")
+
+app.include_router(deployment_router, prefix="/api/v1")
+app.include_router(user_management_router, prefix="/api/v1")
+
 app.include_router(vehicles.router, prefix = "/api/v1")
 
 app.include_router(deployment_router, prefix="/api/v1")
@@ -190,14 +201,13 @@ app.include_router(user_management_router, prefix="/api/v1")
 # ── Notification router ─────────────────────────────────
 app.include_router(notifications_router,prefix="/api/v1")  
 # Serve demo page
-from fastapi.responses import FileResponse
-from pathlib import Path
 
 @app.get("/demo", include_in_schema=False)
 async def demo_page():
     """Serve the reroute live demo page."""
     demo_path = Path(__file__).parent.parent / "demo.html"
     return FileResponse(str(demo_path))
+
 
 # Root endpoints
 @app.get(

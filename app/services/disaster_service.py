@@ -90,8 +90,12 @@ class DisasterService:
                     COUNT(*) FILTER (WHERE severity = CAST('CRITICAL' AS disaster_severity) AND disaster_status = CAST('ACTIVE' AS disaster_status)) as critical_count,
                     COUNT(*) FILTER (WHERE disaster_status = CAST('ACTIVE' AS disaster_status)) as active_count,
                     COUNT(*) FILTER (WHERE disaster_status = CAST('RESOLVED' AS disaster_status)) as resolved_count,
+
                     COUNT(*) FILTER (WHERE disaster_status = CAST('MONITORING' AS disaster_status)) as monitoring_count,
                     COUNT(*) FILTER (WHERE disaster_status = CAST('ARCHIVED' AS disaster_status)) as archived_count
+
+                    
+
                 FROM disasters WHERE deleted_at IS NULL
             """)
             count_result = await self.db.execute(count_sql)
@@ -140,7 +144,8 @@ class DisasterService:
                     "active": counts["active_count"],
                     "resolved": counts["resolved_count"],
                     "monitoring": counts["monitoring_count"],
-                    "archived": counts["archived_count"],
+                    "archived": counts["archived_count"]
+
                 },
             }
 
