@@ -1,495 +1,243 @@
-# File: app/services/disaster_service.py
+# File: app/services/blob_service.py
 """
-Disaster Service - Business logic for disaster management.
+Azure Blob Storage service for uploading disaster media.
 
-FIXES APPLIED:
-  - units_assigned: COUNT(DISTINCT unit_id) + JOIN emergency_units + deleted_at checks
-  - get_disaster: returns deployed_units array (unit IDs only)
-  - resolve_disaster: auto-completes all active deployments + resets units to AVAILABLE
+Uses:
+  - ASYNC Azure SDK (non-blocking)
+  - PRIVATE container (no public access)
+  - SAS URLs for secure, time-limited access to files
+
+Workflow:
+  1. Upload file to private Azure Blob container
+  2. Generate SAS URL with 24-hour expiry
+  3. Return SAS URL — frontend uses this to display images
+  4. SAS URL expires after 24 hours — regenerate if needed
 """
 
+import uuid
 import logging
-from datetime import datetime
-from typing import Dict, Any, List
+from datetime import datetime, timezone, timedelta
+from typing import List
+from urllib.parse import quote
 
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import text
-from fastapi import HTTPException, status
-from app.services.blob_service import refresh_sas_url
-from app.services.rabbitmq_service import publish_disaster_updated, publish_disaster_resolved  
+from azure.storage.blob.aio import BlobServiceClient as AsyncBlobServiceClient
+from azure.storage.blob import (
+    ContentSettings,
+    generate_blob_sas,
+    BlobSasPermissions,
+)
+from fastapi import UploadFile, HTTPException, status
+
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-VALID_DEPARTMENTS = ["FIRE", "IT", "MEDICAL", "POLICE"]
+# Allowed file types
+ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
+ALLOWED_VIDEO_TYPES = {"video/mp4", "video/quicktime", "video/x-msvideo"}
+ALLOWED_MIME_TYPES = ALLOWED_IMAGE_TYPES | ALLOWED_VIDEO_TYPES
+
+MAX_FILE_SIZE_MB = 50
+MAX_FILES_PER_REPORT = 10
+
+# SAS URL expiry time
+SAS_EXPIRY_HOURS = 24
 
 
-class DisasterService:
-    """Service layer for disaster management operations."""
+def _get_account_name_and_key():
+    """Extract account name and key from connection string."""
+    conn_str = settings.AZURE_STORAGE_CONNECTION_STRING
+    parts = dict(part.split("=", 1) for part in conn_str.split(";") if "=" in part)
+    return parts.get("AccountName"), parts.get("AccountKey")
 
-    def __init__(self, db: AsyncSession):
-        self.db = db
 
-    # ──────────────────────────────────────────────
-    # LIST: Disasters by status (admin panel)
-    # ──────────────────────────────────────────────
-    async def list_disasters(
-        self,
-        disaster_status: str = None,
-        severity: str = None,
-        disaster_type: str = None,
-        limit: int = 50,
-    ) -> Dict[str, Any]:
-        """List disasters with filters."""
-        try:
-            conditions = ["d.deleted_at IS NULL"]
-            params = {"limit": limit}
+def _generate_sas_url(blob_name: str, account_name: str, account_key: str) -> str:
+    """
+    Generate a SAS URL for a blob with read-only access.
+    
+    SAS = Shared Access Signature
+    - Grants temporary, read-only access to a private blob
+    - Expires after SAS_EXPIRY_HOURS (default 24 hours)
+    - No need to make container public
+    """
+    sas_token = generate_blob_sas(
+        account_name=account_name,
+        container_name=settings.AZURE_CONTAINER_NAME,
+        blob_name=blob_name,
+        account_key=account_key,
+        permission=BlobSasPermissions(read=True),
+        expiry=datetime.now(timezone.utc) + timedelta(hours=SAS_EXPIRY_HOURS),
+    )
 
-            if disaster_status:
-                conditions.append("d.disaster_status = CAST(:disaster_status AS disaster_status)")
-                params["disaster_status"] = disaster_status.upper()
-            if severity:
-                conditions.append("d.severity = CAST(:severity AS disaster_severity)")
-                params["severity"] = severity.upper()
-            if disaster_type:
-                conditions.append("d.type = CAST(:disaster_type AS disaster_type)")
-                params["disaster_type"] = disaster_type.upper()
+    sas_url = (
+        f"https://{account_name}.blob.core.windows.net/"
+        f"{settings.AZURE_CONTAINER_NAME}/{quote(blob_name)}?{sas_token}"
+    )
 
-            where_clause = " AND ".join(conditions)
+    return sas_url
 
-            sql = text(f"""
-                SELECT
-                    d.id, d.tracking_id, d.type, d.severity, d.disaster_status,
-                    d.description, d.location_address,
-                    ST_Y(d.location::geometry) as latitude,
-                    ST_X(d.location::geometry) as longitude,
-                    d.people_affected, d.multiple_casualties,
-                    d.structural_damage, d.road_blocked,
-                    d.assigned_department, d.created_at,
-                    d.response_time, d.resolved_time,
-                    (SELECT COUNT(*) FROM disaster_reports r WHERE r.disaster_id = d.id) as report_count,
-                    (SELECT COUNT(DISTINCT dep.unit_id) FROM deployments dep JOIN emergency_units eu ON dep.unit_id = eu.id WHERE dep.disaster_id = d.id AND dep.deployment_status NOT IN ('COMPLETED', 'CANCELLED') AND dep.deleted_at IS NULL AND eu.deleted_at IS NULL) as units_assigned
-                FROM disasters d
-                WHERE {where_clause}
-                ORDER BY
-                    CASE d.severity
-                        WHEN CAST('CRITICAL' AS disaster_severity) THEN 1
-                        WHEN CAST('HIGH' AS disaster_severity) THEN 2
-                        WHEN CAST('MEDIUM' AS disaster_severity) THEN 3
-                        WHEN CAST('LOW' AS disaster_severity) THEN 4
-                        ELSE 5
-                    END,
-                    d.created_at DESC
-                LIMIT :limit
-            """)
 
-            result = await self.db.execute(sql, params)
-            rows = result.mappings().all()
+def refresh_sas_url(stored_url: str, refresh_threshold_hours: int = 2) -> str:
+    """
+    Return a fresh SAS URL only if the existing one expires within
+    refresh_threshold_hours (default 2 hours). Otherwise return as-is.
 
-            count_sql = text("""
-                SELECT
-                    COUNT(*) FILTER (WHERE severity = CAST('CRITICAL' AS disaster_severity) AND disaster_status = CAST('ACTIVE' AS disaster_status)) as critical_count,
-                    COUNT(*) FILTER (WHERE disaster_status = CAST('ACTIVE' AS disaster_status)) as active_count,
-                    COUNT(*) FILTER (WHERE disaster_status = CAST('RESOLVED' AS disaster_status)) as resolved_count,
-                    COUNT(*) FILTER (WHERE disaster_status = CAST('MONITORING' AS disaster_status)) as monitoring_count,
-                    COUNT(*) FILTER (WHERE disaster_status = CAST('ARCHIVED' AS disaster_status)) as archived_count
-                FROM disasters WHERE deleted_at IS NULL
-            """)
-            count_result = await self.db.execute(count_sql)
-            counts = count_result.mappings().first()
+    Logic:
+      - Parse the 'se' (signed expiry) query param from the stored URL
+      - If expiry > now + threshold → still valid, return original
+      - If expiry <= now + threshold → regenerate fresh SAS URL
+      - If URL has no 'se' param (not a SAS URL) → return original unchanged
+    """
+    try:
+        from urllib.parse import urlparse, unquote, parse_qs
+        from datetime import timezone
 
-            disasters = []
-            for row in rows:
-                # Fetch deployed unit IDs for this disaster
-                uid_sql = text("""
-                    SELECT DISTINCT dep.unit_id
-                    FROM deployments dep
-                    JOIN emergency_units eu ON dep.unit_id = eu.id
-                    WHERE dep.disaster_id = :did
-                      AND dep.deployment_status NOT IN ('COMPLETED', 'CANCELLED')
-                      AND dep.deleted_at IS NULL
-                      AND eu.deleted_at IS NULL
-                """)
-                uid_result = await self.db.execute(uid_sql, {"did": str(row["id"])})
-                deployed_unit_ids = [str(u["unit_id"]) for u in uid_result.mappings().all()]
+        parsed = urlparse(stored_url)
+        qs = parse_qs(parsed.query)
 
-                disasters.append({
-                    "id": str(row["id"]),
-                    "tracking_id": str(row["tracking_id"]),
-                    "type": str(row["type"]),
-                    "severity": str(row["severity"]),
-                    "disaster_status": str(row["disaster_status"]),
-                    "description": row["description"],
-                    "location": {
-                        "lat": float(row["latitude"]) if row["latitude"] else None,
-                        "lon": float(row["longitude"]) if row["longitude"] else None,
-                    },
-                    "location_address": row["location_address"],
-                    "people_affected": row["people_affected"],
-                    "units_assigned": row["units_assigned"],
-                    "deployed_units": deployed_unit_ids,
-                    "report_count": row["report_count"],
-                    "created_at": row["created_at"].isoformat() if row["created_at"] else None,
-                    "time_ago": self._time_ago(row["created_at"]) if row["created_at"] else None,
-                })
+        # Not a SAS URL — return as-is
+        if 'se' not in qs:
+            return stored_url
 
-            return {
-                "disasters": disasters,
-                "count": len(disasters),
-                "summary": {
-                    "critical": counts["critical_count"],
-                    "active": counts["active_count"],
-                    "resolved": counts["resolved_count"],
-                    "monitoring": counts["monitoring_count"],
-                    "archived": counts["archived_count"],
-                },
-            }
+        # Parse expiry from SAS token — format: 2026-03-23T10%3A30%3A00Z
+        expiry_str = qs['se'][0]
+        expiry_dt = datetime.fromisoformat(expiry_str.replace('Z', '+00:00'))
+        threshold_dt = datetime.now(timezone.utc) + timedelta(hours=refresh_threshold_hours)
 
-        except Exception as e:
-            logger.exception(f"Error listing disasters: {e}")
-            raise HTTPException(status_code=500, detail=f"Failed to list disasters: {str(e)}")
+        # Still valid with comfortable margin — return original
+        if expiry_dt > threshold_dt:
+            return stored_url
 
-    def _time_ago(self, dt: datetime) -> str:
-        if not dt:
-            return None
-        now = datetime.utcnow()
-        diff = now - dt.replace(tzinfo=None) if dt.tzinfo else now - dt
-        minutes = int(diff.total_seconds() / 60)
-        if minutes < 1:
-            return "Just now"
-        elif minutes < 60:
-            return f"{minutes} mins ago"
-        elif minutes < 1440:
-            return f"{minutes // 60} hours ago"
-        else:
-            return f"{minutes // 1440} days ago"
+        # Expiring soon or already expired — regenerate
+        account_name, account_key = _get_account_name_and_key()
+        container = settings.AZURE_CONTAINER_NAME
+        path = unquote(parsed.path)
+        prefix = f"/{container}/"
+        if prefix not in path:
+            return stored_url
+        blob_name = path.split(prefix, 1)[1]
+        new_url = _generate_sas_url(blob_name, account_name, account_key)
+        logger.info(f"refresh_sas_url: refreshed expiring SAS for {blob_name[:40]}...")
+        return new_url
 
-    # ──────────────────────────────────────────────
-    # ASSIGN: Assign team + department to disaster
-    # ──────────────────────────────────────────────
-    async def assign_disaster(self, disaster_id: str, assigned_to_id: str, assigned_department: str) -> Dict[str, Any]:
-        logger.info(f"Assigning disaster {disaster_id} to {assigned_to_id} ({assigned_department})")
-        try:
-            if assigned_department.upper() not in VALID_DEPARTMENTS:
-                raise HTTPException(status_code=400, detail=f"Invalid department. Must be one of: {', '.join(VALID_DEPARTMENTS)}")
+    except Exception as e:
+        logger.warning(f"refresh_sas_url: could not refresh — returning original. Error: {e}")
+        return stored_url
 
-            check_sql = text("SELECT id, disaster_status, tracking_id FROM disasters WHERE id = :disaster_id AND deleted_at IS NULL")
-            result = await self.db.execute(check_sql, {"disaster_id": disaster_id})
-            disaster = result.mappings().first()
-            if not disaster:
-                raise HTTPException(status_code=404, detail="Disaster not found.")
-            if str(disaster["disaster_status"]) != "ACTIVE":
-                raise HTTPException(status_code=400, detail=f"Can only assign to ACTIVE disasters. Current status: {disaster['disaster_status']}")
 
-            team_sql = text("SELECT id, full_name, department FROM emergency_teams WHERE id = :team_id AND deleted_at IS NULL")
-            team_result = await self.db.execute(team_sql, {"team_id": assigned_to_id})
-            team = team_result.mappings().first()
-            if not team:
-                raise HTTPException(status_code=404, detail="Emergency team member not found.")
+async def upload_single_file(file: UploadFile) -> dict:
+    """
+    Upload one file to Azure Blob Storage (async, private container).
 
-            now = datetime.utcnow()
-            await self.db.execute(text("""
-                UPDATE disasters SET assigned_to_id = :assigned_to_id, assigned_department = CAST(:assigned_department AS department), updated_at = :updated_at WHERE id = :disaster_id
-            """), {"disaster_id": disaster_id, "assigned_to_id": assigned_to_id, "assigned_department": assigned_department.upper(), "updated_at": now})
-            await self.db.flush()
+    Returns:
+        dict with image_url (SAS URL), file_size, mime_type, original_filename
+    """
+    # Validate mime type
+    if file.content_type not in ALLOWED_MIME_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"File type '{file.content_type}' not allowed. "
+                   f"Allowed types: {', '.join(ALLOWED_MIME_TYPES)}"
+        )
 
-            return {
-                "disaster_id": disaster_id, "tracking_id": str(disaster["tracking_id"]),
-                "assigned_to_id": assigned_to_id, "assigned_to_name": team["full_name"],
-                "assigned_department": assigned_department.upper(), "assigned_at": now.isoformat(),
-                "message": f"Disaster assigned to {team['full_name']} ({assigned_department.upper()})",
-            }
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.exception(f"Error assigning disaster: {e}")
-            raise HTTPException(status_code=500, detail=f"Failed to assign disaster: {str(e)}")
+    # Read file content FIRST (before any DB/network operations)
+    content = await file.read()
+    file_size = len(content)
 
-    # ──────────────────────────────────────────────
-    # RESPOND: Record response time
-    # ──────────────────────────────────────────────
-    async def respond_disaster(self, disaster_id: str, response_notes: str = None) -> Dict[str, Any]:
-        logger.info(f"Recording response time for disaster {disaster_id}")
-        try:
-            check_sql = text("SELECT id, disaster_status, tracking_id, assigned_to_id, assigned_department, response_time FROM disasters WHERE id = :disaster_id AND deleted_at IS NULL")
-            result = await self.db.execute(check_sql, {"disaster_id": disaster_id})
-            disaster = result.mappings().first()
-            if not disaster:
-                raise HTTPException(status_code=404, detail="Disaster not found.")
-            if str(disaster["disaster_status"]) != "ACTIVE":
-                raise HTTPException(status_code=400, detail=f"Can only respond to ACTIVE disasters. Current status: {disaster['disaster_status']}")
-            if not disaster["assigned_to_id"]:
-                raise HTTPException(status_code=400, detail="Disaster must be assigned before recording response time.")
-            if disaster["response_time"]:
-                raise HTTPException(status_code=400, detail=f"Response time already recorded: {disaster['response_time']}")
+    if file_size > MAX_FILE_SIZE_MB * 1024 * 1024:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"File size exceeds {MAX_FILE_SIZE_MB}MB limit."
+        )
 
-            now = datetime.utcnow()
-            await self.db.execute(text("UPDATE disasters SET response_time = :response_time, updated_at = :updated_at WHERE id = :disaster_id"), {"disaster_id": disaster_id, "response_time": now, "updated_at": now})
-            await self.db.flush()
+    # Generate unique blob path: year/month/day/uuid_filename
+    now = datetime.now(timezone.utc)
+    blob_name = (
+        f"{now.year}/{now.month:02d}/{now.day:02d}/"
+        f"{uuid.uuid4()}_{file.filename}"
+    )
 
-            return {
-                "disaster_id": disaster_id, "tracking_id": str(disaster["tracking_id"]),
-                "response_time": now.isoformat(), "assigned_department": str(disaster["assigned_department"]),
-                "message": f"Response time recorded for disaster {disaster['tracking_id']}",
-                "_pending_event": ("disaster.updated", {"disaster_id": disaster_id, "tracking_id": str(disaster["tracking_id"]), "update_type": "response_recorded", "details": f"Emergency team arrived on scene at {now.isoformat()}"}),
-            }
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.exception(f"Error recording response: {e}")
-            raise HTTPException(status_code=500, detail=f"Failed to record response time: {str(e)}")
+    try:
+        # Upload to private container using async SDK
+        async with AsyncBlobServiceClient.from_connection_string(
+            settings.AZURE_STORAGE_CONNECTION_STRING
+        ) as blob_service_client:
+            blob_client = blob_service_client.get_blob_client(
+                container=settings.AZURE_CONTAINER_NAME,
+                blob=blob_name
+            )
 
-    # ──────────────────────────────────────────────
-    # RESOLVE: Mark disaster as resolved
-    # ──────────────────────────────────────────────
-    async def resolve_disaster(self, disaster_id: str, resolution_notes: str) -> Dict[str, Any]:
-        """Mark disaster as resolved. Auto-completes all active deployments and frees units."""
-        logger.info(f"Resolving disaster {disaster_id}")
-        try:
-            check_sql = text("SELECT id, disaster_status, tracking_id, assigned_to_id FROM disasters WHERE id = :disaster_id AND deleted_at IS NULL")
-            result = await self.db.execute(check_sql, {"disaster_id": disaster_id})
-            disaster = result.mappings().first()
-            if not disaster:
-                raise HTTPException(status_code=404, detail="Disaster not found.")
-            if str(disaster["disaster_status"]) == "RESOLVED":
-                raise HTTPException(status_code=400, detail="Disaster is already resolved.")
+            await blob_client.upload_blob(
+                content,
+                overwrite=True,
+                content_settings=ContentSettings(content_type=file.content_type),
+            )
 
-            now = datetime.utcnow()
+        # Generate SAS URL for secure access
+        account_name, account_key = _get_account_name_and_key()
+        sas_url = _generate_sas_url(blob_name, account_name, account_key)
 
-            # Resolve the disaster
-            await self.db.execute(text("""
-                UPDATE disasters
-                SET disaster_status = CAST(:disaster_status AS disaster_status),
-                    resolved_time = :resolved_time, resolution_notes = :resolution_notes, updated_at = :updated_at
-                WHERE id = :disaster_id
-            """), {"disaster_id": disaster_id, "disaster_status": "RESOLVED", "resolved_time": now, "resolution_notes": resolution_notes, "updated_at": now})
+        logger.info(f"Uploaded file to blob: {blob_name} ({file_size} bytes) — SAS URL generated")
 
-            # FIX: Auto-complete all active deployments for this disaster
-            await self.db.execute(text("""
-                UPDATE deployments
-                SET deployment_status = 'COMPLETED',
-                    completed_at = :now,
-                    assessment_notes = COALESCE(assessment_notes || ' | ', '') || 'Auto-completed: disaster resolved',
-                    updated_at = :now
-                WHERE disaster_id = :disaster_id
-                  AND deployment_status NOT IN ('COMPLETED', 'CANCELLED')
-                  AND deleted_at IS NULL
-            """), {"disaster_id": disaster_id, "now": now})
+        return {
+            "image_url": sas_url,
+            "blob_name": blob_name,
+            "file_size": file_size,
+            "mime_type": file.content_type,
+            "original_filename": file.filename,
+        }
 
-            # FIX: Reset all deployed units back to AVAILABLE
-            await self.db.execute(text("""
-                UPDATE emergency_units
-                SET unit_status = CAST('AVAILABLE' AS unit_status),
-                    updated_at = :now
-                WHERE id IN (
-                    SELECT unit_id FROM deployments
-                    WHERE disaster_id = :disaster_id AND deleted_at IS NULL
-                )
-                AND unit_status != CAST('AVAILABLE' AS unit_status)
-                AND deleted_at IS NULL
-            """), {"disaster_id": disaster_id, "now": now})
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Blob upload failed: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to upload file to storage: {str(e)}"
+        )
 
-            await self.db.flush()
-            logger.info(f"Disaster {disaster_id} RESOLVED — all deployments completed, units freed")
 
-            return {
-                "disaster_id": disaster_id, "tracking_id": str(disaster["tracking_id"]),
-                "disaster_status": "RESOLVED", "resolved_time": now.isoformat(),
-                "resolution_notes": resolution_notes,
-                "message": f"Disaster {disaster['tracking_id']} has been resolved. All active deployments completed and units freed.",
-                "_pending_event": ("disaster.resolved", {"disaster_id": disaster_id, "tracking_id": str(disaster["tracking_id"]), "resolution_notes": resolution_notes, "resolved_time": now.isoformat()}),
-            }
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.exception(f"Error resolving disaster: {e}")
-            raise HTTPException(status_code=500, detail=f"Failed to resolve disaster: {str(e)}")
+async def upload_multiple_files(files: List[UploadFile]) -> dict:
+    """
+    Upload a batch of files. ALL files share one reference_id.
 
-    # ──────────────────────────────────────────────
-    # ESCALATE: Update disaster severity
-    # ──────────────────────────────────────────────
-    async def escalate_disaster(self, disaster_id: str, new_severity: str, reason: str = None) -> Dict[str, Any]:
-        try:
-            check_sql = text("SELECT id, tracking_id, severity, disaster_status FROM disasters WHERE id = :disaster_id AND deleted_at IS NULL")
-            result = await self.db.execute(check_sql, {"disaster_id": disaster_id})
-            disaster = result.mappings().first()
-            if not disaster:
-                raise HTTPException(status_code=404, detail="Disaster not found.")
-            if str(disaster["disaster_status"]) == "RESOLVED":
-                raise HTTPException(status_code=400, detail="Cannot escalate a resolved disaster.")
+    Returns:
+        dict with uploaded_files list (each with SAS URL) and shared reference_id
+    """
+    if len(files) > MAX_FILES_PER_REPORT:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Maximum {MAX_FILES_PER_REPORT} files per report."
+        )
 
-            now = datetime.utcnow()
-            await self.db.execute(text("UPDATE disasters SET severity = CAST(:severity AS disaster_severity), updated_at = :updated_at WHERE id = :disaster_id"), {"disaster_id": disaster_id, "severity": new_severity.upper(), "updated_at": now})
-            await self.db.flush()
+    if not files:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No files provided."
+        )
 
-            return {
-                "disaster_id": disaster_id, "tracking_id": str(disaster["tracking_id"]),
-                "previous_severity": str(disaster["severity"]), "new_severity": new_severity.upper(),
-                "reason": reason, "message": f"Disaster {disaster['tracking_id']} escalated to {new_severity.upper()}",
-                "_pending_event": ("disaster.updated", {"disaster_id": disaster_id, "tracking_id": str(disaster["tracking_id"]), "update_type": "severity_escalated", "details": f"Severity changed from {disaster['severity']} to {new_severity.upper()}. Reason: {reason or 'N/A'}"}),
-            }
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.exception(f"Error escalating disaster: {e}")
-            raise HTTPException(status_code=500, detail=f"Failed to escalate: {str(e)}")
+    # One reference_id for the entire batch
+    reference_id = str(uuid.uuid4())
 
-    # ──────────────────────────────────────────────
-    # GET: Photos for a disaster
-    # ──────────────────────────────────────────────
-    async def get_disaster_photos(self, disaster_id: str) -> List[Dict[str, Any]]:
-        try:
-            sql = text("""
-                SELECT p.id, p.image_url, p.caption, p.file_size, p.mime_type,
-                       p.disaster_report_id, p.reference_id, p.created_at,
-                       r.user_id, r.location_address as report_address
-                FROM disaster_photos p
-                JOIN disaster_reports r ON p.disaster_report_id = r.id
-                WHERE r.disaster_id = :disaster_id AND p.deleted_at IS NULL
-                ORDER BY p.created_at ASC
-            """)
-            result = await self.db.execute(sql, {"disaster_id": disaster_id})
-            rows = result.mappings().all()
+    uploaded_files = []
+    for file in files:
+        result = await upload_single_file(file)
+        uploaded_files.append(result)
 
-            return [{
-                "id": str(row["id"]),
-                "image_url": refresh_sas_url(row["image_url"]) if row["image_url"] else None,
-                "caption": row["caption"], "file_size": row["file_size"], "mime_type": row["mime_type"],
-                "report_id": str(row["disaster_report_id"]), "uploaded_by": str(row["user_id"]),
-                "report_address": row["report_address"],
-                "created_at": row["created_at"].isoformat() if row["created_at"] else None,
-            } for row in rows]
-        except Exception as e:
-            logger.exception(f"Error fetching disaster photos: {e}")
-            raise HTTPException(status_code=500, detail=f"Failed to fetch photos: {str(e)}")
+    logger.info(f"Batch upload complete: {len(uploaded_files)} files, reference_id={reference_id}")
 
-    # ──────────────────────────────────────────────
-    # GET: Deployment summary for a disaster
-    # ──────────────────────────────────────────────
-    async def get_disaster_deployments(self, disaster_id: str) -> Dict[str, Any]:
-        try:
-            sql = text("""
-                SELECT dep.id as deployment_id, dep.deployment_status,
-                       dep.dispatched_at, dep.arrived_at, dep.completed_at,
-                       dep.priority_level, dep.situation_report,
-                       dep.minor_injuries, dep.serious_injuries,
-                       eu.id as unit_id, eu.unit_code, eu.unit_name,
-                       eu.unit_type, eu.department, eu.unit_status
-                FROM deployments dep
-                JOIN emergency_units eu ON dep.unit_id = eu.id
-                WHERE dep.disaster_id = :disaster_id AND dep.deleted_at IS NULL
-                ORDER BY dep.dispatched_at ASC
-            """)
-            result = await self.db.execute(sql, {"disaster_id": disaster_id})
-            rows = result.mappings().all()
+    return {
+        "uploaded_files": uploaded_files,
+        "reference_id": reference_id,
+    }
 
-            deployments = [{
-                "deployment_id": str(row["deployment_id"]),
-                "deployment_status": row["deployment_status"],
-                "priority_level": row["priority_level"],
-                "dispatched_at": row["dispatched_at"].isoformat() if row["dispatched_at"] else None,
-                "arrived_at": row["arrived_at"].isoformat() if row["arrived_at"] else None,
-                "completed_at": row["completed_at"].isoformat() if row["completed_at"] else None,
-                "situation_report": row["situation_report"],
-                "casualties": {"minor": row["minor_injuries"] or 0, "serious": row["serious_injuries"] or 0},
-                "unit": {
-                    "id": str(row["unit_id"]), "unit_code": str(row["unit_code"]),
-                    "unit_name": str(row["unit_name"]), "unit_type": str(row["unit_type"]),
-                    "department": str(row["department"]), "current_status": str(row["unit_status"]),
-                },
-            } for row in rows]
 
-            total = len(deployments)
-            return {
-                "disaster_id": disaster_id, "deployments": deployments, "total_units": total,
-                "summary": {
-                    "dispatched": sum(1 for d in deployments if d["deployment_status"] == "DISPATCHED"),
-                    "en_route": sum(1 for d in deployments if d["deployment_status"] == "EN_ROUTE"),
-                    "on_scene": sum(1 for d in deployments if d["deployment_status"] in ("ON_SCENE", "IN_PROGRESS")),
-                    "completed": sum(1 for d in deployments if d["deployment_status"] == "COMPLETED"),
-                },
-            }
-        except Exception as e:
-            logger.exception(f"Error fetching deployments: {e}")
-            raise HTTPException(status_code=500, detail=f"Failed to fetch deployments: {str(e)}")
-
-    # ──────────────────────────────────────────────
-    # GET: Single disaster by ID (with deployed unit IDs)
-    # ──────────────────────────────────────────────
-    async def get_disaster(self, disaster_id: str) -> Dict[str, Any]:
-        """Get full disaster details including currently deployed unit IDs."""
-        try:
-            sql = text("""
-                SELECT
-                    d.id, d.tracking_id, d.type, d.severity, d.disaster_status,
-                    ST_Y(d.location::geometry) as latitude, ST_X(d.location::geometry) as longitude,
-                    d.location_address, d.affected_area, d.description, d.people_affected,
-                    d.multiple_casualties, d.structural_damage, d.road_blocked,
-                    d.assigned_to_id, d.assigned_department,
-                    d.response_time, d.resolved_time, d.resolution_notes,
-                    d.created_by_id, d.disaster_metadata, d.created_at, d.updated_at,
-                    et.full_name as assigned_to_name, et.phone_number as assigned_to_phone,
-                    (SELECT COUNT(*) FROM disaster_reports r WHERE r.disaster_id = d.id) as report_count
-                FROM disasters d
-                LEFT JOIN emergency_teams et ON d.assigned_to_id = et.id
-                WHERE d.id = :disaster_id AND d.deleted_at IS NULL
-            """)
-            result = await self.db.execute(sql, {"disaster_id": disaster_id})
-            row = result.mappings().first()
-
-            if not row:
-                raise HTTPException(status_code=404, detail="Disaster not found.")
-
-            # Fetch active deployed unit IDs (distinct, only existing units)
-            units_sql = text("""
-                SELECT DISTINCT dep.unit_id
-                FROM deployments dep
-                JOIN emergency_units eu ON dep.unit_id = eu.id
-                WHERE dep.disaster_id = :disaster_id
-                  AND dep.deployment_status NOT IN ('COMPLETED', 'CANCELLED')
-                  AND dep.deleted_at IS NULL
-                  AND eu.deleted_at IS NULL
-            """)
-            units_result = await self.db.execute(units_sql, {"disaster_id": disaster_id})
-            deployed_units = [str(u["unit_id"]) for u in units_result.mappings().all()]
-
-            return {
-                "id": str(row["id"]),
-                "tracking_id": str(row["tracking_id"]),
-                "type": str(row["type"]),
-                "severity": str(row["severity"]),
-                "disaster_status": str(row["disaster_status"]),
-                "location": {
-                    "lat": float(row["latitude"]) if row["latitude"] else None,
-                    "lon": float(row["longitude"]) if row["longitude"] else None,
-                },
-                "location_address": row["location_address"],
-                "affected_area": row["affected_area"],
-                "description": row["description"],
-                "people_affected": row["people_affected"],
-                "multiple_casualties": row["multiple_casualties"],
-                "structural_damage": row["structural_damage"],
-                "road_blocked": row["road_blocked"],
-                "assignment": {
-                    "assigned_to_id": str(row["assigned_to_id"]) if row["assigned_to_id"] else None,
-                    "assigned_to_name": row["assigned_to_name"],
-                    "assigned_to_phone": row["assigned_to_phone"],
-                    "assigned_department": str(row["assigned_department"]) if row["assigned_department"] else None,
-                },
-                "timeline": {
-                    "created_at": row["created_at"].isoformat() if row["created_at"] else None,
-                    "response_time": row["response_time"].isoformat() if row["response_time"] else None,
-                    "resolved_time": row["resolved_time"].isoformat() if row["resolved_time"] else None,
-                },
-                "resolution_notes": row["resolution_notes"],
-                "created_by_id": str(row["created_by_id"]) if row["created_by_id"] else None,
-                "report_count": row["report_count"] or 0,
-                "units_assigned": len(deployed_units),
-                "deployed_units": deployed_units,
-                "disaster_metadata": row["disaster_metadata"],
-            }
-
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.exception(f"Error fetching disaster: {e}")
-            raise HTTPException(status_code=500, detail=f"Failed to fetch disaster: {str(e)}")
+async def regenerate_sas_url(blob_name: str) -> str:
+    """
+    Regenerate a SAS URL for an existing blob.
+    
+    Use when the old SAS URL has expired (after 24 hours).
+    Frontend can call this to get a fresh URL.
+    """
+    account_name, account_key = _get_account_name_and_key()
+    return _generate_sas_url(blob_name, account_name, account_key)
