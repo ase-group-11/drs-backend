@@ -13,7 +13,7 @@ stays free of raw SQL and is fully testable by mocking this class.
 import json
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import text
@@ -93,8 +93,8 @@ class EvacuationRepository:
                 text("SELECT id, full_name, phone_number FROM users "
                      "WHERE deleted_at IS NULL LIMIT 500")
             )
-            rows      = result.mappings().all()
-            first     = zones[0] if zones else {}
+            rows  = result.mappings().all()
+            first = zones[0] if zones else {}
             return [
                 {**dict(u),
                  "zone_id":   first.get("zone_id", ""),
@@ -131,7 +131,10 @@ class EvacuationRepository:
         auto_approved: bool,
     ) -> str:
         plan_id = str(uuid.uuid4())
-        now     = datetime.utcnow()
+
+        # created_at / updated_at are TIMESTAMP WITH TIME ZONE (base model columns)
+        now_aware = datetime.now(tz=timezone.utc)
+
         # Store road names (strings) not full segment dicts
         road_names = [s.get("road_name", "") for s in blocked_roads]
 
@@ -145,27 +148,29 @@ class EvacuationRepository:
                     auto_approved, created_at, updated_at
                 ) VALUES (
                     :id, :ref, :did,
-                    CASE WHEN :auto THEN 'APPROVED' ELSE 'PENDING' END,
+                    CASE WHEN :auto_status THEN 'APPROVED' ELSE 'PENDING' END,
                     :zones, :pop, :roads, :traffic,
                     :shelters, :routes, :transport, :alloc, :metrics,
-                    :auto, :now, :now
+                    :auto_flag, :created_at, :updated_at
                 )
             """),
             {
-                "id":       plan_id,
-                "ref":      plan_ref,
-                "did":      disaster_id,
-                "zones":    json.dumps(impact_zones),
-                "pop":      json.dumps(population_stats),
-                "roads":    json.dumps(road_names),
-                "traffic":  json.dumps(traffic_snapshot),
-                "shelters": json.dumps(shelters_with_capacity),
-                "routes":   json.dumps(best_routes_per_zone),
-                "transport":json.dumps(transport_plan),
-                "alloc":    json.dumps(allocations),
-                "metrics":  json.dumps({}),
-                "auto":     auto_approved,
-                "now":      now,
+                "id":          plan_id,
+                "ref":         plan_ref,
+                "did":         disaster_id,
+                "auto_status": auto_approved,   # used in CASE WHEN
+                "auto_flag":   auto_approved,   # stored in auto_approved column
+                "zones":       json.dumps(impact_zones),
+                "pop":         json.dumps(population_stats),
+                "roads":       json.dumps(road_names),
+                "traffic":     json.dumps(traffic_snapshot),
+                "shelters":    json.dumps(shelters_with_capacity),
+                "routes":      json.dumps(best_routes_per_zone),
+                "transport":   json.dumps(transport_plan),
+                "alloc":       json.dumps(allocations),
+                "metrics":     json.dumps({}),
+                "created_at":  now_aware,
+                "updated_at":  now_aware,
             },
         )
         await self.db.flush()
@@ -194,18 +199,26 @@ class EvacuationRepository:
         """
         Generic column updater. Callers pass keyword args matching column names.
         JSON-serialises dict/list values automatically.
+
+        updated_at is TIMESTAMP WITH TIME ZONE — use aware datetime.
+        All other timestamp fields (approved_at, activated_at, completed_at)
+        are TIMESTAMP WITHOUT TIME ZONE — callers pass naive datetimes for those.
         """
         if not fields:
             return True
 
         set_clauses = []
-        params: Dict[str, Any] = {"pid": plan_id, "now": datetime.utcnow()}
+        # updated_at is WITH TIME ZONE on the base model
+        params: Dict[str, Any] = {
+            "pid":        plan_id,
+            "updated_at": datetime.now(tz=timezone.utc),
+        }
 
         for col, val in fields.items():
             set_clauses.append(f"{col} = :{col}")
             params[col] = json.dumps(val) if isinstance(val, (dict, list)) else val
 
-        set_clauses.append("updated_at = :now")
+        set_clauses.append("updated_at = :updated_at")
         sql = f"UPDATE evacuation_plans SET {', '.join(set_clauses)} WHERE id = :pid"
 
         await self.db.execute(text(sql), params)
@@ -255,14 +268,15 @@ class EvacuationRepository:
     @staticmethod
     def _deserialise(row: Dict) -> Dict:
         """Parse JSONB string columns back into Python objects."""
-        JSON_COLS = {
-            "impact_zones", "population_stats", "blocked_roads", "traffic_snapshot",
-            "shelters_with_capacity", "best_routes_per_zone", "transport_plan",
-            "allocations", "completion_metrics",
+        json_cols = {
+            "impact_zones", "population_stats", "blocked_roads",
+            "traffic_snapshot", "shelters_with_capacity",
+            "best_routes_per_zone", "transport_plan", "allocations",
+            "completion_metrics",
         }
-        out: Dict[str, Any] = {}
+        out = {}
         for k, v in row.items():
-            if k in JSON_COLS and isinstance(v, str):
+            if k in json_cols and isinstance(v, str):
                 try:
                     out[k] = json.loads(v)
                 except (json.JSONDecodeError, TypeError):

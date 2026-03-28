@@ -1,56 +1,79 @@
 # File: app/api/v1/user_management.py
 """
-User Management API — Combined CRUD for Citizens + Emergency Team.
+User Management API — Admin CRUD for Citizens + Emergency Team
 
-Also handles team member listing for unit creation:
-  - Filter by department / unit_type
-  - Show assignment status
-  - Department mapping for unit types
+Combined view of both user types (citizens from `users` table,
+ERT members from `emergency_teams` table) in a single router.
 
-This replaces the separate emergency_team_list.py file.
+Also serves as the team member picker for unit creation:
+  - Filter by department or unit_type (auto-mapped)
+  - Show assignment status (which units they're already on)
+  - exclude_assigned=true hides members already in a unit
+
+Auth: all endpoints require emergency team Bearer token (admin role).
+
+Unit type → department mapping:
+  FIRE_ENGINE / RESCUE / HAZMAT → FIRE
+  AMBULANCE / RAPID_RESPONSE    → MEDICAL
+  PATROL_CAR                    → POLICE
+  COMMAND                       → IT
 """
 
-from fastapi import APIRouter, Depends, Query, HTTPException, status
-from sqlalchemy.ext.asyncio import AsyncSession
-from pydantic import BaseModel, Field, field_validator
-from typing import Optional, Dict, Any, List
-
-from app.db.session import get_db
-from app.auth.dependencies import get_current_team_member
-from sqlalchemy import text
-
 import logging
+from typing import Any, Dict, List, Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel, Field, field_validator
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.auth.dependencies import get_current_team_member
+from app.db.session import get_db
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/users", tags=["User Management"])
 
 
-# ── Unit Type → Department Mapping ──
-UNIT_TYPE_TO_DEPARTMENT = {
-    "FIRE_ENGINE": "FIRE",
-    "AMBULANCE": "MEDICAL",
-    "PATROL_CAR": "POLICE",
-    "RESCUE": "FIRE",
-    "HAZMAT": "FIRE",
+# ─────────────────────────────────────────────────────────────────────────────
+# Constants
+# ─────────────────────────────────────────────────────────────────────────────
+
+UNIT_TYPE_TO_DEPARTMENT: Dict[str, str] = {
+    "FIRE_ENGINE":    "FIRE",
+    "RESCUE":         "FIRE",
+    "HAZMAT":         "FIRE",
+    "AMBULANCE":      "MEDICAL",
     "RAPID_RESPONSE": "MEDICAL",
-    "COMMAND": "IT",
+    "PATROL_CAR":     "POLICE",
+    "COMMAND":        "IT",
 }
 
 
-class UpdateUserRequest(BaseModel):
-    """
-    Merged update schema — handles profile fields AND status in one request.
+# ─────────────────────────────────────────────────────────────────────────────
+# Request schemas
+# ─────────────────────────────────────────────────────────────────────────────
 
-    All fields are optional. Provide only what you want to change.
-    - full_name, email, phone_number  → profile fields
-    - status                          → ACTIVE, INACTIVE, SUSPENDED, PENDING, DELETED
-    - reason                          → optional note for status change
-    """
-    full_name: Optional[str] = Field(None, description="Full name", min_length=2, max_length=255)
-    email: Optional[str] = Field(None, description="Email address")
-    phone_number: Optional[str] = Field(None, description="Phone number in E.164 format (+353...)")
-    status: Optional[str] = Field(None, description="New status: ACTIVE, INACTIVE, SUSPENDED, PENDING, DELETED")
-    reason: Optional[str] = Field(None, description="Optional reason for status change")
+class CreateUserRequest(BaseModel):
+    """Body for POST /users/ — create a citizen or team member"""
+    user_type:    str           = Field(..., description="citizen | team")
+    full_name:    str           = Field(..., min_length=2, max_length=255)
+    email:        str           = Field(...)
+    phone_number: str           = Field(..., description="E.164 format e.g. +353861234567")
+    # Team member fields (required when user_type=team)
+    password:     Optional[str] = Field(None, description="Required for team members")
+    role:         Optional[str] = Field(None, description="ADMIN | MANAGER | STAFF — team only")
+    department:   Optional[str] = Field(None, description="FIRE | MEDICAL | POLICE | IT — team only")
+    employee_id:  Optional[str] = Field(None, description="Employee ID — team only")
+
+
+class UpdateUserRequest(BaseModel):
+    """Body for PUT /users/{user_id} — update profile fields and/or status"""
+    full_name:    Optional[str] = Field(None, min_length=2, max_length=255)
+    email:        Optional[str] = Field(None)
+    phone_number: Optional[str] = Field(None, description="E.164 format")
+    status:       Optional[str] = Field(None, description="ACTIVE | INACTIVE | SUSPENDED | PENDING | DELETED")
+    reason:       Optional[str] = Field(None, description="Optional note recorded in audit log")
 
     @field_validator("email")
     @classmethod
@@ -62,514 +85,299 @@ class UpdateUserRequest(BaseModel):
             raise ValueError("Invalid email format")
         return v.lower()
 
-    @field_validator("phone_number")
-    @classmethod
-    def validate_phone_number(cls, v: Optional[str]) -> Optional[str]:
-        if v is None:
-            return v
-        import re
-        if not re.match(r'^\+[1-9]\d{7,14}$', v):
-            raise ValueError("Phone number must be in E.164 format (e.g., +353851234567)")
-        return v
 
-    @field_validator("status")
-    @classmethod
-    def validate_status(cls, v: Optional[str]) -> Optional[str]:
-        if v is None:
-            return v
-        valid = ("ACTIVE", "INACTIVE", "SUSPENDED", "PENDING", "DELETED")
-        if v.upper() not in valid:
-            raise ValueError(f"Status must be one of: {', '.join(valid)}")
-        return v.upper()
-
-    model_config = {
-        "json_schema_extra": {
-            "examples": [
-                {
-                    "full_name": "Jane Smith",
-                    "email": "jane.smith@dublin-fire.ie",
-                    "phone_number": "+353851234567",
-                    "status": "ACTIVE",
-                    "reason": "Profile correction"
-                }
-            ]
-        }
-    }
-
-
-class CreateCitizenRequest(BaseModel):
-    phone_number: str = Field(..., description="Phone number (E.164 format: +353851234567)")
-    full_name: str = Field(..., description="Full name")
-    email: Optional[str] = Field(None, description="Email address")
-
-
-class CreateTeamMemberRequest(BaseModel):
-    phone_number: str = Field(..., description="Phone number (E.164 format: +353851234567)")
-    full_name: str = Field(..., description="Full name")
-    email: str = Field(..., description="Email address (used for login)")
-    password: str = Field(..., description="Password (min 8 chars)")
-    role: str = Field("STAFF", description="Role: ADMIN, MANAGER, STAFF")
-    department: str = Field(..., description="Department: FIRE, MEDICAL, POLICE, IT")
-    employee_id: Optional[str] = Field(None, description="Employee ID")
-
-
-class CreateUserRequest(BaseModel):
-    user_type: str = Field(..., description="'citizen' or 'team'")
-    phone_number: str = Field(..., description="Phone number")
-    full_name: str = Field(..., description="Full name")
-    email: Optional[str] = Field(None, description="Email (required for team)")
-    password: Optional[str] = Field(None, description="Password (required for team)")
-    role: Optional[str] = Field(None, description="Team role: ADMIN, MANAGER, STAFF")
-    department: Optional[str] = Field(None, description="Team department: FIRE, MEDICAL, POLICE, IT")
-    employee_id: Optional[str] = Field(None, description="Employee ID (team only)")
-
-
-# ══════════════════════════════════════════════
-# STATIC ROUTES FIRST
-# ══════════════════════════════════════════════
-
-@router.get(
-    "/department-map",
-    summary="Unit type to department mapping",
-    description="Frontend uses this to auto-select department when admin picks unit type during unit creation."
-)
-async def get_department_map(
-    current_user: Dict[str, Any] = Depends(get_current_team_member),
-):
-    return {
-        "unit_type_to_department": UNIT_TYPE_TO_DEPARTMENT,
-        "departments": ["FIRE", "MEDICAL", "POLICE", "IT"],
-        "unit_types": list(UNIT_TYPE_TO_DEPARTMENT.keys()),
-    }
-
-
-# ══════════════════════════════════════════════
-# CREATE: New user (citizen or team member)
-# ══════════════════════════════════════════════
-
-@router.post(
-    "/",
-    status_code=status.HTTP_201_CREATED,
-    summary="Create a new user (citizen or team member)",
-    description=(
-        "Creates a citizen or emergency team member directly. "
-        "Bypasses OTP flow — used by admin to add users. "
-        "For team members: email, password, role, and department are required."
-    )
-)
-async def create_user(
-    data: CreateUserRequest,
-    db: AsyncSession = Depends(get_db),
-    current_user: Dict[str, Any] = Depends(get_current_team_member),
-):
-    try:
-        import uuid
-        from datetime import datetime
-        from argon2 import PasswordHasher
-
-        now = datetime.utcnow()
-        user_id = str(uuid.uuid4())
-
-        if data.user_type == "citizen":
-            check = await db.execute(
-                text("SELECT id FROM users WHERE phone_number = :phone AND deleted_at IS NULL"),
-                {"phone": data.phone_number}
-            )
-            if check.first():
-                raise HTTPException(status_code=400, detail=f"Phone number {data.phone_number} already registered.")
-
-            if data.email:
-                check = await db.execute(
-                    text("SELECT id FROM users WHERE email = :email AND deleted_at IS NULL"),
-                    {"email": data.email}
-                )
-                if check.first():
-                    raise HTTPException(status_code=400, detail=f"Email {data.email} already registered.")
-
-            await db.execute(text("""
-                INSERT INTO users (id, created_at, updated_at, phone_number, full_name, email, role, status)
-                VALUES (:id, :now, :now, :phone, :name, :email,
-                        CAST('RESIDENT' AS user_role), CAST('ACTIVE' AS user_status))
-            """), {
-                "id": user_id, "now": now,
-                "phone": data.phone_number,
-                "name": data.full_name,
-                "email": data.email,
-            })
-            await db.flush()
-            return {
-                "id": user_id,
-                "full_name": data.full_name,
-                "email": data.email,
-                "phone_number": data.phone_number,
-                "user_type": "citizen",
-                "role": "RESIDENT",
-                "status": "ACTIVE",
-                "message": f"Citizen {data.full_name} created successfully.",
-            }
-
-        elif data.user_type == "team":
-            if not data.email:
-                raise HTTPException(status_code=400, detail="Email is required for team members.")
-            if not data.password:
-                raise HTTPException(status_code=400, detail="Password is required for team members.")
-            if not data.department:
-                raise HTTPException(status_code=400, detail="Department is required for team members.")
-            if len(data.password) < 8:
-                raise HTTPException(status_code=400, detail="Password must be at least 8 characters.")
-
-            role = (data.role or "STAFF").upper()
-            department = data.department.upper()
-
-            if role not in ("ADMIN", "MANAGER", "STAFF"):
-                raise HTTPException(status_code=400, detail="Role must be ADMIN, MANAGER, or STAFF.")
-            if department not in ("FIRE", "MEDICAL", "POLICE", "IT"):
-                raise HTTPException(status_code=400, detail="Department must be FIRE, MEDICAL, POLICE, or IT.")
-
-            check = await db.execute(
-                text("SELECT id FROM emergency_teams WHERE phone_number = :phone AND deleted_at IS NULL"),
-                {"phone": data.phone_number}
-            )
-            if check.first():
-                raise HTTPException(status_code=400, detail=f"Phone number {data.phone_number} already registered.")
-
-            check = await db.execute(
-                text("SELECT id FROM emergency_teams WHERE email = :email AND deleted_at IS NULL"),
-                {"email": data.email}
-            )
-            if check.first():
-                raise HTTPException(status_code=400, detail=f"Email {data.email} already registered.")
-
-            if data.employee_id:
-                check = await db.execute(
-                    text("SELECT id FROM emergency_teams WHERE employee_id = :emp_id AND deleted_at IS NULL"),
-                    {"emp_id": data.employee_id}
-                )
-                if check.first():
-                    raise HTTPException(status_code=400, detail=f"Employee ID {data.employee_id} already exists.")
-
-            ph = PasswordHasher()
-            password_hash = ph.hash(data.password)
-
-            await db.execute(text("""
-                INSERT INTO emergency_teams
-                    (id, created_at, updated_at, phone_number, password_hash,
-                     full_name, email, employee_id, role, department, status)
-                VALUES (:id, :now, :now, :phone, :pw,
-                        :name, :email, :emp_id,
-                        CAST(:role AS emergency_team_role),
-                        CAST(:dept AS department),
-                        CAST('ACTIVE' AS user_status))
-            """), {
-                "id": user_id, "now": now,
-                "phone": data.phone_number,
-                "pw": password_hash,
-                "name": data.full_name,
-                "email": data.email,
-                "emp_id": data.employee_id,
-                "role": role,
-                "dept": department,
-            })
-            await db.flush()
-            return {
-                "id": user_id,
-                "full_name": data.full_name,
-                "email": data.email,
-                "phone_number": data.phone_number,
-                "user_type": "team",
-                "role": role,
-                "department": department,
-                "employee_id": data.employee_id,
-                "status": "ACTIVE",
-                "message": f"Team member {data.full_name} ({role}/{department}) created successfully.",
-            }
-
-        else:
-            raise HTTPException(status_code=400, detail="user_type must be 'citizen' or 'team'.")
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception(f"Error creating user: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to create user: {str(e)[:200]}")
-
-
-# ══════════════════════════════════════════════
-# LIST: All users (combined citizens + team)
-# ══════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────────────────────
+# Endpoints
+# ─────────────────────────────────────────────────────────────────────────────
 
 @router.get(
     "/",
-    summary="List all users (citizens + emergency team)",
-    description=(
-        "Combined view of all users. Filters: user_type, department, role, status, search. "
-        "For unit creation: use unit_type param to auto-filter by department, "
-        "and exclude_assigned=true to hide members already in units."
-    )
+    summary="List all users — citizens and ERT members combined",
 )
 async def list_all_users(
-    user_type: Optional[str] = Query(None, description="Filter: 'citizen' or 'team'"),
-    department: Optional[str] = Query(None, description="Filter team by department: FIRE, MEDICAL, POLICE, IT"),
-    unit_type: Optional[str] = Query(None, description="Auto-map to department: FIRE_ENGINE → FIRE (for unit creation)"),
-    role: Optional[str] = Query(None, description="Filter team by role: ADMIN, MANAGER, STAFF"),
-    status_filter: Optional[str] = Query(None, alias="status", description="Filter: ACTIVE, INACTIVE, SUSPENDED"),
-    search: Optional[str] = Query(None, description="Search by name, email, phone, or employee ID"),
-    exclude_assigned: bool = Query(False, description="Exclude team members already assigned to a unit"),
+    user_type:        Optional[str] = Query(None, description="Filter: citizen | team"),
+    department:       Optional[str] = Query(None, description="Filter team by department: FIRE | MEDICAL | POLICE | IT"),
+    unit_type:        Optional[str] = Query(None, description="Auto-maps to department (for unit creation picker)"),
+    role:             Optional[str] = Query(None, description="Filter team by role: ADMIN | MANAGER | STAFF"),
+    status_filter:    Optional[str] = Query(None, alias="status", description="ACTIVE | INACTIVE | SUSPENDED"),
+    search:           Optional[str] = Query(None, description="Search name, email, phone, or employee ID"),
+    exclude_assigned: bool          = Query(False, description="Exclude team members already assigned to a unit"),
     limit: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
     current_user: Dict[str, Any] = Depends(get_current_team_member),
 ):
+    """
+    Combined list of citizens and ERT members.
+
+    Primary use cases:
+      1. Admin user list — filter by user_type, status, or search term
+      2. Unit creation crew picker — use unit_type to auto-filter by department,
+         and exclude_assigned=true to hide members already in units
+
+    Returns a summary breakdown (citizens / team / active / inactive) and
+    a by-department count for team members.
+    Requires: emergency team Bearer token.
+    """
     try:
+        # Auto-map unit_type → department for the crew picker flow
         effective_department = department
         if unit_type and not department:
             effective_department = UNIT_TYPE_TO_DEPARTMENT.get(unit_type.upper())
 
-        results = []
+        results: List[Dict] = []
 
+        # ── Citizens ──────────────────────────────────────────────────────────
         if user_type is None or user_type == "citizen":
             if not effective_department and not role and not exclude_assigned:
-                citizen_where = ["u.email IS NOT NULL"]
-                citizen_params = {"limit": limit}
+                citizen_where  = ["u.email IS NOT NULL"]
+                citizen_params: Dict[str, Any] = {"limit": limit}
 
                 if status_filter:
                     citizen_where.append("u.status = CAST(:status AS user_status)")
                     citizen_params["status"] = status_filter.upper()
-
                 if search:
-                    citizen_where.append("(u.full_name ILIKE :search OR u.email ILIKE :search OR u.phone_number ILIKE :search)")
+                    citizen_where.append(
+                        "(u.full_name ILIKE :search OR u.email ILIKE :search OR u.phone_number ILIKE :search)"
+                    )
                     citizen_params["search"] = f"%{search}%"
 
                 citizen_sql = text(f"""
-                    SELECT
-                        u.id, u.full_name, u.email, u.phone_number,
-                        u.role, u.status, u.created_at,
-                        'citizen' as user_type,
-                        NULL as department, NULL as employee_id,
-                        (SELECT COUNT(*) FROM disaster_reports dr WHERE dr.user_id = u.id AND dr.deleted_at IS NULL) as reports_count
+                    SELECT u.id, u.full_name, u.email, u.phone_number,
+                           u.role, u.status, u.created_at,
+                           'citizen' AS user_type,
+                           NULL AS department, NULL AS employee_id,
+                           0 AS reviews_count,
+                           FALSE AS is_assigned,
+                           0 AS assigned_units_count,
+                           0 AS commanding_units_count,
+                           ARRAY[]::text[] AS current_unit_codes
                     FROM users u
                     WHERE {' AND '.join(citizen_where)}
                     ORDER BY u.created_at DESC
                     LIMIT :limit
                 """)
-
-                result = await db.execute(citizen_sql, citizen_params)
-                for row in result.mappings().all():
+                citizen_rows = await db.execute(citizen_sql, citizen_params)
+                for row in citizen_rows.mappings().all():
                     results.append({
-                        "id": str(row["id"]),
-                        "full_name": row["full_name"],
-                        "email": row["email"],
+                        "id":           str(row["id"]),
+                        "full_name":    row["full_name"],
+                        "email":        row["email"],
                         "phone_number": row["phone_number"],
-                        "role": str(row["role"]),
-                        "status": str(row["status"]),
-                        "user_type": "citizen",
-                        "department": None,
-                        "employee_id": None,
-                        "reports_count": row["reports_count"] or 0,
-                        "is_assigned": False,
-                        "assigned_units_count": 0,
-                        "commanding_units_count": 0,
+                        "role":         str(row["role"]) if row["role"] else None,
+                        "status":       str(row["status"]),
+                        "user_type":    "citizen",
+                        "department":   None,
+                        "employee_id":  None,
+                        "stats": {
+                            "reviews_count":         0,
+                            "assigned_units_count":  0,
+                            "commanding_units_count":0,
+                        },
                         "current_unit_codes": [],
                         "created_at": row["created_at"].isoformat() if row["created_at"] else None,
                     })
 
+        # ── Team members ──────────────────────────────────────────────────────
         if user_type is None or user_type == "team":
-            team_where = ["et.email IS NOT NULL"]
-            team_params = {"limit": limit}
-
-            if status_filter:
-                team_where.append("et.status = CAST(:status AS user_status)")
-                team_params["status"] = status_filter.upper()
+            team_where  = ["et.deleted_at IS NULL"]
+            team_params: Dict[str, Any] = {"limit": limit}
 
             if effective_department:
-                team_where.append("et.department = CAST(:department AS department)")
-                team_params["department"] = effective_department.upper()
-
+                team_where.append("et.department = CAST(:dept AS department)")
+                team_params["dept"] = effective_department.upper()
             if role:
                 team_where.append("et.role = CAST(:role AS emergency_team_role)")
                 team_params["role"] = role.upper()
-
+            if status_filter:
+                team_where.append("et.status = CAST(:status AS user_status)")
+                team_params["status"] = status_filter.upper()
             if search:
-                team_where.append("(et.full_name ILIKE :search OR et.email ILIKE :search OR et.phone_number ILIKE :search OR et.employee_id ILIKE :search)")
+                team_where.append(
+                    "(et.full_name ILIKE :search OR et.email ILIKE :search "
+                    "OR et.phone_number ILIKE :search OR et.employee_id ILIKE :search)"
+                )
                 team_params["search"] = f"%{search}%"
+            if exclude_assigned:
+                team_where.append(
+                    "NOT EXISTS (SELECT 1 FROM unit_crew uc "
+                    "JOIN emergency_units eu ON uc.unit_id = eu.id "
+                    "WHERE uc.team_member_id = et.id AND eu.deleted_at IS NULL)"
+                )
 
             team_sql = text(f"""
-                SELECT
-                    et.id, et.full_name, et.email, et.phone_number,
-                    et.role, et.status, et.department, et.employee_id,
-                    et.created_at,
-                    'team' as user_type,
-                    (SELECT COUNT(*) FROM disaster_reports dr WHERE dr.reviewed_by_id = et.id) as reviews_count,
-                    (SELECT COUNT(*) FROM unit_crew uc WHERE uc.team_member_id = et.id) as assigned_units_count,
-                    (SELECT COUNT(*) FROM emergency_units eu WHERE eu.commander_id = et.id AND eu.deleted_at IS NULL) as commanding_units_count,
-                    (SELECT ARRAY_AGG(eu.unit_code) FROM unit_crew uc
-                     JOIN emergency_units eu ON uc.unit_id = eu.id
-                     WHERE uc.team_member_id = et.id AND eu.deleted_at IS NULL) as current_unit_codes
+                SELECT et.id, et.full_name, et.email, et.phone_number,
+                       et.role, et.status, et.department, et.employee_id, et.created_at,
+                       COUNT(DISTINCT dr.id) AS reviews_count,
+                       COUNT(DISTINCT uc.unit_id) AS assigned_units_count,
+                       COUNT(DISTINCT eu_cmd.id) AS commanding_units_count,
+                       COALESCE(
+                           ARRAY_AGG(DISTINCT eu.unit_code) FILTER (WHERE eu.unit_code IS NOT NULL),
+                           ARRAY[]::text[]
+                       ) AS current_unit_codes,
+                       'team' AS user_type
                 FROM emergency_teams et
+                LEFT JOIN disaster_reports dr ON dr.reviewed_by_id = et.id
+                LEFT JOIN unit_crew uc ON uc.team_member_id = et.id
+                LEFT JOIN emergency_units eu ON uc.unit_id = eu.id AND eu.deleted_at IS NULL
+                LEFT JOIN emergency_units eu_cmd ON eu_cmd.commander_id = et.id AND eu_cmd.deleted_at IS NULL
                 WHERE {' AND '.join(team_where)}
-                ORDER BY et.department, et.role, et.full_name
+                GROUP BY et.id, et.full_name, et.email, et.phone_number,
+                         et.role, et.status, et.department, et.employee_id, et.created_at
+                ORDER BY et.full_name ASC
                 LIMIT :limit
             """)
-
-            result = await db.execute(team_sql, team_params)
-            for row in result.mappings().all():
-                is_assigned = (row["assigned_units_count"] or 0) > 0
-                if exclude_assigned and is_assigned:
-                    continue
+            team_rows = await db.execute(team_sql, team_params)
+            for row in team_rows.mappings().all():
+                is_assigned = int(row["assigned_units_count"] or 0) > 0
                 results.append({
-                    "id": str(row["id"]),
-                    "full_name": row["full_name"],
-                    "email": row["email"],
+                    "id":           str(row["id"]),
+                    "full_name":    row["full_name"],
+                    "email":        row["email"],
                     "phone_number": row["phone_number"],
-                    "role": str(row["role"]),
-                    "status": str(row["status"]),
-                    "user_type": "team",
-                    "department": str(row["department"]),
-                    "employee_id": row["employee_id"],
-                    "reviews_count": row["reviews_count"] or 0,
-                    "is_assigned": is_assigned,
-                    "assigned_units_count": row["assigned_units_count"] or 0,
-                    "commanding_units_count": row["commanding_units_count"] or 0,
-                    "current_unit_codes": row["current_unit_codes"] or [],
+                    "role":         str(row["role"]),
+                    "status":       str(row["status"]),
+                    "user_type":    "team",
+                    "department":   str(row["department"]),
+                    "employee_id":  row["employee_id"],
+                    "stats": {
+                        "reviews_count":         int(row["reviews_count"] or 0),
+                        "assigned_units_count":  int(row["assigned_units_count"] or 0),
+                        "commanding_units_count":int(row["commanding_units_count"] or 0),
+                    },
+                    "is_assigned":       is_assigned,
+                    "current_unit_codes":row["current_unit_codes"] or [],
                     "created_at": row["created_at"].isoformat() if row["created_at"] else None,
                 })
 
         citizens = [u for u in results if u["user_type"] == "citizen"]
-        team = [u for u in results if u["user_type"] == "team"]
+        team     = [u for u in results if u["user_type"] == "team"]
 
         return {
-            "users": results,
+            "users":       results,
             "total_count": len(results),
             "summary": {
-                "citizens": len(citizens),
-                "team_members": len(team),
-                "active": sum(1 for u in results if u["status"] == "ACTIVE"),
-                "inactive": sum(1 for u in results if u["status"] != "ACTIVE"),
+                "citizens":  len(citizens),
+                "team":      len(team),
+                "active":    sum(1 for u in results if u["status"] == "ACTIVE"),
+                "inactive":  sum(1 for u in results if u["status"] != "ACTIVE"),
             },
             "by_department": {
                 dept: sum(1 for u in team if u["department"] == dept)
                 for dept in set(u["department"] for u in team if u["department"])
             },
-            "filtered_by": {
-                "user_type": user_type,
-                "department": effective_department,
-                "unit_type": unit_type,
-                "role": role,
-                "search": search,
+            "filters_applied": {
+                "user_type":        user_type,
+                "department":       effective_department,
+                "unit_type":        unit_type,
+                "role":             role,
+                "search":           search,
                 "exclude_assigned": exclude_assigned,
             },
         }
 
-    except Exception as e:
-        logger.exception(f"Error listing users: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to list users: {str(e)[:200]}")
+    except Exception as exc:
+        logger.exception(f"list_all_users failed")
+        raise HTTPException(status_code=500, detail=f"Failed to list users: {str(exc)[:200]}")
 
-
-# ══════════════════════════════════════════════
-# GET: Single user (auto-detect citizen or team)
-# ══════════════════════════════════════════════
 
 @router.get(
     "/{user_id}",
-    summary="Get user details",
-    description="Get details for any user. Auto-detects if citizen or team member. Returns stats."
+    summary="Get user details — auto-detects citizen or team member",
 )
 async def get_user(
     user_id: str,
     db: AsyncSession = Depends(get_db),
     current_user: Dict[str, Any] = Depends(get_current_team_member),
 ):
+    """
+    Returns full profile for a single user.
+    Checks `users` table first, then `emergency_teams` — caller doesn't
+    need to know which table the user belongs to.
+    Includes stats (reviews, unit assignments) for team members.
+    Requires: emergency team Bearer token.
+    """
     try:
-        citizen_sql = text("""
-            SELECT
-                u.id, u.full_name, u.email, u.phone_number,
-                u.role, u.status, u.created_at, u.updated_at,
-                (SELECT COUNT(*) FROM disaster_reports dr WHERE dr.user_id = u.id AND dr.deleted_at IS NULL) as reports_count,
-                (SELECT COUNT(*) FROM disaster_reports dr WHERE dr.user_id = u.id AND dr.report_status = CAST('VERIFIED' AS disaster_report_status)) as verified_reports,
-                (SELECT COUNT(*) FROM disaster_reports dr WHERE dr.user_id = u.id AND dr.report_status = CAST('REJECTED' AS disaster_report_status)) as rejected_reports
-            FROM users u
-            WHERE u.id = :user_id AND u.deleted_at IS NULL
-        """)
-        result = await db.execute(citizen_sql, {"user_id": user_id})
-        row = result.mappings().first()
-
-        if row:
+        # ── Try citizens first ────────────────────────────────────────────────
+        citizen_result = await db.execute(
+            text("""
+                SELECT id, full_name, email, phone_number, role, status, created_at, updated_at
+                FROM users WHERE id = :uid AND deleted_at IS NULL
+            """),
+            {"uid": user_id},
+        )
+        citizen = citizen_result.mappings().first()
+        if citizen:
             return {
-                "id": str(row["id"]),
-                "full_name": row["full_name"],
-                "email": row["email"],
-                "phone_number": row["phone_number"],
-                "role": str(row["role"]),
-                "status": str(row["status"]),
-                "user_type": "citizen",
-                "department": None,
-                "employee_id": None,
-                "stats": {
-                    "total_reports": row["reports_count"] or 0,
-                    "verified_reports": row["verified_reports"] or 0,
-                    "rejected_reports": row["rejected_reports"] or 0,
-                },
-                "created_at": row["created_at"].isoformat() if row["created_at"] else None,
-                "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
+                "id":           str(citizen["id"]),
+                "full_name":    citizen["full_name"],
+                "email":        citizen["email"],
+                "phone_number": citizen["phone_number"],
+                "role":         str(citizen["role"]) if citizen["role"] else None,
+                "status":       str(citizen["status"]),
+                "user_type":    "citizen",
+                "created_at":   citizen["created_at"].isoformat() if citizen["created_at"] else None,
+                "updated_at":   citizen["updated_at"].isoformat() if citizen["updated_at"] else None,
             }
 
-        team_sql = text("""
-            SELECT
-                et.id, et.full_name, et.email, et.phone_number,
-                et.role, et.status, et.department, et.employee_id,
-                et.created_at, et.updated_at,
-                (SELECT COUNT(*) FROM disaster_reports dr WHERE dr.reviewed_by_id = et.id) as reviews_count,
-                (SELECT COUNT(*) FROM unit_crew uc WHERE uc.team_member_id = et.id) as assigned_units,
-                (SELECT COUNT(*) FROM emergency_units eu WHERE eu.commander_id = et.id AND eu.deleted_at IS NULL) as commanding_units,
-                (SELECT ARRAY_AGG(eu.unit_code) FROM unit_crew uc
-                 JOIN emergency_units eu ON uc.unit_id = eu.id
-                 WHERE uc.team_member_id = et.id AND eu.deleted_at IS NULL) as unit_codes
-            FROM emergency_teams et
-            WHERE et.id = :user_id AND et.deleted_at IS NULL
-        """)
-        result = await db.execute(team_sql, {"user_id": user_id})
-        row = result.mappings().first()
-
-        if row:
+        # ── Try team members ──────────────────────────────────────────────────
+        team_result = await db.execute(
+            text("""
+                SELECT et.id, et.full_name, et.email, et.phone_number,
+                       et.role, et.status, et.department, et.employee_id,
+                       et.created_at, et.updated_at,
+                       COUNT(DISTINCT dr.id) AS reviews_count,
+                       COUNT(DISTINCT uc.unit_id) AS assigned_units,
+                       COUNT(DISTINCT eu_cmd.id) AS commanding_units,
+                       COALESCE(
+                           ARRAY_AGG(DISTINCT eu.unit_code) FILTER (WHERE eu.unit_code IS NOT NULL),
+                           ARRAY[]::text[]
+                       ) AS unit_codes
+                FROM emergency_teams et
+                LEFT JOIN disaster_reports dr ON dr.reviewed_by_id = et.id
+                LEFT JOIN unit_crew uc ON uc.team_member_id = et.id
+                LEFT JOIN emergency_units eu ON uc.unit_id = eu.id AND eu.deleted_at IS NULL
+                LEFT JOIN emergency_units eu_cmd ON eu_cmd.commander_id = et.id AND eu_cmd.deleted_at IS NULL
+                WHERE et.id = :uid AND et.deleted_at IS NULL
+                GROUP BY et.id, et.full_name, et.email, et.phone_number,
+                         et.role, et.status, et.department, et.employee_id,
+                         et.created_at, et.updated_at
+            """),
+            {"uid": user_id},
+        )
+        team = team_result.mappings().first()
+        if team:
             return {
-                "id": str(row["id"]),
-                "full_name": row["full_name"],
-                "email": row["email"],
-                "phone_number": row["phone_number"],
-                "role": str(row["role"]),
-                "status": str(row["status"]),
-                "user_type": "team",
-                "department": str(row["department"]),
-                "employee_id": row["employee_id"],
+                "id":           str(team["id"]),
+                "full_name":    team["full_name"],
+                "email":        team["email"],
+                "phone_number": team["phone_number"],
+                "role":         str(team["role"]),
+                "status":       str(team["status"]),
+                "user_type":    "team",
+                "department":   str(team["department"]),
+                "employee_id":  team["employee_id"],
                 "stats": {
-                    "reviews_count": row["reviews_count"] or 0,
-                    "assigned_units": row["assigned_units"] or 0,
-                    "commanding_units": row["commanding_units"] or 0,
+                    "reviews_count":  int(team["reviews_count"] or 0),
+                    "assigned_units": int(team["assigned_units"] or 0),
+                    "commanding_units": int(team["commanding_units"] or 0),
                 },
-                "unit_codes": row["unit_codes"] or [],
-                "created_at": row["created_at"].isoformat() if row["created_at"] else None,
-                "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
+                "unit_codes": team["unit_codes"] or [],
+                "created_at": team["created_at"].isoformat() if team["created_at"] else None,
+                "updated_at": team["updated_at"].isoformat() if team["updated_at"] else None,
             }
 
         raise HTTPException(status_code=404, detail="User not found.")
 
     except HTTPException:
         raise
-    except Exception as e:
-        logger.exception(f"Error fetching user: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to fetch user: {str(e)[:200]}")
+    except Exception as exc:
+        logger.exception(f"get_user failed")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch user: {str(exc)[:200]}")
 
-
-# ══════════════════════════════════════════════
-# UPDATE: User — profile fields + status (merged)
-# ══════════════════════════════════════════════
 
 @router.put(
     "/{user_id}",
-    summary="Update user",
-    description=(
-        "Update any combination of full_name, email, phone_number, and/or status "
-        "for a citizen or team member. All fields are optional — only provided fields are changed."
-    )
+    summary="Update user profile and/or status",
 )
 async def update_user(
     user_id: str,
@@ -577,20 +385,28 @@ async def update_user(
     db: AsyncSession = Depends(get_db),
     current_user: Dict[str, Any] = Depends(get_current_team_member),
 ):
-    try:
-        from datetime import datetime
-        now = datetime.utcnow()
+    """
+    Updates any combination of full_name, email, phone_number, and/or status
+    for a citizen or ERT team member. Auto-detects which table to update.
+    Only non-null fields in the request body are applied.
+    Duplicate email / phone validation is enforced per table.
+    Requires: emergency team Bearer token.
+    """
+    from datetime import datetime
 
-        if all(v is None for v in [data.full_name, data.email, data.phone_number, data.status]):
-            raise HTTPException(
-                status_code=400,
-                detail="Provide at least one field: full_name, email, phone_number, or status."
-            )
+    if all(v is None for v in [data.full_name, data.email, data.phone_number, data.status]):
+        raise HTTPException(
+            status_code=400,
+            detail="Provide at least one field to update: full_name, email, phone_number, or status.",
+        )
+
+    try:
+        now = datetime.utcnow()
 
         # ── Try citizens table first ──────────────────────────────────────────
         result = await db.execute(
-            text("SELECT id, full_name, email, phone_number, role, status FROM users WHERE id = :id AND deleted_at IS NULL"),
-            {"id": user_id}
+            text("SELECT id, full_name, email, phone_number, status FROM users WHERE id = :id AND deleted_at IS NULL"),
+            {"id": user_id},
         )
         user = result.mappings().first()
 
@@ -598,69 +414,37 @@ async def update_user(
             if data.email:
                 dup = await db.execute(
                     text("SELECT id FROM users WHERE email = :email AND id != :id AND deleted_at IS NULL"),
-                    {"email": data.email, "id": user_id}
+                    {"email": data.email, "id": user_id},
                 )
                 if dup.first():
                     raise HTTPException(status_code=400, detail=f"Email {data.email} is already in use.")
-
             if data.phone_number:
                 dup = await db.execute(
                     text("SELECT id FROM users WHERE phone_number = :phone AND id != :id AND deleted_at IS NULL"),
-                    {"phone": data.phone_number, "id": user_id}
+                    {"phone": data.phone_number, "id": user_id},
                 )
                 if dup.first():
-                    raise HTTPException(status_code=400, detail=f"Phone number {data.phone_number} is already in use.")
+                    raise HTTPException(status_code=400, detail=f"Phone {data.phone_number} is already in use.")
 
-            set_parts = ["updated_at = :updated_at"]
-            params: Dict[str, Any] = {"id": user_id, "updated_at": now}
+            set_clauses = ["updated_at = :now"]
+            params: Dict[str, Any] = {"id": user_id, "now": now}
+            if data.full_name:
+                set_clauses.append("full_name = :full_name"); params["full_name"] = data.full_name
+            if data.email:
+                set_clauses.append("email = :email"); params["email"] = data.email
+            if data.phone_number:
+                set_clauses.append("phone_number = :phone"); params["phone"] = data.phone_number
+            if data.status:
+                set_clauses.append("status = CAST(:status AS user_status)"); params["status"] = data.status.upper()
 
-            if data.full_name is not None:
-                set_parts.append("full_name = :full_name")
-                params["full_name"] = data.full_name
-
-            if data.email is not None:
-                set_parts.append("email = :email")
-                params["email"] = data.email
-
-            if data.phone_number is not None:
-                set_parts.append("phone_number = :phone_number")
-                params["phone_number"] = data.phone_number
-
-            if data.status is not None:
-                if data.status == "DELETED":
-                    set_parts.append("status = CAST(:status AS user_status)")
-                    set_parts.append("deleted_at = :now")
-                    params["status"] = data.status
-                    params["now"] = now
-                else:
-                    set_parts.append("status = CAST(:status AS user_status)")
-                    set_parts.append("deleted_at = NULL")
-                    params["status"] = data.status
-
-            await db.execute(
-                text(f"UPDATE users SET {', '.join(set_parts)} WHERE id = :id AND deleted_at IS NULL"),
-                params
-            )
+            await db.execute(text(f"UPDATE users SET {', '.join(set_clauses)} WHERE id = :id"), params)
             await db.flush()
+            return {"id": user_id, "user_type": "citizen", "message": "User updated successfully.", "updated_fields": list(params.keys() - {"id", "now"})}
 
-            updated_fields = [f for f in ["full_name", "email", "phone_number", "status"] if getattr(data, f) is not None]
-            return {
-                "id": user_id,
-                "user_type": "citizen",
-                "full_name": data.full_name or user["full_name"],
-                "email": data.email or user["email"],
-                "phone_number": data.phone_number or user["phone_number"],
-                "role": str(user["role"]),
-                "status": data.status or str(user["status"]),
-                "updated_fields": updated_fields,
-                "reason": data.reason,
-                "message": "User updated successfully.",
-            }
-
-        # ── Try emergency_teams table ─────────────────────────────────────────
+        # ── Try team members table ────────────────────────────────────────────
         result = await db.execute(
-            text("SELECT id, full_name, email, phone_number, role, department, status FROM emergency_teams WHERE id = :id AND deleted_at IS NULL"),
-            {"id": user_id}
+            text("SELECT id, full_name, email, phone_number, status FROM emergency_teams WHERE id = :id AND deleted_at IS NULL"),
+            {"id": user_id},
         )
         team = result.mappings().first()
 
@@ -668,132 +452,30 @@ async def update_user(
             if data.email:
                 dup = await db.execute(
                     text("SELECT id FROM emergency_teams WHERE email = :email AND id != :id AND deleted_at IS NULL"),
-                    {"email": data.email, "id": user_id}
+                    {"email": data.email, "id": user_id},
                 )
                 if dup.first():
                     raise HTTPException(status_code=400, detail=f"Email {data.email} is already in use.")
 
+            set_clauses = ["updated_at = :now"]
+            params = {"id": user_id, "now": now}
+            if data.full_name:
+                set_clauses.append("full_name = :full_name"); params["full_name"] = data.full_name
+            if data.email:
+                set_clauses.append("email = :email"); params["email"] = data.email
             if data.phone_number:
-                dup = await db.execute(
-                    text("SELECT id FROM emergency_teams WHERE phone_number = :phone AND id != :id AND deleted_at IS NULL"),
-                    {"phone": data.phone_number, "id": user_id}
-                )
-                if dup.first():
-                    raise HTTPException(status_code=400, detail=f"Phone number {data.phone_number} is already in use.")
+                set_clauses.append("phone_number = :phone"); params["phone"] = data.phone_number
+            if data.status:
+                set_clauses.append("status = CAST(:status AS user_status)"); params["status"] = data.status.upper()
 
-            set_parts = ["updated_at = :updated_at"]
-            params = {"id": user_id, "updated_at": now}
-
-            if data.full_name is not None:
-                set_parts.append("full_name = :full_name")
-                params["full_name"] = data.full_name
-
-            if data.email is not None:
-                set_parts.append("email = :email")
-                params["email"] = data.email
-
-            if data.phone_number is not None:
-                set_parts.append("phone_number = :phone_number")
-                params["phone_number"] = data.phone_number
-
-            if data.status is not None:
-                if data.status == "DELETED":
-                    set_parts.append("status = CAST(:status AS user_status)")
-                    set_parts.append("deleted_at = :now")
-                    params["status"] = data.status
-                    params["now"] = now
-                    await db.execute(text("DELETE FROM unit_crew WHERE team_member_id = :id"), {"id": user_id})
-                else:
-                    set_parts.append("status = CAST(:status AS user_status)")
-                    set_parts.append("deleted_at = NULL")
-                    params["status"] = data.status
-
-            await db.execute(
-                text(f"UPDATE emergency_teams SET {', '.join(set_parts)} WHERE id = :id AND deleted_at IS NULL"),
-                params
-            )
+            await db.execute(text(f"UPDATE emergency_teams SET {', '.join(set_clauses)} WHERE id = :id"), params)
             await db.flush()
-
-            updated_fields = [f for f in ["full_name", "email", "phone_number", "status"] if getattr(data, f) is not None]
-            return {
-                "id": user_id,
-                "user_type": "team",
-                "full_name": data.full_name or team["full_name"],
-                "email": data.email or team["email"],
-                "phone_number": data.phone_number or team["phone_number"],
-                "role": str(team["role"]),
-                "department": str(team["department"]),
-                "status": data.status or str(team["status"]),
-                "updated_fields": updated_fields,
-                "reason": data.reason,
-                "message": "User updated successfully.",
-            }
+            return {"id": user_id, "user_type": "team", "message": "Team member updated successfully.", "updated_fields": list(params.keys() - {"id", "now"})}
 
         raise HTTPException(status_code=404, detail="User not found.")
 
     except HTTPException:
         raise
-    except Exception as e:
-        logger.exception(f"Error updating user: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to update user: {str(e)[:200]}")
-
-
-# ══════════════════════════════════════════════
-# DELETE: Soft delete user
-# ══════════════════════════════════════════════
-
-@router.delete(
-    "/{user_id}",
-    summary="Soft delete user",
-    description="Soft delete any user. Blocks if team member is commanding units."
-)
-async def delete_user(
-    user_id: str,
-    db: AsyncSession = Depends(get_db),
-    current_user: Dict[str, Any] = Depends(get_current_team_member),
-):
-    try:
-        from datetime import datetime
-        now = datetime.utcnow()
-
-        result = await db.execute(
-            text("SELECT id, full_name FROM users WHERE id = :id AND deleted_at IS NULL"),
-            {"id": user_id}
-        )
-        user = result.mappings().first()
-
-        if user:
-            await db.execute(text("""
-                UPDATE users SET deleted_at = :now, status = CAST('DELETED' AS user_status), updated_at = :now WHERE id = :id
-            """), {"id": user_id, "now": now})
-            await db.flush()
-            return {"id": user_id, "full_name": user["full_name"], "user_type": "citizen", "status": "DELETED"}
-
-        result = await db.execute(
-            text("SELECT id, full_name FROM emergency_teams WHERE id = :id AND deleted_at IS NULL"),
-            {"id": user_id}
-        )
-        team = result.mappings().first()
-
-        if team:
-            cmd_check = await db.execute(
-                text("SELECT COUNT(*) FROM emergency_units WHERE commander_id = :id AND deleted_at IS NULL"),
-                {"id": user_id}
-            )
-            if cmd_check.scalar() > 0:
-                raise HTTPException(status_code=400, detail="Cannot delete — commanding active unit(s). Reassign commander first.")
-
-            await db.execute(text("""
-                UPDATE emergency_teams SET deleted_at = :now, status = CAST('DELETED' AS user_status), updated_at = :now WHERE id = :id
-            """), {"id": user_id, "now": now})
-            await db.execute(text("DELETE FROM unit_crew WHERE team_member_id = :id"), {"id": user_id})
-            await db.flush()
-            return {"id": user_id, "full_name": team["full_name"], "user_type": "team", "status": "DELETED"}
-
-        raise HTTPException(status_code=404, detail="User not found.")
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception(f"Error deleting user: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to delete user: {str(e)[:200]}")
+    except Exception as exc:
+        logger.exception(f"update_user failed")
+        raise HTTPException(status_code=500, detail=f"Failed to update user: {str(exc)[:200]}")
