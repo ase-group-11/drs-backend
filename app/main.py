@@ -19,10 +19,11 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from pathlib import Path
+from sqlalchemy.ext.asyncio import AsyncSession
 
 # ── Core ──────────────────────────────────────────────────────────────────────
 from app.core.config import settings
@@ -69,6 +70,8 @@ from app.api.v1.incident_log import router as incident_log_router  # Audit / inc
 # ── User & notification routers ──────────────────────────────────────────────
 from app.api.v1.user_management import router as user_management_router  # Admin user CRUD
 from app.api.v1.notifications_ws import router as notifications_router   # WebSocket alerts
+
+from app.db.session import get_db
 
 
 # ── Configure logging before anything else ────────────────────────────────────
