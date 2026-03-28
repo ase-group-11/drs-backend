@@ -259,7 +259,68 @@ async def root():
     }
 
 
-@app.get("/health", tags=["Root"], summary="Health check endpoint")
-async def health():
-    """Minimal liveness probe for load balancer / container orchestration."""
-    return {"status": "healthy"}
+@app.get(
+    "/health",
+    tags=["Root"],
+    summary="Health Check",
+    description="Check status of all major subsystems"
+)
+async def health_check(db: AsyncSession = Depends(get_db)):
+    """
+    Returns per-subsystem health status.
+    Overall status is 'degraded' if any subsystem is down.
+    """
+    from cache.redis_client import check_redis_health
+    from sqlalchemy import text
+
+    results = {}
+
+    # --- Database ---
+    try:
+        await db.execute(text("SELECT 1"))
+        results["database"] = "healthy"
+    except Exception as e:
+        logger.warning(f"Health check — database: {e}")
+        results["database"] = "down"
+
+    # --- Redis ---
+    try:
+        redis_health = await check_redis_health()
+        results["redis"] = redis_health["status"]   # "healthy" | "degraded" | "unhealthy"
+    except Exception as e:
+        logger.warning(f"Health check — redis: {e}")
+        results["redis"] = "down"
+
+    # --- RabbitMQ / publisher ---
+    try:
+        publisher = await get_publisher()
+        results["rabbitmq"] = "healthy" if publisher else "down"
+    except Exception as e:
+        logger.warning(f"Health check — rabbitmq: {e}")
+        results["rabbitmq"] = "down"
+
+    # --- Per-service router probes (table existence checks) ---
+    service_tables = {
+        "disaster_report":  "disaster_reports",
+        "disaster_eval":    "disasters",
+        "deploy":           "deployments",
+        "reroute":          "road_segments",
+        "evacuation":       "evacuation_zones",
+    }
+    for service, table in service_tables.items():
+        try:
+            await db.execute(text(f"SELECT 1 FROM {table} LIMIT 1"))
+            results[service] = "healthy"
+        except Exception as e:
+            logger.warning(f"Health check — {service}: {e}")
+            results[service] = "down"
+
+    overall = "healthy" if all(v == "healthy" for v in results.values()) else "degraded"
+
+    return {
+        "status": overall,
+        "service": settings.APP_NAME,
+        "version": settings.APP_VERSION,
+        "environment": settings.ENVIRONMENT,
+        **results,
+    }
