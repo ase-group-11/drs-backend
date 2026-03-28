@@ -1,12 +1,19 @@
 # File: app/api/v1/incident_log.py
 """
-Incident Timeline API — Disaster Logs / Activity History
+Incident Timeline API
 
-Endpoint:
-  GET /disasters/{disaster_id}/timeline
+Single endpoint that builds a chronological activity log for a disaster
+by querying existing tables — no separate audit table required.
 
-Requires Bearer token (any authenticated user).
-No new table — queries existing tables only.
+Sources queried (up to 13 event types):
+  - disaster_reports  → DISASTER_REPORTED
+  - disasters         → DISASTER_CREATED, DISASTER_ESCALATED, DISASTER_RESOLVED
+  - evacuation_plans  → EVACUATION_PLANNED, EVACUATION_APPROVED, EVACUATION_ACTIVATED
+  - deployments       → UNITS_DEPLOYED, UNITS_ARRIVED, UNITS_COMPLETED
+  - reroute_plans     → REROUTE_TRIGGERED, REROUTE_RESTORED
+  - disaster_evaluation → EVALUATION_COMPLETED
+
+Ordered newest-first. Requires any valid Bearer token.
 """
 
 from typing import Any, Dict
@@ -23,12 +30,7 @@ router = APIRouter(tags=["Incident Timeline"])
 
 @router.get(
     "/disasters/{disaster_id}/timeline",
-    summary="Get incident timeline",
-    description=(
-        "Returns the full activity timeline for a disaster. "
-        "13 events from existing tables — no new table required. "
-        "Ordered newest first."
-    ),
+    summary="Get the full activity timeline for a disaster",
 )
 async def get_incident_timeline(
     disaster_id: str,
@@ -36,48 +38,29 @@ async def get_incident_timeline(
     current_user: Dict[str, Any] = Depends(get_current_user),
 ):
     """
-    **Response example:**
+    Returns a unified activity log for a disaster assembled from existing tables.
+    Each entry has: event_type, title, actor, badge, time (HH:MM), and timestamp (ISO-8601).
+    Ordered newest first.
+
+    Example response:
     ```json
     {
       "disaster_id":   "abc-123",
-      "tracking_id":   "DIS-2026-A66F411A",
-      "total_entries": 5,
+      "tracking_id":   "DRS-2026-A66F411A",
+      "total_entries": 4,
       "entries": [
-        {
-          "event_type": "EVACUATION_ACTIVATED",
-          "title":      "Evacuation Activated",
-          "actor":      "System",
-          "badge":      "System",
-          "time":       "14:45",
-          "timestamp":  "2026-03-27T14:45:00"
-        },
-        {
-          "event_type": "UNITS_ARRIVED",
-          "title":      "Units Arrived on Scene",
-          "actor":      "System",
-          "badge":      "System",
-          "time":       "14:35",
-          "timestamp":  "2026-03-27T14:35:00"
-        },
-        {
-          "event_type": "UNITS_DEPLOYED",
-          "title":      "Units Deployed",
-          "actor":      "Admin User",
-          "badge":      "Admin",
-          "time":       "14:20",
-          "timestamp":  "2026-03-27T14:20:00"
-        },
-        {
-          "event_type": "DISASTER_REPORTED",
-          "title":      "Disaster Reported",
-          "actor":      "Citizen",
-          "badge":      "Citizen",
-          "time":       "14:10",
-          "timestamp":  "2026-03-27T14:10:00"
-        }
+        { "event_type": "EVACUATION_ACTIVATED", "title": "Evacuation Activated",
+          "actor": "System",     "badge": "System", "time": "14:45" },
+        { "event_type": "UNITS_ARRIVED",        "title": "Units Arrived on Scene",
+          "actor": "System",     "badge": "System", "time": "14:35" },
+        { "event_type": "UNITS_DEPLOYED",       "title": "Units Deployed",
+          "actor": "Admin User", "badge": "Admin",  "time": "14:20" },
+        { "event_type": "DISASTER_REPORTED",    "title": "Disaster Reported",
+          "actor": "Citizen",    "badge": "Citizen","time": "14:10" }
       ]
     }
     ```
+    Requires: any valid Bearer token.
     """
     service = IncidentLogService(db)
     return await service.get_timeline(disaster_id=disaster_id)
