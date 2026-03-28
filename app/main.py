@@ -302,22 +302,6 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         logger.warning(f"Health check — rabbitmq: {e}")
         results["rabbitmq"] = "down"
 
-    # --- Per-service router probes (table existence checks) ---
-    service_tables = {
-        "disaster_report":  "disaster_reports",
-        "disaster_eval":    "disasters",
-        "deploy":           "deployments",
-        "reroute":          "road_segments",
-        "evacuation":       "evacuation_plans",
-    }
-    for service, table in service_tables.items():
-        try:
-            await db.execute(text(f"SELECT 1 FROM {table} LIMIT 1"))
-            results[service] = "healthy"
-        except Exception as e:
-            logger.warning(f"Health check — {service}: {e}")
-            results[service] = "down"
-
     overall = "healthy" if all(v == "healthy" for v in results.values()) else "degraded"
 
     return {
