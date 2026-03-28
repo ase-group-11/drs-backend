@@ -9,10 +9,10 @@ UPDATED:
 """
 import asyncio  
 from fastapi import FastAPI, Request, Depends
+from fastapi.responses import JSONResponse, FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_db
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 import logging
 
@@ -35,20 +35,17 @@ from app.providers.traffic import TrafficProvider
 from app.api.v1.live_map import set_live_map_providers
 from app.socket.manager import sio
 
-
 from pathlib import Path
 from app.workers.reroute_publisher import get_publisher
 import socketio
 from app.api.v1.emergency_unit import router as emergency_unit_router
 from app.api.v1.deployment import router as deployment_router
+from app.api.v1.user_management import router as user_management_router
 
 from app.api.v1.disaster_evaluation import set_evaluation_providers
-from app.api.v1.user_management import router as user_management_router
 
 from app.api.v1.notifications_ws import router as notifications_router
-from app.api.v1.notifications_ws import redis_listener                  
-
-from app.api.v1.user_management import router as user_management_router
+from app.api.v1.notifications_ws import redis_listener
 
 
 # Setup logging FIRST
@@ -108,7 +105,6 @@ async def lifespan(app: FastAPI):
     logger.info("=" * 70)
 
 
-
 # Create FastAPI application
 app = FastAPI(
     title=settings.APP_NAME,
@@ -162,11 +158,9 @@ app.add_middleware(
 async def global_exception_handler(request: Request, exc: Exception):
     """
     Global exception handler for unhandled errors.
-    
     Logs the error and returns a generic error response.
     """
     logger.exception(f"Unhandled error: {str(exc)}")
-    
     return JSONResponse(
         status_code=500,
         content={
@@ -177,31 +171,25 @@ async def global_exception_handler(request: Request, exc: Exception):
     )
 
 
-# Include routers
-app.include_router(user_auth.router, prefix="/api/v1")
-app.include_router(emergency_team_auth.router, prefix="/api/v1")
-app.include_router(live_map.router, prefix="/api/v1")
-app.include_router(scenario_engine.router, prefix="/api/v1")
-app.include_router(reroute.router, prefix="/api/v1")
-app.include_router(evacuation.router, prefix="/api/v1")
-app.include_router(disaster_report.router, prefix="/api/v1")
-app.include_router(disaster_router, prefix="/api/v1")
-app.include_router(disaster_evaluation.router, prefix="/api/v1")
-app.include_router(incident_log_router, prefix="/api/v1")
-app.include_router(emergency_unit_router, prefix="/api/v1")
+# ── Include routers ─────────────────────────────────────────────────────────
+app.include_router(user_auth.router,             prefix="/api/v1")
+app.include_router(emergency_team_auth.router,   prefix="/api/v1")
+app.include_router(live_map.router,              prefix="/api/v1")
+app.include_router(scenario_engine.router,       prefix="/api/v1")
+app.include_router(reroute.router,               prefix="/api/v1")
+app.include_router(evacuation.router,            prefix="/api/v1")
+app.include_router(disaster_report.router,       prefix="/api/v1")
+app.include_router(disaster_router,              prefix="/api/v1")
+app.include_router(disaster_evaluation.router,   prefix="/api/v1")
+app.include_router(incident_log_router,          prefix="/api/v1")
+app.include_router(emergency_unit_router,        prefix="/api/v1")
+app.include_router(deployment_router,            prefix="/api/v1")
+app.include_router(user_management_router,       prefix="/api/v1")
+app.include_router(vehicles.router,              prefix="/api/v1")
+app.include_router(notifications_router,         prefix="/api/v1")
 
-app.include_router(deployment_router, prefix="/api/v1")
-app.include_router(user_management_router, prefix="/api/v1")
 
-app.include_router(vehicles.router, prefix = "/api/v1")
-
-app.include_router(deployment_router, prefix="/api/v1")
-app.include_router(user_management_router, prefix="/api/v1")
-
-# ── Notification router ─────────────────────────────────
-app.include_router(notifications_router,prefix="/api/v1")  
-# Serve demo page
-
+# ── Demo page ────────────────────────────────────────────────────────────────
 @app.get("/demo", include_in_schema=False)
 async def demo_page():
     """Serve the reroute live demo page."""
@@ -209,7 +197,7 @@ async def demo_page():
     return FileResponse(str(demo_path))
 
 
-# Root endpoints
+# ── Root endpoints ───────────────────────────────────────────────────────────
 @app.get(
     "/",
     tags=["Root"],
@@ -217,11 +205,7 @@ async def demo_page():
     description="Welcome endpoint with API information"
 )
 async def root():
-    """
-    API root endpoint.
-    
-    Returns basic API information and links.
-    """
+    """API root endpoint. Returns basic API information and links."""
     return {
         "message": f"Welcome to {settings.APP_NAME} API",
         "version": settings.APP_VERSION,
@@ -240,15 +224,9 @@ async def root():
     description="Check if the API is running"
 )
 async def health_check():
-    """
-    Health check endpoint.
-    
-    Returns API health status including Redis status.
-    """
+    """Health check endpoint. Returns API health status including Redis status."""
     from cache.redis_client import check_redis_health
-    
     redis_health = await check_redis_health()
-    
     return {
         "status": "healthy",
         "service": settings.APP_NAME,
