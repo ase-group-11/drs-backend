@@ -26,6 +26,7 @@ from app.api.v1 import reroute
 from app.api.v1 import evacuation   
 from app.api.v1 import disaster_report
 from app.api.v1 import vehicles
+from app.api.v1 import deploy
 from app.api.v1.disaster import router as disaster_router
 from app.api.v1 import disaster_evaluation
 from app.api.v1.incident_log import router as incident_log_router
@@ -197,6 +198,7 @@ app.include_router(vehicles.router, prefix = "/api/v1")
 
 app.include_router(deployment_router, prefix="/api/v1")
 app.include_router(user_management_router, prefix="/api/v1")
+app.include_router(deploy.router, prefix="/api/v1")
 
 # ── Notification router ─────────────────────────────────
 app.include_router(notifications_router,prefix="/api/v1")  
