@@ -40,7 +40,15 @@ _client: Optional[sync_redis.Redis] = None
 def _r() -> sync_redis.Redis:
     global _client
     if _client is None:
-        _client = sync_redis.from_url(REDIS_URL, decode_responses=True)
+        _client = sync_redis.from_url(
+            REDIS_URL,
+            decode_responses=True,
+            socket_keepalive=True,
+            socket_connect_timeout=5,
+            socket_timeout=5,
+            retry_on_timeout=True,
+            health_check_interval=30,
+        )
     return _client
 
 

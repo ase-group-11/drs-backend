@@ -40,6 +40,7 @@ import asyncio
 import json
 import logging
 import os
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Optional, Set
 
 import redis.asyncio as aioredis
@@ -118,22 +119,37 @@ async def _fetch_user_profile(user_id: str, user_type: str) -> Dict[str, Any]:
 # ── Targeted broadcaster ──────────────────────────────────────
 
 async def broadcast_to_users(
-    message: str, target_user_ids: Optional[Set[str]]
+    message: str,
+    target_user_ids: Optional[Set[str]],
+    target_roles: Optional[Set[str]] = None,
 ) -> None:
     """
-    Send message to targeted users (or all if target_user_ids is None).
-    Silently removes dead connections.
+    Send message to targeted users with optional role filtering.
+
+    Targeting rules:
+    - If target_roles is set, all connected users whose user_type is in
+      target_roles receive the message regardless of geo-targeting.
+    - Geo-targeted users (target_user_ids) always receive the message.
+    - If target_user_ids is None → broadcast to everyone.
+
+    Note: "admin" is not a JWT user_type. EmergencyTeamRole.ADMIN members
+    connect with user_type="emergency_team" — pass target_roles={"emergency_team"}
+    to reach them.
     """
     dead: Set[str] = set()
+    pairs: list = []
 
-    if target_user_ids is None:
-        pairs = list(connected_clients.items())
-    else:
-        pairs = [
-            (uid, info)
-            for uid, info in connected_clients.items()
-            if uid in target_user_ids
-        ]
+    for uid, info in connected_clients.items():
+        user_type = info.get("user_type", "user")
+
+        # Role-targeted — include regardless of geo
+        if target_roles and user_type in target_roles:
+            pairs.append((uid, info))
+            continue
+
+        # Geo-targeted or broadcast
+        if target_user_ids is None or uid in target_user_ids:
+            pairs.append((uid, info))
 
     for uid, info in pairs:
         try:
@@ -158,29 +174,60 @@ async def redis_listener() -> None:
     """
     Background task: subscribes to Redis app_alerts channel and
     routes each alert to the correct connected clients.
+
+    Uses a health_check_interval to keep the connection alive during
+    idle periods — prevents the remote Redis server from dropping the
+    TCP connection after 60s of inactivity (which causes missed messages).
     """
     logger.info(f"Redis listener starting — channel: {REDIS_CHANNEL}")
     while True:
+        client = None
         try:
-            client = aioredis.from_url(REDIS_URL, decode_responses=True)
-            pubsub  = client.pubsub()
+            client = aioredis.from_url(
+                REDIS_URL,
+                decode_responses=True,
+                socket_keepalive=True,
+                socket_connect_timeout=5,
+                socket_timeout=10,
+                health_check_interval=30,  # ping Redis every 30s to keep alive
+            )
+            pubsub = client.pubsub()
             await pubsub.subscribe(REDIS_CHANNEL)
             logger.info(f"Subscribed to Redis channel: {REDIS_CHANNEL}")
 
-            async for raw in pubsub.listen():
-                if raw["type"] != "message":
+            while True:
+                # Use get_message with timeout instead of async for
+                # so we can send keepalive pings and detect disconnects
+                try:
+                    raw = await asyncio.wait_for(
+                        pubsub.get_message(ignore_subscribe_messages=True),
+                        timeout=5.0,
+                    )
+                except asyncio.TimeoutError:
+                    # No message in 5s — send a keepalive ping
+                    try:
+                        await client.ping()
+                    except Exception:
+                        logger.warning("Redis keepalive ping failed — reconnecting")
+                        break  # exit inner loop → reconnect
                     continue
+
+                if raw is None:
+                    continue
+
                 try:
                     payload = json.loads(raw["data"])
-                except (json.JSONDecodeError, TypeError):
+                except (json.JSONDecodeError, TypeError, KeyError):
                     continue
 
-                # Strip targeting field before forwarding to clients
-                target_list = payload.pop("target_user_ids", None)
-                target_ids  = set(target_list) if target_list is not None else None
+                # Strip targeting fields before forwarding to clients
+                target_list  = payload.pop("target_user_ids", None)
+                target_roles = payload.pop("target_roles", None)
+                target_ids   = set(target_list) if target_list is not None else None
+                role_set     = set(target_roles) if target_roles is not None else None
 
                 await broadcast_to_users(
-                    json.dumps(payload, default=str), target_ids
+                    json.dumps(payload, default=str), target_ids, role_set
                 )
 
         except asyncio.CancelledError:
@@ -189,6 +236,13 @@ async def redis_listener() -> None:
         except Exception as exc:
             logger.error(f"Redis listener error: {exc} — retrying in 3s")
             await asyncio.sleep(3)
+        finally:
+            # Always clean up the client on exit from the outer try
+            if client:
+                try:
+                    await client.aclose()
+                except Exception:
+                    pass
 
 
 # ── WebSocket endpoint ────────────────────────────────────────
@@ -271,27 +325,55 @@ async def websocket_notifications(websocket: WebSocket) -> None:
 
         # ── Step 5: Flush offline alerts ──────────────────────
         pending = flush_offline_alerts(user_id)
+        stale_cutoff = datetime.now(timezone.utc) - timedelta(minutes=10)
+        fresh = []
         for alert in pending:
+            ts = alert.get("timestamp")
+            if ts:
+                try:
+                    alert_time = datetime.fromisoformat(ts)
+                    # Make offset-aware if needed
+                    if alert_time.tzinfo is None:
+                        alert_time = alert_time.replace(tzinfo=timezone.utc)
+                    if alert_time < stale_cutoff:
+                        logger.info(
+                            f"[{user_id}] Discarding stale offline alert "
+                            f"event={alert.get('event_type')} age={(datetime.now(timezone.utc) - alert_time).seconds}s"
+                        )
+                        continue
+                except Exception:
+                    pass  # if timestamp unparseable, deliver anyway
+            fresh.append(alert)
+
+        for alert in fresh:
             try:
                 await websocket.send_text(json.dumps(alert, default=str))
             except Exception:
                 break
         if pending:
-            logger.info(f"[{user_id}] Flushed {len(pending)} offline alert(s)")
+            logger.info(
+                f"[{user_id}] Flushed {len(fresh)}/{len(pending)} offline alert(s) "
+                f"({len(pending) - len(fresh)} stale discarded)"
+            )
 
         # ── Step 6: Keep-alive / heartbeat loop ───────────────
         while True:
             try:
-                raw   = await asyncio.wait_for(websocket.receive_text(), timeout=200)
+                raw   = await asyncio.wait_for(websocket.receive_text(), timeout=30)
                 frame = json.loads(raw)
                 if frame.get("type") == "ping":
                     plat = frame.get("lat")
                     plon = frame.get("lon")
                     if plat is not None and plon is not None:
                         set_user_location(user_id, float(plat), float(plon))
+                    # Send pong back to confirm receipt
+                    await websocket.send_text(json.dumps({"type": "pong"}))
             except asyncio.TimeoutError:
-                # Client idle for >200s — close cleanly
-                break
+                # No message from client in 30s — server sends ping to keep alive
+                try:
+                    await websocket.send_text(json.dumps({"type": "ping"}))
+                except Exception:
+                    break  # client gone
             except (json.JSONDecodeError, Exception):
                 break
 
