@@ -90,12 +90,8 @@ class DisasterService:
                     COUNT(*) FILTER (WHERE severity = CAST('CRITICAL' AS disaster_severity) AND disaster_status = CAST('ACTIVE' AS disaster_status)) as critical_count,
                     COUNT(*) FILTER (WHERE disaster_status = CAST('ACTIVE' AS disaster_status)) as active_count,
                     COUNT(*) FILTER (WHERE disaster_status = CAST('RESOLVED' AS disaster_status)) as resolved_count,
-
                     COUNT(*) FILTER (WHERE disaster_status = CAST('MONITORING' AS disaster_status)) as monitoring_count,
                     COUNT(*) FILTER (WHERE disaster_status = CAST('ARCHIVED' AS disaster_status)) as archived_count
-
-                    
-
                 FROM disasters WHERE deleted_at IS NULL
             """)
             count_result = await self.db.execute(count_sql)
@@ -144,8 +140,7 @@ class DisasterService:
                     "active": counts["active_count"],
                     "resolved": counts["resolved_count"],
                     "monitoring": counts["monitoring_count"],
-                    "archived": counts["archived_count"]
-
+                    "archived": counts["archived_count"],
                 },
             }
 
@@ -269,16 +264,19 @@ class DisasterService:
             """), {"disaster_id": disaster_id, "disaster_status": "RESOLVED", "resolved_time": now, "resolution_notes": resolution_notes, "updated_at": now})
 
             # FIX: Auto-complete all active deployments for this disaster
+            # Use separate params for completed_at and updated_at — asyncpg raises
+            # AmbiguousParameterError when the same $N is bound to columns with
+            # different timestamp types (timestamp vs timestamptz).
             await self.db.execute(text("""
                 UPDATE deployments
                 SET deployment_status = 'COMPLETED',
-                    completed_at = :now,
+                    completed_at = :completed_at,
                     assessment_notes = COALESCE(assessment_notes || ' | ', '') || 'Auto-completed: disaster resolved',
-                    updated_at = :now
+                    updated_at = :updated_at
                 WHERE disaster_id = :disaster_id
                   AND deployment_status NOT IN ('COMPLETED', 'CANCELLED')
                   AND deleted_at IS NULL
-            """), {"disaster_id": disaster_id, "now": now})
+            """), {"disaster_id": disaster_id, "completed_at": now, "updated_at": now})
 
             # FIX: Reset all deployed units back to AVAILABLE
             await self.db.execute(text("""
