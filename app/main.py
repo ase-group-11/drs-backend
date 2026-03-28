@@ -296,7 +296,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
 
     # --- RabbitMQ / publisher ---
     try:
-        publisher = await get_publisher()
+        publisher = get_publisher()
         results["rabbitmq"] = "healthy" if publisher else "down"
     except Exception as e:
         logger.warning(f"Health check — rabbitmq: {e}")
@@ -308,7 +308,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         "disaster_eval":    "disasters",
         "deploy":           "deployments",
         "reroute":          "road_segments",
-        "evacuation":       "evacuation_zones",
+        "evacuation":       "evacuation_plans",
     }
     for service, table in service_tables.items():
         try:
