@@ -1269,6 +1269,14 @@ class EmergencyUnitService:
                   AND deleted_at IS NULL
             """), {"unit_id": unit_id, "completed_at": now, "updated_at": now})
 
+            # FIX: Remove all crew members from this unit before decommissioning.
+            # Without this, unit_crew rows linger and inflate assigned_units_count
+            # on team member profiles even after the unit is gone.
+            await self.db.execute(
+                text("DELETE FROM unit_crew WHERE unit_id = :unit_id"),
+                {"unit_id": unit_id}
+            )
+
             # FIX #5: Atomic conditional UPDATE — the WHERE clause on unit_status NOT IN
             # (DEPLOYED, ON_SCENE) is evaluated inside the same lock as the write, so a
             # concurrent dispatch cannot slip in between the check and the delete.

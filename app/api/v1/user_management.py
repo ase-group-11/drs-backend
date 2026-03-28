@@ -399,7 +399,7 @@ async def list_all_users(
                     et.created_at,
                     'team' as user_type,
                     (SELECT COUNT(*) FROM disaster_reports dr WHERE dr.reviewed_by_id = et.id) as reviews_count,
-                    (SELECT COUNT(*) FROM unit_crew uc WHERE uc.team_member_id = et.id) as assigned_units_count,
+                    (SELECT COUNT(*) FROM unit_crew uc JOIN emergency_units eu ON uc.unit_id = eu.id WHERE uc.team_member_id = et.id AND eu.deleted_at IS NULL) as assigned_units_count,
                     (SELECT COUNT(*) FROM emergency_units eu WHERE eu.commander_id = et.id AND eu.deleted_at IS NULL) as commanding_units_count,
                     (SELECT ARRAY_AGG(eu.unit_code) FROM unit_crew uc
                      JOIN emergency_units eu ON uc.unit_id = eu.id
@@ -518,7 +518,7 @@ async def get_user(
                 et.role, et.status, et.department, et.employee_id,
                 et.created_at, et.updated_at,
                 (SELECT COUNT(*) FROM disaster_reports dr WHERE dr.reviewed_by_id = et.id) as reviews_count,
-                (SELECT COUNT(*) FROM unit_crew uc WHERE uc.team_member_id = et.id) as assigned_units,
+                (SELECT COUNT(*) FROM unit_crew uc JOIN emergency_units eu ON uc.unit_id = eu.id WHERE uc.team_member_id = et.id AND eu.deleted_at IS NULL) as assigned_units,
                 (SELECT COUNT(*) FROM emergency_units eu WHERE eu.commander_id = et.id AND eu.deleted_at IS NULL) as commanding_units,
                 (SELECT ARRAY_AGG(eu.unit_code) FROM unit_crew uc
                  JOIN emergency_units eu ON uc.unit_id = eu.id
