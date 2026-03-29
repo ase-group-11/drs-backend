@@ -16,7 +16,7 @@ Shutdown sequence:
 """
 
 import asyncio
-import logging
+import logging, socketio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Depends
@@ -311,3 +311,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         "environment": settings.ENVIRONMENT,
         **results,
     }
+
+
+
+socket_app = socketio.ASGIApp(sio, other_asgi_app=app)
