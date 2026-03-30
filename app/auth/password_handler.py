@@ -24,9 +24,9 @@ from passlib.context import CryptContext
 pwd_context = CryptContext(
     schemes=["argon2"],
     deprecated="auto",
-    argon2__memory_cost=65536,  # 64 MB memory cost
-    argon2__time_cost=3,         # 3 iterations
-    argon2__parallelism=4,       # 4 parallel threads
+    argon2__memory_cost=19456,  # 19 MB — OWASP minimum
+    argon2__time_cost=2,         # 2 iterations
+    argon2__parallelism=1,       # 1 thread
 )
 
 
