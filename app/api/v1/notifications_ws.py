@@ -249,15 +249,23 @@ async def redis_listener() -> None:
 
         except asyncio.CancelledError:
             logger.info("Redis listener cancelled — shutting down")
+            # Clean up before returning so the task exits cleanly.
+            # Use a hard timeout: if the remote Redis server is unreachable
+            # aclose() can hang indefinitely, which blocks the whole reload.
+            if client:
+                try:
+                    await asyncio.wait_for(client.aclose(), timeout=2.0)
+                except Exception:
+                    pass
             return
         except Exception as exc:
             logger.error(f"Redis listener error: {exc} — retrying in 3s")
             await asyncio.sleep(3)
         finally:
-            # Always clean up the client on exit from the outer try
+            # Clean up on any non-cancellation exit (reconnect loop, errors).
             if client:
                 try:
-                    await client.aclose()
+                    await asyncio.wait_for(client.aclose(), timeout=2.0)
                 except Exception:
                     pass
 
