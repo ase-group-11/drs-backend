@@ -20,6 +20,7 @@ Registration flow (unchanged):
 from typing import Optional, Dict, Any
 from sqlalchemy.ext.asyncio import AsyncSession
 import logging
+import uuid
 
 from app.repositories.emergency_team_repository import EmergencyTeamRepository
 from app.services.otp_service import send_otp_code, verify_otp
@@ -39,14 +40,14 @@ from cache.redis_client import set_with_expiry, get_value, delete_key
 
 logger = logging.getLogger(__name__)
 
-# Redis key prefix that marks a phone number as "password already verified,
-# awaiting OTP confirmation".  Kept separate from the registration cache so
-# the two flows never collide.
-_LOGIN_PENDING_PREFIX = "ert_login_pending:"
+# Redis key prefix for login session tokens.
+# Stores {phone_number, member_id} keyed by a random token so the client
+# never needs to know or send the phone number.
+_LOGIN_TOKEN_PREFIX = "ert_login_token:"
 
 
-def _login_pending_key(phone_number: str) -> str:
-    return f"{_LOGIN_PENDING_PREFIX}{phone_number}"
+def _login_token_key(token: str) -> str:
+    return f"{_LOGIN_TOKEN_PREFIX}{token}"
 
 
 class EmergencyTeamService:
@@ -219,16 +220,17 @@ class EmergencyTeamService:
         Steps:
         1. Look up active team member by email
         2. Verify password (Argon2)
-        3. Store a short-lived login-pending flag in Redis keyed by phone number
+        3. Generate a random login_token and store {phone_number, member_id}
+           in Redis keyed by that token — phone number is never sent to client
         4. Send OTP to the member's registered phone number
-        5. Return {message, phone_number} — client uses phone_number for step 2
+        5. Return {message, login_token}
 
         Args:
             email:    Registered email address
             password: Plain-text password
 
         Returns:
-            {"message": "...", "phone_number": "+353..."}
+            {"message": "...", "login_token": "<uuid>"}
 
         Raises:
             ValueError: bad credentials / inactive account
@@ -247,29 +249,33 @@ class EmergencyTeamService:
 
             logger.debug(f"✅ Password verified for {email}")
 
-            # Mark this phone number as "password already verified".
-            # TTL = OTP expiry + a small buffer so both expire together.
+            # Generate a random token and store the phone number against it.
+            # The client receives only the token — the phone number stays server-side.
+            login_token = str(uuid.uuid4())
             pending_ttl = settings.OTP_EXPIRY_SECONDS + 60
+            import json as _json
             await set_with_expiry(
-                _login_pending_key(team_member.phone_number),
-                team_member.id,   # store the member id as the value
+                _login_token_key(login_token),
+                _json.dumps({
+                    "phone_number": team_member.phone_number,
+                    "member_id": team_member.id,
+                }),
                 pending_ttl
             )
 
             # Send OTP to the registered phone
             otp = await send_otp_code(team_member.phone_number)
             if not otp:
-                await delete_key(_login_pending_key(team_member.phone_number))
+                await delete_key(_login_token_key(login_token))
                 raise Exception("OTP service failed — please try again")
 
             logger.info(f"✅ Login OTP sent to {team_member.phone_number}")
             return {
                 "message": (
-                    f"Password verified. An OTP has been sent to your registered "
-                    f"phone number ending in {team_member.phone_number[-4:]}. "
-                    "Please verify to complete login."
+                    "Password verified. An OTP has been sent to your registered "
+                    "phone number. Please verify to complete login."
                 ),
-                "phone_number": team_member.phone_number
+                "login_token": login_token
             }
 
         except ValueError:
@@ -280,56 +286,59 @@ class EmergencyTeamService:
 
     async def verify_login_otp(
         self,
-        phone_number: str,
+        login_token: str,
         otp: str
     ) -> Dict[str, Any]:
         """
-        Login step 2 — verify OTP and issue JWT tokens.
+        Login step 2 — verify OTP using login_token and issue JWT tokens.
 
         Steps:
-        1. Check that a login-pending flag exists for this phone number
-           (ensures step 1 was completed first)
-        2. Verify the OTP
-        3. Clean up the login-pending flag
-        4. Look up the team member
-        5. Generate and return JWT tokens + team member data
+        1. Look up the login session by login_token — resolves phone_number server-side
+        2. Verify the OTP for that phone number
+        3. Delete the login session token
+        4. Look up and return the team member + JWT tokens
 
         Args:
-            phone_number: Registered phone number (returned by step 1)
-            otp:          6-digit OTP received via SMS
+            login_token: Token returned by step 1 (opaque to client)
+            otp:         6-digit OTP received via SMS
 
         Returns:
             {"team_member": {...}, "tokens": {...}}
 
         Raises:
-            ValueError: OTP invalid / step 1 not completed / account not found
+            ValueError: invalid token / OTP invalid / account not found
         """
-        logger.info(f"🔐 Login step 2 (OTP verify) for {phone_number}")
+        logger.info("🔐 Login step 2 (OTP verify)")
 
         try:
-            # 1. Confirm step 1 was completed for this phone number
-            pending_member_id = await get_value(_login_pending_key(phone_number))
-            if not pending_member_id:
-                logger.warning(f"❌ No pending login session for {phone_number}")
+            import json as _json
+
+            # 1. Resolve phone number from login token
+            raw = await get_value(_login_token_key(login_token))
+            if not raw:
+                logger.warning("❌ No active login session for provided token")
                 raise ValueError(
-                    "No active login session found. Please start login again."
+                    "Invalid or expired login session. Please start login again."
                 )
+
+            session_data = _json.loads(raw)
+            phone_number = session_data["phone_number"]
 
             # 2. Verify OTP (one-time use — deleted inside verify_otp on success)
             is_valid = await verify_otp(phone_number, otp)
             if not is_valid:
-                logger.warning(f"❌ Invalid or expired OTP for {phone_number}")
+                logger.warning(f"❌ Invalid or expired OTP for session token")
                 raise ValueError("Invalid or expired OTP")
 
-            # 3. Clean up the login-pending flag
-            await delete_key(_login_pending_key(phone_number))
+            # 3. Clean up the login session token
+            await delete_key(_login_token_key(login_token))
 
-            # 4. Fetch the team member (use the id stored in the pending flag)
+            # 4. Fetch the team member
             team_member = await self.team_repo.get_active_team_member_by_phone(
                 phone_number
             )
             if not team_member:
-                logger.error(f"❌ Team member not found after OTP verify: {phone_number}")
+                logger.error("❌ Team member not found after OTP verify")
                 raise ValueError("Account not found or is no longer active")
 
             # 5. Generate JWT tokens
@@ -342,7 +351,7 @@ class EmergencyTeamService:
                 user_type="emergency_team"
             )
 
-            logger.info(f"✅ Login complete for {phone_number} ({team_member.email})")
+            logger.info(f"✅ Login complete for {team_member.email}")
             return {
                 "team_member": {
                     "id": team_member.id,

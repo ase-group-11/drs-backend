@@ -6,7 +6,7 @@ Login is now a 2-step MFA flow:
   Step 1  POST /emergency-team/login         → verify email + password → send OTP
   Step 2  POST /emergency-team/login/verify  → verify OTP → return JWT tokens
 
-Registration:
+Registration (unchanged):
   Step 1  POST /emergency-team/register        → send OTP
   Step 2  POST /emergency-team/register/verify → verify OTP, create account
 
@@ -27,6 +27,7 @@ from app.services.emergency_team_service import EmergencyTeamService
 from app.schemas.emergency_team import (
     EmergencyTeamRegisterRequest,
     EmergencyTeamLoginRequest,
+    EmergencyTeamLoginInitResponse,
     EmergencyTeamLoginVerifyRequest,
     EmergencyTeamAuthResponse,
     ChangePasswordRequest,
@@ -128,7 +129,7 @@ async def verify_registration(
 
 @router.post(
     "/login",
-    response_model=MessageResponse,
+    response_model=EmergencyTeamLoginInitResponse,
     status_code=status.HTTP_200_OK,
     summary="Login ERT member — step 1: verify email + password, send OTP",
 )
@@ -140,11 +141,8 @@ async def login_team_member(
     Authenticates email + password.
     On success, sends a one-time OTP to the member's registered phone number.
 
-    Returns a message confirming the OTP was sent and the (full) phone number
-    the client should use in the next step.
-
-    The client must call POST /emergency-team/login/verify with that phone
-    number and the received OTP to obtain JWT tokens.
+    Returns a login_token the client must use in step 2.
+    The phone number is never exposed — the server resolves it internally.
     """
     service = EmergencyTeamService(db)
     try:
@@ -152,7 +150,7 @@ async def login_team_member(
             email=request.email,
             password=request.password,
         )
-        return MessageResponse(**result)
+        return EmergencyTeamLoginInitResponse(**result)
 
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc))
@@ -178,16 +176,17 @@ async def verify_login_otp(
     Completes the 2-step login by verifying the OTP sent in step 1.
 
     Requires:
-    - phone_number: the registered phone number returned by step 1
-    - otp:          the 6-digit code received via SMS
+    - login_token: the token returned by step 1
+    - otp:         the 6-digit code received via SMS
 
+    The phone number is resolved server-side from the login_token.
     Returns: team member profile + access_token + refresh_token.
     OTP is single-use and expires after 5 minutes.
     """
     service = EmergencyTeamService(db)
     try:
         result = await service.verify_login_otp(
-            phone_number=request.phone_number,
+            login_token=request.login_token,
             otp=request.otp,
         )
         return EmergencyTeamAuthResponse(**result)

@@ -1,6 +1,6 @@
 # File: app/schemas/emergency_team.py
 """
-Emergency team schemas for API requests and responses.
+Emergency team schemas (DTOs) for API requests and responses.
 
 Defines Pydantic models for:
 - Emergency team registration
@@ -176,16 +176,31 @@ class EmergencyTeamLoginRequest(BaseModel):
     }
 
 
+class EmergencyTeamLoginInitResponse(BaseModel):
+    """
+    Emergency team login — Step 1 response schema.
+
+    Returns a short-lived login_token the client must present in step 2.
+    The phone number is never exposed to the client.
+    """
+    message: str
+    login_token: str = Field(
+        ...,
+        description="Short-lived token (TTL = OTP expiry) used to identify this login session in step 2"
+    )
+
+
 class EmergencyTeamLoginVerifyRequest(BaseModel):
     """
     Emergency team login — Step 2 request schema.
 
-    After receiving the OTP on their registered phone the member submits
-    the phone number and OTP to complete the login and receive JWT tokens.
+    The client submits the login_token received from step 1 and the OTP
+    received via SMS. No phone number required — the server resolves it
+    internally from the login_token.
     """
-    phone_number: str = Field(
+    login_token: str = Field(
         ...,
-        description="Registered phone number in E.164 format (+1234567890)"
+        description="Token returned by step 1 (POST /emergency-team/login)"
     )
     otp: str = Field(
         ...,
@@ -194,21 +209,11 @@ class EmergencyTeamLoginVerifyRequest(BaseModel):
         max_length=6
     )
 
-    @field_validator("phone_number")
-    @classmethod
-    def validate_phone_number(cls, v: str) -> str:
-        """Validate phone number is in E.164 format."""
-        if not re.match(r'^\+[1-9]\d{7,14}$', v):
-            raise ValueError(
-                "Phone number must be in E.164 format (e.g., +1234567890)"
-            )
-        return v
-
     model_config = {
         "json_schema_extra": {
             "examples": [
                 {
-                    "phone_number": "+1234567890",
+                    "login_token": "a3f8c2d1-...",
                     "otp": "482931"
                 }
             ]
