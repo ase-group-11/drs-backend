@@ -1,19 +1,25 @@
 # File: app/api/v1/emergency_team_auth.py
 """
-Emergency Team Authentication API endpoints.
+Emergency Team Authentication API — UC1
 
-Endpoints:
-- POST /register                → send OTP for registration
-- POST /register/verify         → verify OTP, create account
-- POST /login                   → password-based login
-- POST /change-password         → change password (JWT required)
-- GET  /health                  → health check
-- POST /deactivate/{id}         → deactivate account (admin)
+Login is now a 2-step MFA flow:
+  Step 1  POST /emergency-team/login         → verify email + password → send OTP
+  Step 2  POST /emergency-team/login/verify  → verify OTP → return JWT tokens
+
+Registration:
+  Step 1  POST /emergency-team/register        → send OTP
+  Step 2  POST /emergency-team/register/verify → verify OTP, create account
+
+Account management:
+  POST /emergency-team/change-password      → update password (JWT required)
+  POST /emergency-team/deactivate/{id}      → deactivate account (admin only)
 """
+
+import logging
+from typing import Any, Dict
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
-import logging
 
 from app.db.session import get_db
 from app.auth.dependencies import get_current_team_member
@@ -21,38 +27,41 @@ from app.services.emergency_team_service import EmergencyTeamService
 from app.schemas.emergency_team import (
     EmergencyTeamRegisterRequest,
     EmergencyTeamLoginRequest,
+    EmergencyTeamLoginVerifyRequest,
     EmergencyTeamAuthResponse,
     ChangePasswordRequest,
 )
 from app.schemas.auth import OTPVerifyRequest, MessageResponse
-from app.schemas.common import ResponseBase
 from app.db.models.enums import EmergencyTeamRole, Department
-from typing import Dict, Any
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/emergency-team", tags=["Emergency Team Auth"])
+router = APIRouter(prefix="/emergency-team", tags=["ERT Auth — UC1"])
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# REGISTRATION
-# ══════════════════════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────────────────────
+# Registration (step 1 + step 2)
+# ─────────────────────────────────────────────────────────────────────────────
 
 @router.post(
     "/register",
     response_model=MessageResponse,
     status_code=status.HTTP_200_OK,
-    summary="Register emergency team member (Send OTP)",
-    description="Send OTP to phone number for emergency team registration",
+    summary="Register ERT member — step 1: send OTP",
 )
 async def register_team_member(
     request: EmergencyTeamRegisterRequest,
     db: AsyncSession = Depends(get_db),
 ):
+    """
+    Validates phone number and password, stores registration data in Redis,
+    and sends a 6-digit OTP via SMS.
+    Rate limited to 3 requests per hour per phone number.
+    """
     service = EmergencyTeamService(db)
     try:
         from app.utils.enum_utils import coerce_enum
-        role = coerce_enum(EmergencyTeamRole, request.role)
+        role       = coerce_enum(EmergencyTeamRole, request.role)
         department = coerce_enum(Department, request.department)
 
         result = await service.register_team_member(
@@ -66,11 +75,11 @@ async def register_team_member(
         )
         return MessageResponse(**result)
 
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
-    except Exception as e:
-        logger.exception("Emergency team registration failed")
-        if "rate limit" in str(e).lower():
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    except Exception as exc:
+        logger.exception("ERT registration step 1 failed")
+        if "rate limit" in str(exc).lower():
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail="Too many OTP requests. Please try again later.",
@@ -85,13 +94,17 @@ async def register_team_member(
     "/register/verify",
     response_model=EmergencyTeamAuthResponse,
     status_code=status.HTTP_201_CREATED,
-    summary="Verify emergency team registration OTP",
-    description="Verify OTP and create emergency team account",
+    summary="Register ERT member — step 2: verify OTP and create account",
 )
-async def verify_team_member_registration(
+async def verify_registration(
     request: OTPVerifyRequest,
     db: AsyncSession = Depends(get_db),
 ):
+    """
+    Verifies the OTP, retrieves registration data from Redis, creates the
+    team member account, and returns JWT tokens.
+    OTP is single-use and expires after 5 minutes.
+    """
     service = EmergencyTeamService(db)
     try:
         result = await service.verify_team_member_registration(
@@ -99,61 +112,105 @@ async def verify_team_member_registration(
             otp=request.otp,
         )
         return EmergencyTeamAuthResponse(**result)
-
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
-    except Exception:
-        logger.exception("Emergency team verification failed")
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    except Exception as exc:
+        logger.exception("ERT registration step 2 failed")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Verification failed. Please try again.",
         )
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# LOGIN
-# ══════════════════════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────────────────────
+# Login — 2-step MFA
+# ─────────────────────────────────────────────────────────────────────────────
 
 @router.post(
     "/login",
-    response_model=EmergencyTeamAuthResponse,
+    response_model=MessageResponse,
     status_code=status.HTTP_200_OK,
-    summary="Emergency team login",
-    description="Login with email/phone + password",
+    summary="Login ERT member — step 1: verify email + password, send OTP",
 )
 async def login_team_member(
     request: EmergencyTeamLoginRequest,
     db: AsyncSession = Depends(get_db),
 ):
+    """
+    Authenticates email + password.
+    On success, sends a one-time OTP to the member's registered phone number.
+
+    Returns a message confirming the OTP was sent and the (full) phone number
+    the client should use in the next step.
+
+    The client must call POST /emergency-team/login/verify with that phone
+    number and the received OTP to obtain JWT tokens.
+    """
     service = EmergencyTeamService(db)
     try:
-        if request.email:
-            result = await service.login_team_member(
-                email=request.email, password=request.password
-            )
-        else:
-            result = await service.login_team_member_by_phone(
-                phone_number=request.phone_number, password=request.password
-            )
+        result = await service.login_team_member(
+            email=request.email,
+            password=request.password,
+        )
+        return MessageResponse(**result)
+
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc))
+    except Exception as exc:
+        logger.exception("ERT login step 1 failed")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Login failed. Please try again.",
+        )
+
+
+@router.post(
+    "/login/verify",
+    response_model=EmergencyTeamAuthResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Login ERT member — step 2: verify OTP and receive JWT tokens",
+)
+async def verify_login_otp(
+    request: EmergencyTeamLoginVerifyRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Completes the 2-step login by verifying the OTP sent in step 1.
+
+    Requires:
+    - phone_number: the registered phone number returned by step 1
+    - otp:          the 6-digit code received via SMS
+
+    Returns: team member profile + access_token + refresh_token.
+    OTP is single-use and expires after 5 minutes.
+    """
+    service = EmergencyTeamService(db)
+    try:
+        result = await service.verify_login_otp(
+            phone_number=request.phone_number,
+            otp=request.otp,
+        )
         return EmergencyTeamAuthResponse(**result)
 
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(e))
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc))
+    except Exception as exc:
+        logger.exception("ERT login step 2 failed")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="OTP verification failed. Please try again.",
+        )
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# CHANGE PASSWORD  (authenticated — JWT required)
-# ══════════════════════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────────────────────
+# Account management
+# ─────────────────────────────────────────────────────────────────────────────
 
 @router.post(
     "/change-password",
-    response_model=ResponseBase,
+    response_model=MessageResponse,
     status_code=status.HTTP_200_OK,
-    summary="Change password (authenticated)",
-    description=(
-        "Change the currently logged-in team member's password. "
-        "Requires a valid Bearer token and the correct current password."
-    ),
+    summary="Change password (requires JWT)",
 )
 async def change_password(
     request: ChangePasswordRequest,
@@ -161,62 +218,27 @@ async def change_password(
     current_user: Dict[str, Any] = Depends(get_current_team_member),
 ):
     """
-    Change password for the authenticated team member.
-
-    - **Bearer token required** — the team member ID is read from the JWT,
-      so no user can change another member's password.
-    - **old_password** must match the currently stored hash.
-    - **new_password** must satisfy: 8+ chars, uppercase, lowercase, digit.
-
-    Errors:
-    - 400: old_password is incorrect
-    - 403: caller is not an emergency team member
-    - 404: team member record not found (should not happen with a valid token)
+    Changes the password for the currently authenticated team member.
+    Requires the current password to be correct before accepting the new one.
+    Requires: emergency team Bearer token.
     """
-    team_member_id = current_user["user_id"]
     service = EmergencyTeamService(db)
-
     try:
         result = await service.change_password(
-            team_member_id=team_member_id,
+            team_member_id=current_user["id"],
             old_password=request.old_password,
             new_password=request.new_password,
         )
-        return ResponseBase(**result)
-
-    except ValueError as e:
-        detail = str(e)
-        if "not found" in detail.lower():
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=detail)
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail)
-    except Exception:
-        logger.exception("change_password failed")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Could not change password. Please try again.",
-        )
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# MISC
-# ══════════════════════════════════════════════════════════════════════════════
-
-@router.get(
-    "/health",
-    response_model=ResponseBase,
-    summary="Health check",
-    description="Check if emergency team service is healthy",
-)
-async def health_check():
-    """Health check endpoint for emergency team service."""
-    return ResponseBase(message="Emergency team service is healthy")
+        return MessageResponse(**result)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
 
 @router.post(
     "/deactivate/{team_member_id}",
-    response_model=ResponseBase,
-    summary="Deactivate team member",
-    description="Deactivate a team member account (Admin only)",
+    response_model=MessageResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Deactivate a team member account (Admin)",
 )
 async def deactivate_team_member(
     team_member_id: str,
@@ -224,15 +246,22 @@ async def deactivate_team_member(
     current_user: Dict[str, Any] = Depends(get_current_team_member),
 ):
     """
-    Deactivate team member account.
-
-    Requires emergency team Bearer token.
-    In a full RBAC implementation this would be restricted to ADMIN role.
+    Soft-deactivates a team member account (sets status=INACTIVE).
+    They can no longer log in but their data is retained for audit.
+    Requires: emergency team Bearer token (admin role enforced in service).
     """
     service = EmergencyTeamService(db)
     try:
-        result = await service.deactivate_team_member(team_member_id)
-        return ResponseBase(**result)
-
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+        result = await service.deactivate_team_member(
+            team_member_id=team_member_id,
+            requesting_user_id=current_user["id"],
+        )
+        return MessageResponse(**result)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc))
+    except Exception as exc:
+        logger.exception("Deactivation failed")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Deactivation failed. Please try again.",
+        )

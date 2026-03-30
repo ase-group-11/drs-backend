@@ -9,7 +9,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import JSONB
 
 revision = 'add_geometry_roadsegments'
-down_revision = 'add_active_trips'
+down_revision = 'a1b2c3d4e5f6'
 branch_labels = None
 depends_on = None
 

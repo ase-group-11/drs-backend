@@ -19,7 +19,7 @@ import json
 import logging
 import math
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException, status
@@ -33,7 +33,9 @@ logger = logging.getLogger(__name__)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 BUS_CAPACITY       = 50
-AMBULANCE_CAPACITY = 2
+AMBULANCE_CAPACITY = 8   # accessible medical transport (minibus/wheelchair van),
+                          # NOT an ICU ambulance. 8 people per vehicle is standard
+                          # for evacuation-planning purposes.
 
 CONGESTION_WEIGHTS = {
     "light": 0.5, "moderate": 1.5, "heavy": 2.5, "severe": 4.0, "unknown": 1.0,
@@ -52,73 +54,59 @@ DUBLIN_ZONES: List[Dict[str, Any]] = [
     {"zone_id": "zone_southside",      "name": "Southside (Terenure)",    "lat": 53.3200, "lon": -6.2700, "population": 35000, "vulnerable_count": 4200},
     {"zone_id": "zone_docklands",      "name": "Docklands",               "lat": 53.3480, "lon": -6.2300, "population": 18000, "vulnerable_count": 1500},
     {"zone_id": "zone_rathmines",      "name": "Rathmines",               "lat": 53.3256, "lon": -6.2653, "population": 22000, "vulnerable_count": 2800},
-    {"zone_id": "zone_ballsbridge",    "name": "Ballsbridge",             "lat": 53.3268, "lon": -6.2347, "population": 15000, "vulnerable_count": 1800},
-    {"zone_id": "zone_cabra",          "name": "Cabra",                   "lat": 53.3636, "lon": -6.2989, "population": 20000, "vulnerable_count": 2500},
-    {"zone_id": "zone_crumlin",        "name": "Crumlin",                 "lat": 53.3224, "lon": -6.3003, "population": 18000, "vulnerable_count": 2200},
-    {"zone_id": "zone_clontarf",       "name": "Clontarf",                "lat": 53.3659, "lon": -6.2097, "population": 16000, "vulnerable_count": 2000},
-    {"zone_id": "zone_ringsend",       "name": "Ringsend / Irishtown",    "lat": 53.3407, "lon": -6.2279, "population": 12000, "vulnerable_count": 1400},
+    {"zone_id": "zone_ballsbridge",    "name": "Ballsbridge",             "lat": 53.3268, "lon": -6.2182, "population": 15000, "vulnerable_count": 1800},
+    {"zone_id": "zone_clontarf",       "name": "Clontarf",                "lat": 53.3634, "lon": -6.2100, "population": 20000, "vulnerable_count": 2400},
+    {"zone_id": "zone_ringsend",       "name": "Ringsend / Irishtown",    "lat": 53.3400, "lon": -6.2200, "population": 12000, "vulnerable_count": 1200},
 ]
 
-# ── Dublin shelters ───────────────────────────────────────────────────────────
+_ZONE_MAP: Dict[str, Dict] = {z["zone_id"]: z for z in DUBLIN_ZONES}
+
+# ── Dublin evacuation shelters ────────────────────────────────────────────────
 DUBLIN_SHELTERS: List[Dict[str, Any]] = [
-    {"shelter_id": "shelter_rds",              "name": "RDS Arena",                     "lat": 53.3206, "lon": -6.2264, "capacity": 18000},
-    {"shelter_id": "shelter_croke_park",       "name": "Croke Park",                    "lat": 53.3607, "lon": -6.2510, "capacity": 22000},
-    {"shelter_id": "shelter_aviva",            "name": "Aviva Stadium",                 "lat": 53.3341, "lon": -6.2285, "capacity": 15000},
-    {"shelter_id": "shelter_national_stadium", "name": "National Boxing Stadium",       "lat": 53.3287, "lon": -6.3009, "capacity":  8000},
-    {"shelter_id": "shelter_point_village",    "name": "3Arena / Point Village",        "lat": 53.3479, "lon": -6.2225, "capacity": 12000},
-    {"shelter_id": "shelter_phoenix_park",     "name": "Phoenix Park (Visitor Centre)", "lat": 53.3601, "lon": -6.3269, "capacity": 25000},
-    {"shelter_id": "shelter_sport_ireland",    "name": "Sport Ireland Campus",          "lat": 53.3594, "lon": -6.3226, "capacity": 10000},
-    {"shelter_id": "shelter_tallaght_stadium", "name": "Tallaght Stadium",              "lat": 53.2877, "lon": -6.3616, "capacity":  8500},
+    {"shelter_id": "shelter_croke_park",   "name": "Croke Park",              "lat": 53.3608, "lon": -6.2510, "capacity": 15000},
+    {"shelter_id": "shelter_aviva",        "name": "Aviva Stadium",            "lat": 53.3338, "lon": -6.2286, "capacity": 10000},
+    {"shelter_id": "shelter_rds",          "name": "RDS Arena",                "lat": 53.3213, "lon": -6.2265, "capacity": 8000},
+    {"shelter_id": "shelter_phoenix_park", "name": "Phoenix Park Visitor Ctr", "lat": 53.3560, "lon": -6.3260, "capacity": 5000},
+    {"shelter_id": "shelter_tallaght",     "name": "Tallaght Stadium",         "lat": 53.2876, "lon": -6.3740, "capacity": 7000},
+    {"shelter_id": "shelter_malahide",     "name": "Malahide Castle Grounds",  "lat": 53.4508, "lon": -6.1541, "capacity": 4000},
+    {"shelter_id": "shelter_blanchardstown","name": "Blanchardstown Centre",   "lat": 53.3900, "lon": -6.3800, "capacity": 6000},
+    {"shelter_id": "shelter_leopardstown", "name": "Leopardstown Racecourse",  "lat": 53.2800, "lon": -6.1800, "capacity": 5000},
 ]
 
-_ZONE_MAP:    Dict[str, Dict] = {z["zone_id"]:    z for z in DUBLIN_ZONES}
-_SHELTER_MAP: Dict[str, Dict] = {s["shelter_id"]: s for s in DUBLIN_SHELTERS}
+
+# ── Module-level helpers ──────────────────────────────────────────────────────
+
+def get_zones_near_disaster(lat: float, lon: float, severity: str) -> List[Dict]:
+    """Return zones within SEVERITY_RADIUS km of the disaster centre."""
+    radius_km = SEVERITY_RADIUS.get(severity.upper(), 3.0)
+    result = []
+    for z in DUBLIN_ZONES:
+        dist = math.sqrt((z["lat"] - lat) ** 2 + (z["lon"] - lon) ** 2) * 111
+        if dist <= radius_km:
+            result.append(z)
+    # Always include at least one zone (nearest) to avoid empty plans
+    if not result and DUBLIN_ZONES:
+        nearest = min(DUBLIN_ZONES,
+                      key=lambda z: (z["lat"] - lat) ** 2 + (z["lon"] - lon) ** 2)
+        result = [nearest]
+    return result
 
 
-# ── Module-level data helpers ─────────────────────────────────────────────────
+def get_all_shelters() -> List[Dict]:
+    return list(DUBLIN_SHELTERS)
 
-def get_all_zones() -> List[Dict[str, Any]]:
-    return list(_ZONE_MAP.values())
-
-
-def get_all_shelters() -> List[Dict[str, Any]]:
-    return [{**s, "current_occupancy": 0, "available": s["capacity"]}
-            for s in _SHELTER_MAP.values()]
-
-
-def get_zones_near_disaster(
-    lat: float, lon: float, severity: str = "HIGH",
-) -> List[Dict[str, Any]]:
-    radius = SEVERITY_RADIUS.get(severity.upper(), 3.0)
-    nearby = []
-    for zone in _ZONE_MAP.values():
-        dist = _haversine(lat, lon, zone["lat"], zone["lon"])
-        if dist <= radius:
-            nearby.append({
-                **zone,
-                "distance_from_disaster_km": round(dist, 2),
-                "priority": 1 if dist <= 1.0 else (2 if dist <= 2.0 else 3),
-            })
-    return sorted(nearby, key=lambda z: z["distance_from_disaster_km"])
-
-
-def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    R = 6371.0
-    dlat = math.radians(lat2 - lat1)
-    dlon = math.radians(lon2 - lon1)
-    a = (math.sin(dlat / 2) ** 2
-         + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2))
-         * math.sin(dlon / 2) ** 2)
-    return R * 2 * math.asin(math.sqrt(a))
-
-
-# ── Pure calculation helpers ──────────────────────────────────────────────────
 
 def get_population_profile(zones: List[Dict]) -> Dict[str, Any]:
-    total = sum(z["population"] for z in zones)
-    vuln  = sum(z.get("vulnerable_count", 0) for z in zones)
-    return {"total": total, "vulnerable": vuln,
-            "children": int(total * 0.15), "zones_count": len(zones)}
+    total    = sum(z["population"]       for z in zones)
+    vuln     = sum(z["vulnerable_count"] for z in zones)
+    mobile   = total - vuln
+    return {
+        "total":          total,
+        "vulnerable":     vuln,
+        "mobile":         mobile,
+        "zones_count":    len(zones),
+        "density_factor": round(vuln / total if total else 0.15, 2),
+    }
 
 
 def compute_transport_needs(
@@ -142,7 +130,7 @@ def compute_transport_needs(
             "shelter_name":       best.get("shelter_name", ""),
             "route_id":           best.get("route_id", ""),
             "buses_needed":       max(1, math.ceil(zone.get("population", 0) / BUS_CAPACITY)),
-            "ambulances_needed":  math.ceil(zone.get("vulnerable_count", 0) / AMBULANCE_CAPACITY),
+            "ambulances_needed":  max(1, math.ceil(zone.get("vulnerable_count", 0) / AMBULANCE_CAPACITY)),
             "estimated_time_min": best.get("estimated_time_min", 30),
         })
     return {
@@ -159,7 +147,7 @@ def allocate_resources(transport_plan: Dict) -> Dict[str, Any]:
         "buses_allocated":      transport_plan["total_buses"],
         "ambulances_allocated": transport_plan["total_ambulances"],
         "allocation_confirmed": True,
-        "allocated_at":         datetime.utcnow().isoformat(),
+        "allocated_at":         datetime.utcnow().isoformat(),  # JSON field only, not a DB column
     }
 
 
@@ -337,7 +325,7 @@ class EvacuationService:
             "total_population_affected": population_stats["total"],
             "total_vulnerable": population_stats["vulnerable"],
             "transport_plan_summary": {
-                "total_buses": transport_plan["total_buses"],
+                "total_buses":      transport_plan["total_buses"],
                 "total_ambulances": transport_plan["total_ambulances"],
             },
             "auto_approved": auto_approve,
@@ -364,6 +352,7 @@ class EvacuationService:
                 detail=f"Only PENDING plans can be approved. Current: {plan['plan_status']}",
             )
 
+        # approved_at is TIMESTAMP WITHOUT TIME ZONE in evacuation_plans
         now = datetime.utcnow()
         await self.db.update_plan(
             plan_id,
@@ -421,6 +410,7 @@ class EvacuationService:
                            "remaining": z["population"], "status": "in_progress"}
             for z in impact_zones
         }
+        # activated_at is TIMESTAMP WITHOUT TIME ZONE
         now = datetime.utcnow()
         await self.db.update_plan(
             plan_id,
@@ -477,8 +467,9 @@ class EvacuationService:
 
         update_fields: Dict[str, Any] = {
             "completion_metrics": current,
-            "plan_status": new_status,
+            "plan_status":        new_status,
         }
+        # completed_at is TIMESTAMP WITHOUT TIME ZONE
         if all_done:
             update_fields["completed_at"] = datetime.utcnow()
 
@@ -504,7 +495,6 @@ class EvacuationService:
         if plan["plan_status"] not in ("ACTIVE", "MONITORING"):
             raise HTTPException(status_code=400, detail="Plan is not active.")
 
-        # Merge with UC7's live road segments
         uc7_segments   = await self.db.get_blocked_roads(plan["disaster_id"])
         uc7_names      = [s["road_name"] for s in uc7_segments if s.get("road_name")]
         all_road_names = list(set(list(plan.get("blocked_roads") or []) + blocked_roads + uc7_names))
@@ -558,15 +548,15 @@ class EvacuationService:
             return {"plan_id": plan_id,
                     "message": "All specified zones are already included in this plan."}
 
-        updated_zones   = list(plan["impact_zones"]) + truly_new
-        uc7_segments    = await self.db.get_blocked_roads(plan["disaster_id"])
-        traffic_snapshot= await self.fetch_traffic_data()
-        new_routes      = await self._compute_all_zone_routes(
+        updated_zones    = list(plan["impact_zones"]) + truly_new
+        uc7_segments     = await self.db.get_blocked_roads(plan["disaster_id"])
+        traffic_snapshot = await self.fetch_traffic_data()
+        new_routes       = await self._compute_all_zone_routes(
             truly_new, plan["shelters_with_capacity"], uc7_segments, traffic_snapshot)
-        updated_routes  = {**dict(plan["best_routes_per_zone"] or {}), **new_routes}
-        new_pop         = get_population_profile(updated_zones)
-        new_transport   = compute_transport_needs(new_pop, updated_zones, updated_routes)
-        new_alloc       = allocate_resources(new_transport)
+        updated_routes   = {**dict(plan["best_routes_per_zone"] or {}), **new_routes}
+        new_pop          = get_population_profile(updated_zones)
+        new_transport    = compute_transport_needs(new_pop, updated_zones, updated_routes)
+        new_alloc        = allocate_resources(new_transport)
 
         existing_metrics = dict(plan.get("completion_metrics") or {})
         for z in truly_new:
@@ -575,7 +565,7 @@ class EvacuationService:
                 "remaining": z["population"], "status": "in_progress",
             }
 
-        now = datetime.utcnow()
+        now  = datetime.utcnow()
         note = f" | Escalation [{now.strftime('%H:%M')}]: {reason}"
         await self.db.update_plan(
             plan_id,
@@ -615,7 +605,7 @@ class EvacuationService:
         return await self.db.list_plans(disaster_id=disaster_id)
 
     # ═════════════════════════════════════════════════════════════════════════
-    # HELPERS — called via self so tests can assert on them
+    # HELPERS
     # ═════════════════════════════════════════════════════════════════════════
 
     async def fetch_traffic_data(self) -> Dict[str, Any]:
@@ -638,58 +628,45 @@ class EvacuationService:
         Step 11-style: publish via self.publisher (evacuation.triggered).
         Falls back to direct Twilio if MQ disconnected.
         """
-        shelter_map = {s["shelter_id"]: s for s in shelters}
-        seen        = set()
-        user_routes = []
-
-        for user in users:
-            uid = str(user.get("id", ""))
-            if uid in seen:
-                continue
-            seen.add(uid)
-            routes  = best_routes_per_zone.get(user.get("zone_id", ""), [])
-            best    = routes[0] if routes else {}
-            shelter = shelter_map.get(best.get("destination_shelter_id", ""), {})
-            user_routes.append({
-                "user_id":      uid,
-                "phone_number": user.get("phone_number", ""),
-                "zone_name":    user.get("zone_name", "your area"),
-                "shelter_name": shelter.get("name", "nearest shelter"),
-                "eta_min":      int(best.get("estimated_time_min", 30)),
-            })
-
-        # RabbitMQ (primary)
         try:
             if self.publisher.is_connected:
-                await self.publisher._publish(
-                    routing_key="evacuation.triggered",
-                    payload={
-                        "event":       "evacuation.triggered",
-                        "disaster_id": disaster_id,
-                        "plan_id":     plan_id,
-                        "users":       user_routes,
-                        "total_users": len(user_routes),
-                        "timestamp":   datetime.utcnow().isoformat(),
-                    },
+                all_routes = [r for zr in best_routes_per_zone.values() for r in (zr or [])]
+                await self.publisher.publish_reroute_triggered(
+                    disaster_id=disaster_id,
+                    vehicles=users,
+                    routes=all_routes,
+                    route_assignments={},
+                    trigger_source="evacuation",
+                    vehicles_affected=len(users),
                 )
-                logger.info(f"[UC8] evacuation.triggered published ({len(user_routes)} users)")
-                return len(user_routes)
+                return len(users)
         except Exception as exc:
             logger.warning(f"[UC8] RabbitMQ publish failed, falling back to Twilio: {exc}")
 
         # Twilio fallback
         from app.services.twilio_service import send_sms
         sent = 0
-        for u in user_routes:
+        shelter_map = {s["shelter_id"]: s["name"] for s in shelters}
+        user_routes: Dict[str, Dict] = {}
+        for zone_id, routes in best_routes_per_zone.items():
+            if routes:
+                for u in users:
+                    if u.get("zone_id") == zone_id:
+                        user_routes[u["id"]] = routes[0]
+
+        for u in users:
             try:
-                msg = (f"EMERGENCY EVACUATION — {u['zone_name']}. "
-                       f"Leave NOW → {u['shelter_name']} (~{u['eta_min']} min). "
-                       f"Call 999 for help.")
+                route   = user_routes.get(u["id"], {})
+                shelter = shelter_map.get(route.get("destination_shelter_id", ""), "nearest shelter")
+                msg     = (
+                    f"EVACUATION ALERT: Please evacuate immediately. "
+                    f"Proceed to {shelter}. Call 999 for help."
+                )
                 if await send_sms(u["phone_number"], msg):
                     sent += 1
             except Exception:
                 pass
-        logger.info(f"[UC8] Twilio fallback: {sent}/{len(user_routes)} sent")
+        logger.info(f"[UC8] Twilio fallback: {sent}/{len(users)} sent")
         return sent
 
     async def display_evacuation_on_map(
@@ -699,10 +676,7 @@ class EvacuationService:
         routes: Dict,
         shelters: List[Dict],
     ) -> bool:
-        """
-        Step 10-style: push overlay via self.mapping (Socket.IO reroute_alert).
-        Same channel as UC7.
-        """
+        """Push overlay via self.mapping (Socket.IO reroute_alert). Same channel as UC7."""
         try:
             all_routes = [r for zone_routes in routes.values()
                           for r in (zone_routes if isinstance(zone_routes, list) else [])]
@@ -731,7 +705,6 @@ class EvacuationService:
         except Exception as exc:
             logger.warning(f"[UC8] route_updated publish failed: {exc}")
 
-        # Twilio fallback
         from app.services.twilio_service import send_sms
         sent = 0
         for user in users:
@@ -770,36 +743,39 @@ class EvacuationService:
         traffic_snapshot: Dict,
     ) -> List[Dict]:
         """
-        LOOP: call self.external.get_directions() per shelter (same as UC7 Step 5).
+        LOOP: call self.external.get_directions() per shelter.
         Falls back to straight-line estimate when TomTom unavailable.
         """
-        candidates: List[Dict] = []
-
+        candidates = []
         for shelter in shelters:
-            if shelter.get("available", shelter.get("capacity", 0)) <= 0:
-                continue
             try:
                 result = await self.external.get_directions(
                     origin={"lat": zone["lat"], "lng": zone["lon"]},
                     destination={"lat": shelter["lat"], "lng": shelter["lon"]},
                     avoid=blocked_roads,
-                    alternatives=True,
+                    alternatives=False,
                 )
-                for route in result.get("routes", []):
+                routes = result.get("routes", [])
+                if routes:
+                    r = routes[0]
                     candidates.append({
-                        **route,
+                        "route_id":               str(uuid.uuid4()),
                         "origin_zone_id":         zone["zone_id"],
                         "zone_name":              zone["name"],
                         "destination_shelter_id": shelter["shelter_id"],
                         "shelter_name":           shelter["name"],
                         "shelter_capacity":       shelter["capacity"],
-                        "distance_km":            round(route.get("length_meters", 0) / 1000, 2),
-                        "estimated_time_min":     round(route.get("travel_time_seconds", 0) / 60, 1),
-                        "waypoints":              [{"lat": p[0], "lon": p[1]}
-                                                   for p in route.get("points", [])],
+                        "distance_km":            round(r.get("length_meters", 0) / 1000, 2),
+                        "estimated_time_min":     round(r.get("travel_time_seconds", 0) / 60, 1),
+                        "travel_time_seconds":    r.get("travel_time_seconds", 0),
+                        "length_meters":          r.get("length_meters", 0),
+                        "traffic_delay_seconds":  r.get("traffic_delay_seconds", 0),
+                        "points":                 r.get("points", []),
+                        "geojson":                r.get("geojson"),
+                        "waypoints":              r.get("waypoints", []),
+                        "fallback":               False,
                     })
-            except Exception as exc:
-                logger.warning(f"[UC8] TomTom failed {zone['zone_id']}→{shelter['shelter_id']}: {exc}")
+            except Exception:
                 fb = straight_line_fallback(zone, shelter)
                 if fb:
                     candidates.append(fb)
@@ -809,5 +785,5 @@ class EvacuationService:
     async def _get_plan_or_404(self, plan_id: str) -> Dict[str, Any]:
         plan = await self.db.get_plan(plan_id)
         if not plan:
-            raise HTTPException(status_code=404, detail="Evacuation plan not found.")
+            raise HTTPException(status_code=404, detail=f"Evacuation plan '{plan_id}' not found.")
         return plan

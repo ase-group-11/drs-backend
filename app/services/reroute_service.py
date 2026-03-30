@@ -226,6 +226,8 @@ class RerouteService:
             route_assignments=plan.route_assignments,
             routes=alternative_routes,
             overflow_count=plan.overflow_count,
+            location={"lat": lat, "lon": lon},
+            tracking_id=disaster.get("tracking_id", ""),
         )
 
         # Step 12 — audit log

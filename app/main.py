@@ -1,219 +1,283 @@
 # File: app/main.py
 """
-ASE Emergency Services Backend - Main Application
+Dublin Disaster Response System — FastAPI Application Entry Point
 
-UPDATED:
-- Logging configuration on startup
-- Redis fallback support
-- 1 year access tokens
+Startup sequence:
+  1. Logging configured
+  2. Mapbox + TomTom providers initialised (used by live map + evaluation)
+  3. RabbitMQ publisher connected (degraded mode if unavailable)
+  4. Redis pub/sub listener started (WebSocket notification delivery)
+
+Shutdown sequence:
+  1. Redis listener task cancelled
+  2. Redis connection closed
+  3. TomTom HTTP session closed
+  4. RabbitMQ publisher closed
 """
-import asyncio  
-from fastapi import FastAPI, Request, Depends
-from fastapi.responses import JSONResponse, FileResponse
-from sqlalchemy.ext.asyncio import AsyncSession
-from app.db.session import get_db
-from fastapi.middleware.cors import CORSMiddleware
-from contextlib import asynccontextmanager
-import logging
 
+import asyncio
+import logging, socketio
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, Request, Depends
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, FileResponse
+from pathlib import Path
+from sqlalchemy.ext.asyncio import AsyncSession
+
+# ── Core ──────────────────────────────────────────────────────────────────────
 from app.core.config import settings
 from app.core.logging_config import setup_logging
-from app.api.v1 import user_auth
-from app.api.v1 import emergency_team_auth
-from app.api.v1 import live_map
-from app.api.v1 import scenario_engine
-from app.api.v1 import reroute
-from app.api.v1 import evacuation   
-from app.api.v1 import disaster_report
-from app.api.v1 import vehicles
-from app.api.v1.disaster import router as disaster_router
-from app.api.v1 import disaster_evaluation
-from app.api.v1.incident_log import router as incident_log_router
+
+# ── Infrastructure ────────────────────────────────────────────────────────────
 from cache.redis_client import close_redis_connection
 from app.providers.map_provider import MapProvider
 from app.providers.traffic import TrafficProvider
-from app.api.v1.live_map import set_live_map_providers
+from app.workers.reroute_publisher import get_publisher
 from app.socket.manager import sio
 
-from pathlib import Path
-from app.workers.reroute_publisher import get_publisher
-import socketio
-from app.api.v1.emergency_unit import router as emergency_unit_router
-from app.api.v1.deployment import router as deployment_router
-from app.api.v1.user_management import router as user_management_router
-
+# ── Provider initialisers (called at startup) ─────────────────────────────────
+from app.api.v1.live_map import set_live_map_providers
 from app.api.v1.disaster_evaluation import set_evaluation_providers
 
-from app.api.v1.notifications_ws import router as notifications_router
+# ── WebSocket / Redis listener ────────────────────────────────────────────────
 from app.api.v1.notifications_ws import redis_listener
 
+# ── Auth routers ──────────────────────────────────────────────────────────────
+from app.api.v1 import user_auth           # UC1: Citizen OTP auth
+from app.api.v1 import emergency_team_auth # UC1: ERT password + OTP auth
 
-# Setup logging FIRST
+# ── Disaster lifecycle routers ────────────────────────────────────────────────
+from app.api.v1 import disaster_report     # UC2: Citizen disaster reports
+from app.api.v1.disaster import router as disaster_router  # Verified disaster CRUD
+from app.api.v1 import disaster_evaluation # UC5: AI evaluation + dispatch trigger
+from app.api.v1 import scenario_engine     # Dev/test: pre-built disaster scenarios
+
+# ── Emergency response routers ────────────────────────────────────────────────
+from app.api.v1.emergency_unit import router as emergency_unit_router  # Unit CRUD + availability
+from app.api.v1.deployment import router as deployment_router          # UC6 existing: dispatch + status
+from app.api.v1 import deploy              # UC6 new: suggested units, GPS, routes, recall
+
+# ── Traffic + evacuation routers ─────────────────────────────────────────────
+from app.api.v1 import reroute             # UC7: Traffic rerouting
+from app.api.v1 import evacuation          # UC8: Evacuation planning
+
+# ── Map + real-time routers ───────────────────────────────────────────────────
+from app.api.v1 import live_map            # UC4: Live disaster map
+from app.api.v1 import vehicles            # Vehicle trip registration (map overlay)
+from app.api.v1.incident_log import router as incident_log_router  # Audit / incident log
+
+# ── User & notification routers ──────────────────────────────────────────────
+from app.api.v1.user_management import router as user_management_router  # Admin user CRUD
+from app.api.v1.notifications_ws import router as notifications_router   # WebSocket alerts
+from app.workers.reroute_publisher import get_publisher
+
+from app.db.session import get_db
+
+
+# ── Configure logging before anything else ────────────────────────────────────
 setup_logging()
 logger = logging.getLogger(__name__)
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# Lifespan — startup + graceful shutdown
+# ═════════════════════════════════════════════════════════════════════════════
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    Application lifespan manager.
-    Handles startup and shutdown events.
-    """
-    # Startup
+    # ── STARTUP ───────────────────────────────────────────────────────────────
     logger.info("=" * 70)
     logger.info(f"🚀 Starting {settings.APP_NAME} v{settings.APP_VERSION}")
-    logger.info(f"📍 Environment: {settings.ENVIRONMENT}")
-    logger.info(f"🔒 Debug Mode: {settings.DEBUG}")
-    logger.info(f"🔑 Access Token: {settings.ACCESS_TOKEN_EXPIRE_MINUTES} minutes ({settings.ACCESS_TOKEN_EXPIRE_MINUTES // 525600} year)")
-    logger.info(f"🔄 Refresh Token: {settings.REFRESH_TOKEN_EXPIRE_DAYS} days ({settings.REFRESH_TOKEN_EXPIRE_DAYS // 365} years)")
+    logger.info(f"📍 Environment : {settings.ENVIRONMENT}")
+    logger.info(f"🔒 Debug Mode  : {settings.DEBUG}")
+    logger.info(
+        f"🔑 Access Token : {settings.ACCESS_TOKEN_EXPIRE_MINUTES} min "
+        f"({settings.ACCESS_TOKEN_EXPIRE_MINUTES // 525600} year)"
+    )
+    logger.info(
+        f"🔄 Refresh Token: {settings.REFRESH_TOKEN_EXPIRE_DAYS} days "
+        f"({settings.REFRESH_TOKEN_EXPIRE_DAYS // 365} years)"
+    )
     logger.info("=" * 70)
 
-    map_provider = MapProvider(api_key=settings.MAPBOX_API_KEY)
+    # 1. Map + traffic providers (Mapbox + TomTom)
+    #    Shared by live map, disaster evaluation, and reroute services.
+    map_provider     = MapProvider(api_key=settings.MAPBOX_API_KEY)
     traffic_provider = TrafficProvider(api_key=settings.TRAFFIC_API_KEY)
     set_live_map_providers(map_provider, traffic_provider)
     set_evaluation_providers(map_provider, traffic_provider)
-    logger.info("🗺️  Map and traffic providers initialized")
+    logger.info("🗺️  Mapbox + TomTom providers initialised")
 
-    # Connect RabbitMQ publisher
+    # 2. RabbitMQ publisher (used by deploy, reroute, evacuation services)
+    #    If the broker is unreachable, the app runs in degraded mode —
+    #    all DB operations succeed but RabbitMQ events are silently dropped.
     publisher = get_publisher()
     await publisher.connect()
     if publisher.is_connected:
         logger.info("🐇 RabbitMQ publisher connected")
     else:
-        logger.warning("⚠️  RabbitMQ publisher not connected — running in degraded mode (notifications disabled)")
+        logger.warning(
+            "⚠️  RabbitMQ unavailable — running in degraded mode "
+            "(notifications disabled, all DB ops still work)"
+        )
 
-    # Start Redis pub/sub listener for WebSocket notifications
+    # 3. Redis pub/sub listener — delivers alerts to connected WebSocket clients
     listener_task = asyncio.create_task(redis_listener())
     logger.info("📡 Redis notification listener started")
 
-    yield
+    yield  # ── application runs here ──────────────────────────────────────────
 
-    # Shutdown
+    # ── SHUTDOWN ──────────────────────────────────────────────────────────────
     logger.info("=" * 70)
-    logger.info("Shutting down...")
+    logger.info("🛑 Shutting down...")
 
+    # Helper: run a cleanup coroutine with a hard timeout so that a hanging
+    # remote connection (Redis / RabbitMQ / aiohttp on Azure) never blocks
+    # the reload indefinitely.
+    async def _safe_close(coro, label: str, timeout: float = 3.0) -> None:
+        try:
+            await asyncio.wait_for(coro, timeout=timeout)
+            logger.debug(f"✅ {label} closed")
+        except asyncio.TimeoutError:
+            logger.warning(f"⚠️  {label} close timed out after {timeout}s — skipping")
+        except Exception as exc:
+            logger.warning(f"⚠️  {label} close error — {exc}")
+
+    # Cancel the Redis pub/sub listener task.
+    # Give it slightly longer than its own internal wait_for(timeout=5.0) so
+    # that the CancelledError always wins on Python 3.9/3.10 where wait_for
+    # can delay propagation until the inner timeout fires.
     listener_task.cancel()
     try:
-        await listener_task
-    except asyncio.CancelledError:
+        await asyncio.wait_for(asyncio.shield(listener_task), timeout=6.0)
+    except (asyncio.CancelledError, asyncio.TimeoutError):
         pass
 
-    await close_redis_connection()
-    await traffic_provider.close()
-    await publisher.close()
-    logger.info("Cleanup complete")
+    # Close remote connections — all guarded so a network blip never stalls
+    # the server for longer than the sum of these timeouts (~9 s worst-case).
+    await _safe_close(close_redis_connection(),   "Redis connection",   timeout=3.0)
+    await _safe_close(traffic_provider.close(),   "TomTom provider",    timeout=3.0)
+    await _safe_close(publisher.close(),          "RabbitMQ publisher", timeout=3.0)
+
+    logger.info("✅ Cleanup complete")
     logger.info("=" * 70)
 
 
-# Create FastAPI application
+# ═════════════════════════════════════════════════════════════════════════════
+# FastAPI app
+# ═════════════════════════════════════════════════════════════════════════════
+
 app = FastAPI(
     title=settings.APP_NAME,
     version=settings.APP_VERSION,
     description="""
-    ASE Emergency Services Backend API
-    
-    ## Features
-    
-    * **User Authentication** - OTP-based registration and login
-    * **Emergency Team Auth** - OTP registration + password login
-    * **Emergency Requests** - Submit and track emergency requests
-    * **Real-time Updates** - WebSocket notifications
-    * **Multi-Department** - Medical, Police, Fire, IT support
-    * **Long Sessions** - 1 year access tokens (no frequent re-login)
-    * **Redis Fallback** - Automatic in-memory cache when Redis unavailable
-    
-    ## Authentication
-    
-    ### Users (Regular Citizens)
-    - Register with phone number + OTP
-    - Login with phone number + OTP
-    - Access token valid for 1 year
-    
-    ### Emergency Teams (Responders)
-    - Register with phone number + password + OTP
-    - Login with email/phone + password (no OTP)
-    - Access token valid for 1 year
-    - Role-based access (Admin, Manager, Staff)
-    - Department-specific access
+    Dublin Disaster Response System — Backend API
+
+    ## Use Cases
+    * **UC1** — User + Emergency Team Authentication (OTP / password)
+    * **UC2** — Citizen Disaster Reporting
+    * **UC4** — Live Disaster Map (Mapbox + TomTom + PostGIS)
+    * **UC5** — Disaster Evaluation (Rules engine + XGBoost ensemble)
+    * **UC6** — Deploy Services (dispatch, GPS tracking, recall)
+    * **UC7** — Re-Route Traffic (TomTom + Socket.IO)
+    * **UC8** — Plan Evacuation (zone routing + shelter allocation)
+
+    ## Infrastructure
+    * **Auth** — JWT (1 year access tokens), Argon2id password hashing
+    * **DB** — PostgreSQL + PostGIS on Azure
+    * **Cache** — Redis (graceful in-memory fallback)
+    * **Events** — RabbitMQ (degraded mode when unavailable)
+    * **Real-time** — Socket.IO + WebSocket push notifications
     """,
     docs_url="/docs",
     redoc_url="/redoc",
     lifespan=lifespan,
-    debug=settings.DEBUG
+    debug=settings.DEBUG,
 )
 
 
-# CORS Middleware
+# ── CORS ─────────────────────────────────────────────────────────────────────
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # TODO: Update in production with specific origins
+    allow_origins=["*"],  # TODO: lock down to specific origins in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
-# Exception Handlers
+# ── Global error handler ──────────────────────────────────────────────────────
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    """
-    Global exception handler for unhandled errors.
-    Logs the error and returns a generic error response.
-    """
-    logger.exception(f"Unhandled error: {str(exc)}")
+    logger.exception(f"Unhandled error on {request.method} {request.url}: {exc}")
     return JSONResponse(
         status_code=500,
         content={
-            "error": "InternalServerError",
+            "error":   "InternalServerError",
             "message": "An unexpected error occurred. Please try again later.",
-            "details": str(exc) if settings.DEBUG else None
-        }
+            "details": str(exc) if settings.DEBUG else None,
+        },
     )
 
 
-# ── Include routers ─────────────────────────────────────────────────────────
-app.include_router(user_auth.router,             prefix="/api/v1")
-app.include_router(emergency_team_auth.router,   prefix="/api/v1")
-app.include_router(live_map.router,              prefix="/api/v1")
-app.include_router(scenario_engine.router,       prefix="/api/v1")
-app.include_router(reroute.router,               prefix="/api/v1")
-app.include_router(evacuation.router,            prefix="/api/v1")
-app.include_router(disaster_report.router,       prefix="/api/v1")
-app.include_router(disaster_router,              prefix="/api/v1")
-app.include_router(disaster_evaluation.router,   prefix="/api/v1")
-app.include_router(incident_log_router,          prefix="/api/v1")
-app.include_router(emergency_unit_router,        prefix="/api/v1")
-app.include_router(deployment_router,            prefix="/api/v1")
-app.include_router(user_management_router,       prefix="/api/v1")
-app.include_router(vehicles.router,              prefix="/api/v1")
-app.include_router(notifications_router,         prefix="/api/v1")
+# ═════════════════════════════════════════════════════════════════════════════
+# Router registration
+# Order matters: FastAPI matches routes top-to-bottom within each router,
+# so there are no ordering issues here — each router has its own prefix.
+# ═════════════════════════════════════════════════════════════════════════════
+
+# ── Authentication ────────────────────────────────────────────────────────────
+app.include_router(user_auth.router,           prefix="/api/v1")  # /auth/*
+app.include_router(emergency_team_auth.router, prefix="/api/v1")  # /emergency-team/*
+
+# ── Disaster lifecycle ────────────────────────────────────────────────────────
+app.include_router(disaster_report.router,     prefix="/api/v1")  # /disaster-reports/*
+app.include_router(disaster_router,            prefix="/api/v1")  # /disasters/*
+app.include_router(disaster_evaluation.router, prefix="/api/v1")  # /disaster-evaluation/*
+app.include_router(scenario_engine.router,     prefix="/api/v1")  # /scenarios/*
+
+# ── Emergency units + deployments (UC6) ──────────────────────────────────────
+app.include_router(emergency_unit_router,      prefix="/api/v1")  # /emergency-units/*
+app.include_router(deployment_router,          prefix="/api/v1")  # /deployments/* (existing)
+app.include_router(deploy.router,              prefix="/api/v1")  # /disasters/*/suggested-units, /deployments/*/location|route|recall, /routes/calculate
+
+# ── Traffic + evacuation ──────────────────────────────────────────────────────
+app.include_router(reroute.router,             prefix="/api/v1")  # /reroute/*
+app.include_router(evacuation.router,          prefix="/api/v1")  # /evacuations/*
+
+# ── Map + vehicles ────────────────────────────────────────────────────────────
+app.include_router(live_map.router,            prefix="/api/v1")  # /live-map/*
+app.include_router(vehicles.router,            prefix="/api/v1")  # /vehicles/*
+
+# ── Logging + admin ───────────────────────────────────────────────────────────
+app.include_router(incident_log_router,        prefix="/api/v1")  # /incident-log/*
+app.include_router(user_management_router,     prefix="/api/v1")  # /users/*
+
+# ── Real-time notifications ───────────────────────────────────────────────────
+app.include_router(notifications_router,       prefix="/api/v1")  # /ws/notifications
 
 
-# ── Demo page ────────────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# Utility endpoints
+# ═════════════════════════════════════════════════════════════════════════════
+
 @app.get("/demo", include_in_schema=False)
 async def demo_page():
-    """Serve the reroute live demo page."""
+    """Serve the reroute live demo HTML page (dev only)."""
     demo_path = Path(__file__).parent.parent / "demo.html"
     return FileResponse(str(demo_path))
 
 
-# ── Root endpoints ───────────────────────────────────────────────────────────
-@app.get(
-    "/",
-    tags=["Root"],
-    summary="API Root",
-    description="Welcome endpoint with API information"
-)
+@app.get("/", tags=["Root"], summary="API health check")
 async def root():
-    """API root endpoint. Returns basic API information and links."""
+    """Returns API status and version. Use /docs for full documentation."""
     return {
-        "message": f"Welcome to {settings.APP_NAME} API",
-        "version": settings.APP_VERSION,
+        "status":      "online",
+        "app":         settings.APP_NAME,
+        "version":     settings.APP_VERSION,
         "environment": settings.ENVIRONMENT,
-        "token_expiry": f"{settings.ACCESS_TOKEN_EXPIRE_MINUTES // 525600} year",
-        "docs": "/docs",
-        "redoc": "/redoc",
-        "health": "/health"
+        "docs":        "/docs",
     }
 
 
@@ -221,37 +285,52 @@ async def root():
     "/health",
     tags=["Root"],
     summary="Health Check",
-    description="Check if the API is running"
+    description="Check status of all major subsystems"
 )
-async def health_check():
-    """Health check endpoint. Returns API health status including Redis status."""
+async def health_check(db: AsyncSession = Depends(get_db)):
+    """
+    Returns per-subsystem health status.
+    Overall status is 'degraded' if any subsystem is down.
+    """
     from cache.redis_client import check_redis_health
-    redis_health = await check_redis_health()
+    from sqlalchemy import text
+
+    results = {}
+
+    # --- Database ---
+    try:
+        await db.execute(text("SELECT 1"))
+        results["database"] = "healthy"
+    except Exception as e:
+        logger.warning(f"Health check — database: {e}")
+        results["database"] = "down"
+
+    # --- Redis ---
+    try:
+        redis_health = await check_redis_health()
+        results["redis"] = redis_health["status"]   # "healthy" | "degraded" | "unhealthy"
+    except Exception as e:
+        logger.warning(f"Health check — redis: {e}")
+        results["redis"] = "down"
+
+    # --- RabbitMQ / publisher ---
+    try:
+        publisher = get_publisher()
+        results["rabbitmq"] = "healthy" if publisher else "down"
+    except Exception as e:
+        logger.warning(f"Health check — rabbitmq: {e}")
+        results["rabbitmq"] = "down"
+
+    overall = "healthy" if all(v == "healthy" for v in results.values()) else "degraded"
+
     return {
-        "status": "healthy",
+        "status": overall,
         "service": settings.APP_NAME,
         "version": settings.APP_VERSION,
         "environment": settings.ENVIRONMENT,
-        "redis": redis_health
+        **results,
     }
 
 
-# ---------------------------------------------------------------------------
-# Mount Socket.IO as ASGI middleware
-# ---------------------------------------------------------------------------
-# Wrap FastAPI app with Socket.IO so both share the same port.
-# HTTP requests → FastAPI, WebSocket requests → Socket.IO
+
 socket_app = socketio.ASGIApp(sio, other_asgi_app=app)
-
-
-# Development server runner
-if __name__ == "__main__":
-    import uvicorn
-
-    uvicorn.run(
-        "app.main:socket_app",  # Run socket_app, not app
-        host="0.0.0.0",
-        port=8000,
-        reload=settings.DEBUG,
-        log_level="info" if not settings.DEBUG else "debug"
-    )

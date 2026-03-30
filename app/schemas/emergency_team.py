@@ -1,10 +1,10 @@
 # File: app/schemas/emergency_team.py
 """
-Emergency team schemas (DTOs) for API requests and responses.
+Emergency team schemas for API requests and responses.
 
 Defines Pydantic models for:
 - Emergency team registration
-- Emergency team login
+- Emergency team login (2-step: password → OTP)
 - Team member responses
 """
 
@@ -16,7 +16,7 @@ import re
 class EmergencyTeamRegisterRequest(BaseModel):
     """
     Emergency team registration request schema.
-    
+
     Team members register with password (not OTP).
     """
     phone_number: str = Field(
@@ -54,7 +54,7 @@ class EmergencyTeamRegisterRequest(BaseModel):
         description="Optional employee ID",
         max_length=50
     )
-    
+
     @field_validator("phone_number")
     @classmethod
     def validate_phone_number(cls, v: str) -> str:
@@ -64,7 +64,7 @@ class EmergencyTeamRegisterRequest(BaseModel):
                 "Phone number must be in E.164 format (e.g., +1234567890)"
             )
         return v
-    
+
     @field_validator("email")
     @classmethod
     def validate_email(cls, v: str) -> str:
@@ -72,13 +72,13 @@ class EmergencyTeamRegisterRequest(BaseModel):
         if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', v):
             raise ValueError("Invalid email format")
         return v.lower()
-    
+
     @field_validator("password")
     @classmethod
     def validate_password(cls, v: str) -> str:
         """
         Validate password strength.
-        
+
         Requirements:
         - At least 8 characters
         - Contains uppercase letter
@@ -87,18 +87,18 @@ class EmergencyTeamRegisterRequest(BaseModel):
         """
         if len(v) < 8:
             raise ValueError("Password must be at least 8 characters long")
-        
+
         if not re.search(r'[A-Z]', v):
             raise ValueError("Password must contain at least one uppercase letter")
-        
+
         if not re.search(r'[a-z]', v):
             raise ValueError("Password must contain at least one lowercase letter")
-        
+
         if not re.search(r'\d', v):
             raise ValueError("Password must contain at least one digit")
-        
+
         return v
-    
+
     @field_validator("role")
     @classmethod
     def validate_role(cls, v: str) -> str:
@@ -122,7 +122,7 @@ class EmergencyTeamRegisterRequest(BaseModel):
         except ValueError:
             valid = [m.value for m in Department]
             raise ValueError(f"Department must be one of: {valid} (case-insensitive)")
-    
+
     model_config = {
         "json_schema_extra": {
             "examples": [
@@ -142,62 +142,74 @@ class EmergencyTeamRegisterRequest(BaseModel):
 
 class EmergencyTeamLoginRequest(BaseModel):
     """
-    Emergency team login request schema.
-    
-    Team members can login with either email or phone number + password.
+    Emergency team login — Step 1 request schema.
+
+    Team members initiate login with email + password.
+    On success an OTP is dispatched to their registered phone number.
     """
-    email: Optional[str] = Field(
-        None,
-        description="Email address (use email OR phone_number)"
-    )
-    phone_number: Optional[str] = Field(
-        None,
-        description="Phone number (use email OR phone_number)"
+    email: str = Field(
+        ...,
+        description="Registered email address"
     )
     password: str = Field(
         ...,
-        description="Password"
+        description="Account password"
     )
-    
+
     @field_validator("email")
     @classmethod
-    def validate_email(cls, v: Optional[str]) -> Optional[str]:
-        """Validate email format if provided."""
-        if v is None:
-            return v
+    def validate_email(cls, v: str) -> str:
+        """Validate email format."""
         if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', v):
             raise ValueError("Invalid email format")
         return v.lower()
-    
-    @field_validator("phone_number")
-    @classmethod
-    def validate_phone_number(cls, v: Optional[str]) -> Optional[str]:
-        """Validate phone number format if provided."""
-        if v is None:
-            return v
-        if not re.match(r'^\+[1-9]\d{7,14}$', v):
-            raise ValueError(
-                "Phone number must be in E.164 format (e.g., +1234567890)"
-            )
-        return v
-    
-    def model_post_init(self, __context):
-        """Ensure either email or phone_number is provided."""
-        if not self.email and not self.phone_number:
-            raise ValueError("Either email or phone_number must be provided")
-        if self.email and self.phone_number:
-            raise ValueError("Provide either email or phone_number, not both")
-    
+
     model_config = {
         "json_schema_extra": {
             "examples": [
                 {
                     "email": "john.doe@emergency.ie",
                     "password": "SecurePass123"
-                },
+                }
+            ]
+        }
+    }
+
+
+class EmergencyTeamLoginVerifyRequest(BaseModel):
+    """
+    Emergency team login — Step 2 request schema.
+
+    After receiving the OTP on their registered phone the member submits
+    the phone number and OTP to complete the login and receive JWT tokens.
+    """
+    phone_number: str = Field(
+        ...,
+        description="Registered phone number in E.164 format (+1234567890)"
+    )
+    otp: str = Field(
+        ...,
+        description="6-digit OTP received via SMS",
+        min_length=6,
+        max_length=6
+    )
+
+    @field_validator("phone_number")
+    @classmethod
+    def validate_phone_number(cls, v: str) -> str:
+        """Validate phone number is in E.164 format."""
+        if not re.match(r'^\+[1-9]\d{7,14}$', v):
+            raise ValueError(
+                "Phone number must be in E.164 format (e.g., +1234567890)"
+            )
+        return v
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
                 {
                     "phone_number": "+1234567890",
-                    "password": "SecurePass123"
+                    "otp": "482931"
                 }
             ]
         }
@@ -207,7 +219,7 @@ class EmergencyTeamLoginRequest(BaseModel):
 class EmergencyTeamResponse(BaseModel):
     """
     Emergency team member data response schema.
-    
+
     Public information returned in API responses.
     """
     id: str = Field(..., description="Team member ID (UUID)")
@@ -219,7 +231,7 @@ class EmergencyTeamResponse(BaseModel):
     employee_id: Optional[str] = Field(None, description="Employee ID")
     status: str = Field(..., description="Account status")
     created_at: str = Field(..., description="Account creation timestamp")
-    
+
     model_config = {
         "from_attributes": True,
         "json_schema_extra": {
@@ -243,12 +255,13 @@ class EmergencyTeamResponse(BaseModel):
 class EmergencyTeamAuthResponse(BaseModel):
     """
     Complete emergency team authentication response.
-    
+
     Combines team member and token data.
+    Returned only after full 2-step login is complete.
     """
     team_member: EmergencyTeamResponse
     tokens: dict  # TokenResponse from common schemas
-    
+
     model_config = {
         "json_schema_extra": {
             "examples": [

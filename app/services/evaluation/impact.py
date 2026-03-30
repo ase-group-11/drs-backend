@@ -12,17 +12,35 @@ from typing import Optional
 
 # Impact radius (km) keyed by disaster_type value × severity value
 _IMPACT_RADIUS_KM: dict[str, dict[str, float]] = {
-    "fire":       {"low": 0.5,  "medium": 1.0,  "high": 2.0,  "critical": 5.0},
-    "flood":      {"low": 1.0,  "medium": 3.0,  "high": 8.0,  "critical": 15.0},
-    "earthquake": {"low": 5.0,  "medium": 15.0, "high": 30.0, "critical": 60.0},
-    "hurricane":  {"low": 10.0, "medium": 30.0, "high": 60.0, "critical": 100.0},
-    "tornado":    {"low": 0.5,  "medium": 2.0,  "high": 5.0,  "critical": 10.0},
-    "tsunami":    {"low": 5.0,  "medium": 15.0, "high": 30.0, "critical": 50.0},
-    "drought":    {"low": 10.0, "medium": 30.0, "high": 80.0, "critical": 200.0},
-    "heatwave":   {"low": 5.0,  "medium": 20.0, "high": 50.0, "critical": 100.0},
-    "coldwave":   {"low": 5.0,  "medium": 20.0, "high": 50.0, "critical": 100.0},
-    "storm":      {"low": 5.0,  "medium": 15.0, "high": 30.0, "critical": 60.0},
-    "other":      {"low": 1.0,  "medium": 3.0,  "high": 8.0,  "critical": 20.0},
+    # Fire: highly localised — even a large structural fire affects a few blocks
+    "fire":       {"low": 0.3,  "medium": 0.5,  "high": 1.0,  "critical": 2.0},
+
+    # Flood: road-level impact, not regional — Churchtown flood blocks nearby streets
+    "flood":      {"low": 0.5,  "medium": 1.0,  "high": 2.0,  "critical": 3.0},
+
+    # Earthquake: Ireland has minor seismic activity only — city-scale at most
+    "earthquake": {"low": 1.0,  "medium": 3.0,  "high": 5.0,  "critical": 8.0},
+
+    # Hurricane: Ireland gets severe storms, not true hurricanes — affects wider area
+    "hurricane":  {"low": 3.0,  "medium": 5.0,  "high": 8.0,  "critical": 12.0},
+
+    # Tornado: very rare in Ireland, tight damage path
+    "tornado":    {"low": 0.3,  "medium": 0.8,  "high": 2.0,  "critical": 4.0},
+
+    # Tsunami: coastal only — inland penetration limited in Dublin Bay area
+    "tsunami":    {"low": 1.0,  "medium": 2.0,  "high": 4.0,  "critical": 6.0},
+
+    # Drought/heatwave/coldwave: regional phenomena — not useful as point-source
+    # radii for city response, keep small for notification targeting only
+    "drought":    {"low": 1.0,  "medium": 2.0,  "high": 3.0,  "critical": 5.0},
+    "heatwave":   {"low": 1.0,  "medium": 2.0,  "high": 3.0,  "critical": 5.0},
+    "coldwave":   {"low": 1.0,  "medium": 2.0,  "high": 3.0,  "critical": 5.0},
+
+    # Storm: affects roads and infrastructure across a wider city area
+    "storm":      {"low": 1.0,  "medium": 2.0,  "high": 4.0,  "critical": 6.0},
+
+    # Other: default to flood-like values
+    "other":      {"low": 0.5,  "medium": 1.0,  "high": 2.0,  "critical": 3.0},
 }
 
 # Fallback urban population density (people per km²) — Irish urban context
