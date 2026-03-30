@@ -224,7 +224,7 @@ async def change_password(
     service = EmergencyTeamService(db)
     try:
         result = await service.change_password(
-            team_member_id=current_user["id"],
+            team_member_id=current_user["user_id"],
             old_password=request.old_password,
             new_password=request.new_password,
         )
@@ -253,7 +253,7 @@ async def deactivate_team_member(
     try:
         result = await service.deactivate_team_member(
             team_member_id=team_member_id,
-            requesting_user_id=current_user["id"],
+            requesting_user_id=current_user["user_id"],
         )
         return MessageResponse(**result)
     except ValueError as exc:
