@@ -70,6 +70,7 @@ from app.api.v1.incident_log import router as incident_log_router  # Audit / inc
 # ── User & notification routers ──────────────────────────────────────────────
 from app.api.v1.user_management import router as user_management_router  # Admin user CRUD
 from app.api.v1.notifications_ws import router as notifications_router   # WebSocket alerts
+from app.workers.reroute_publisher import get_publisher
 
 from app.db.session import get_db
 

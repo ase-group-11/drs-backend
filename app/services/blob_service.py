@@ -76,7 +76,6 @@ def _generate_sas_url(blob_name: str, account_name: str, account_key: str) -> st
 
     return sas_url
 
-
 def refresh_sas_url(stored_url: str, refresh_threshold_hours: int = 2) -> str:
     """
     Return a fresh SAS URL only if the existing one expires within

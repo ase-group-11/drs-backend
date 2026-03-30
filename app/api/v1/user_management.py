@@ -205,16 +205,17 @@ async def list_all_users(
                 )
 
             team_sql = text(f"""
-                SELECT et.id, et.full_name, et.email, et.phone_number,
-                       et.role, et.status, et.department, et.employee_id, et.created_at,
-                       COUNT(DISTINCT dr.id) AS reviews_count,
-                       COUNT(DISTINCT uc.unit_id) AS assigned_units_count,
-                       COUNT(DISTINCT eu_cmd.id) AS commanding_units_count,
-                       COALESCE(
-                           ARRAY_AGG(DISTINCT eu.unit_code) FILTER (WHERE eu.unit_code IS NOT NULL),
-                           ARRAY[]::text[]
-                       ) AS current_unit_codes,
-                       'team' AS user_type
+                SELECT
+                    et.id, et.full_name, et.email, et.phone_number,
+                    et.role, et.status, et.department, et.employee_id,
+                    et.created_at,
+                    'team' as user_type,
+                    (SELECT COUNT(*) FROM disaster_reports dr WHERE dr.reviewed_by_id = et.id) as reviews_count,
+                    (SELECT COUNT(*) FROM unit_crew uc JOIN emergency_units eu ON uc.unit_id = eu.id WHERE uc.team_member_id = et.id AND eu.deleted_at IS NULL) as assigned_units_count,
+                    (SELECT COUNT(*) FROM emergency_units eu WHERE eu.commander_id = et.id AND eu.deleted_at IS NULL) as commanding_units_count,
+                    (SELECT ARRAY_AGG(eu.unit_code) FROM unit_crew uc
+                     JOIN emergency_units eu ON uc.unit_id = eu.id
+                     WHERE uc.team_member_id = et.id AND eu.deleted_at IS NULL) as current_unit_codes
                 FROM emergency_teams et
                 LEFT JOIN disaster_reports dr ON dr.reviewed_by_id = et.id
                 LEFT JOIN unit_crew uc ON uc.team_member_id = et.id
@@ -319,33 +320,24 @@ async def get_user(
                 "updated_at":   citizen["updated_at"].isoformat() if citizen["updated_at"] else None,
             }
 
-        # ── Try team members ──────────────────────────────────────────────────
-        team_result = await db.execute(
-            text("""
-                SELECT et.id, et.full_name, et.email, et.phone_number,
-                       et.role, et.status, et.department, et.employee_id,
-                       et.created_at, et.updated_at,
-                       COUNT(DISTINCT dr.id) AS reviews_count,
-                       COUNT(DISTINCT uc.unit_id) AS assigned_units,
-                       COUNT(DISTINCT eu_cmd.id) AS commanding_units,
-                       COALESCE(
-                           ARRAY_AGG(DISTINCT eu.unit_code) FILTER (WHERE eu.unit_code IS NOT NULL),
-                           ARRAY[]::text[]
-                       ) AS unit_codes
-                FROM emergency_teams et
-                LEFT JOIN disaster_reports dr ON dr.reviewed_by_id = et.id
-                LEFT JOIN unit_crew uc ON uc.team_member_id = et.id
-                LEFT JOIN emergency_units eu ON uc.unit_id = eu.id AND eu.deleted_at IS NULL
-                LEFT JOIN emergency_units eu_cmd ON eu_cmd.commander_id = et.id AND eu_cmd.deleted_at IS NULL
-                WHERE et.id = :uid AND et.deleted_at IS NULL
-                GROUP BY et.id, et.full_name, et.email, et.phone_number,
-                         et.role, et.status, et.department, et.employee_id,
-                         et.created_at, et.updated_at
-            """),
-            {"uid": user_id},
-        )
-        team = team_result.mappings().first()
-        if team:
+        team_sql = text("""
+            SELECT
+                et.id, et.full_name, et.email, et.phone_number,
+                et.role, et.status, et.department, et.employee_id,
+                et.created_at, et.updated_at,
+                (SELECT COUNT(*) FROM disaster_reports dr WHERE dr.reviewed_by_id = et.id) as reviews_count,
+                (SELECT COUNT(*) FROM unit_crew uc JOIN emergency_units eu ON uc.unit_id = eu.id WHERE uc.team_member_id = et.id AND eu.deleted_at IS NULL) as assigned_units,
+                (SELECT COUNT(*) FROM emergency_units eu WHERE eu.commander_id = et.id AND eu.deleted_at IS NULL) as commanding_units,
+                (SELECT ARRAY_AGG(eu.unit_code) FROM unit_crew uc
+                 JOIN emergency_units eu ON uc.unit_id = eu.id
+                 WHERE uc.team_member_id = et.id AND eu.deleted_at IS NULL) as unit_codes
+            FROM emergency_teams et
+            WHERE et.id = :user_id AND et.deleted_at IS NULL
+        """)
+        result = await db.execute(team_sql, {"user_id": user_id})
+        row = result.mappings().first()
+
+        if row:
             return {
                 "id":           str(team["id"]),
                 "full_name":    team["full_name"],
