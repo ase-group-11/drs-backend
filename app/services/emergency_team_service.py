@@ -21,9 +21,10 @@ from typing import Optional, Dict, Any
 from sqlalchemy.ext.asyncio import AsyncSession
 import logging
 import uuid
+import asyncio
 
 from app.repositories.emergency_team_repository import EmergencyTeamRepository
-from app.services.otp_service import send_otp_code, verify_otp
+from app.services.otp_service import send_otp_code, verify_otp, check_rate_limit, peek_rate_limit
 from app.services.registration_cache import (
     store_registration_data,
     get_registration_data,
@@ -217,13 +218,14 @@ class EmergencyTeamService:
         """
         Login step 1 — verify email + password, then send OTP.
 
-        Steps:
-        1. Look up active team member by email
-        2. Verify password (Argon2)
-        3. Generate a random login_token and store {phone_number, member_id}
-           in Redis keyed by that token — phone number is never sent to client
-        4. Send OTP to the member's registered phone number
-        5. Return {message, login_token}
+        Optimisations applied:
+        - Argon2 runs in a thread-pool executor (CPU-bound, was blocking the
+          event loop for ~1-2s on every request)
+        - Rate limit is peeked (no counter increment) before any work is
+          committed, fixing the previous double-increment bug
+        - Twilio SMS is fired as a background asyncio task — the response
+          returns as soon as the login_token is stored in Redis (~50ms),
+          not after the SMS round-trip (~2-4s)
 
         Args:
             email:    Registered email address
@@ -233,24 +235,43 @@ class EmergencyTeamService:
             {"message": "...", "login_token": "<uuid>"}
 
         Raises:
-            ValueError: bad credentials / inactive account
+            ValueError:        bad credentials / inactive account / rate limited
+            ValueError("rate_limit:..."): rate limit exceeded → router returns 429
         """
         logger.info(f"🔑 Login step 1 for {email}")
 
         try:
+            # ── 1. DB lookup ──────────────────────────────────────────────────
             team_member = await self.team_repo.get_active_team_member_by_email(email)
             if not team_member:
                 logger.warning(f"❌ Team member not found or inactive: {email}")
                 raise ValueError("Invalid credentials or account is not active")
 
-            if not verify_password(password, team_member.password_hash):
+            # ── 2. Argon2 in thread executor ──────────────────────────────────
+            # verify_password is synchronous and CPU-bound (64 MB, 3 iterations).
+            # Running it in the default ThreadPoolExecutor keeps the event loop
+            # free to handle other requests during the ~1-2s hash check.
+            loop = asyncio.get_running_loop()
+            is_valid = await loop.run_in_executor(
+                None, verify_password, password, team_member.password_hash
+            )
+            if not is_valid:
                 logger.warning("❌ Invalid password")
                 raise ValueError("Invalid credentials")
 
             logger.debug(f"✅ Password verified for {email}")
 
-            # Generate a random token and store the phone number against it.
-            # The client receives only the token — the phone number stays server-side.
+            # ── 3. Peek rate limit (no increment) ─────────────────────────────
+            # peek_rate_limit reads the counter without touching it.
+            # send_otp_code (called in the background) does the real increment,
+            # so each login attempt consumes exactly one rate-limit slot.
+            if not await peek_rate_limit(team_member.phone_number):
+                raise ValueError(
+                    "rate_limit: Too many OTP requests for this account. "
+                    "Please wait before trying again."
+                )
+
+            # ── 4. Store login session token in Redis ─────────────────────────
             login_token = str(uuid.uuid4())
             pending_ttl = settings.OTP_EXPIRY_SECONDS + 60
             import json as _json
@@ -263,16 +284,21 @@ class EmergencyTeamService:
                 pending_ttl
             )
 
-            # Send OTP to the registered phone
-            otp = await send_otp_code(team_member.phone_number)
-            if not otp:
-                await delete_key(_login_token_key(login_token))
-                raise Exception("OTP service failed — please try again")
+            # ── 5. Fire SMS in background — return immediately ────────────────
+            # The client gets the login_token as soon as the Redis write above
+            # completes (~5ms).  The Twilio round-trip happens concurrently.
+            # If SMS fails, the background task cleans up the token so the
+            # client gets a clean "session not found" on the next step.
+            asyncio.create_task(
+                self._send_login_otp_background(
+                    team_member.phone_number, login_token
+                )
+            )
 
-            logger.info(f"✅ Login OTP sent to {team_member.phone_number}")
+            logger.info(f"✅ Login token issued for {email}, OTP sending in background")
             return {
                 "message": (
-                    "Password verified. An OTP has been sent to your registered "
+                    "Password verified. An OTP is being sent to your registered "
                     "phone number. Please verify to complete login."
                 ),
                 "login_token": login_token
@@ -283,6 +309,36 @@ class EmergencyTeamService:
         except Exception:
             logger.exception("❌ Login step 1 failed")
             raise
+
+    async def _send_login_otp_background(
+        self,
+        phone_number: str,
+        login_token: str
+    ) -> None:
+        """
+        Background task: send OTP via Twilio and clean up on failure.
+
+        Called with asyncio.create_task — not awaited by the login endpoint.
+        If the SMS fails for any reason the login_token is deleted from Redis
+        so the client receives a clean error on step 2 instead of an
+        unexplained "invalid OTP".
+        """
+        try:
+            otp = await send_otp_code(phone_number)
+            if not otp:
+                logger.error(
+                    f"❌ OTP send returned None for {phone_number} — "
+                    "removing login token"
+                )
+                await delete_key(_login_token_key(login_token))
+            else:
+                logger.info(f"✅ Login OTP delivered to {phone_number}")
+        except Exception as exc:
+            logger.error(
+                f"❌ Background OTP send failed for {phone_number}: {exc} — "
+                "removing login token"
+            )
+            await delete_key(_login_token_key(login_token))
 
     async def verify_login_otp(
         self,

@@ -1,5 +1,3 @@
-
-
 # File: app/services/otp_service.py
 """
 OTP service - UPDATED to use Redis fallback helpers
@@ -113,12 +111,12 @@ async def verify_otp(phone_number: str, otp: str) -> bool:
 
 async def check_rate_limit(
     phone_number: str,
-    max_attempts: int = 3,
+    max_attempts: int = 5,
     window_seconds: int = 3600
 ) -> bool:
     """
     Check rate limit with automatic fallback.
-    
+
     UPDATED: Skips rate limiting in testing environment.
     Uses get_value and set_with_expiry for automatic fallback.
     """
@@ -126,22 +124,22 @@ async def check_rate_limit(
     if settings.ENVIRONMENT == "testing":
         logger.debug(f"🧪 TESTING mode - Rate limiting DISABLED")
         return True
-    
+
     logger.debug(f"🔍 Checking rate limit for {phone_number} (max: {max_attempts}/hour)")
-    
+
     try:
         key = _get_rate_limit_key(phone_number)
-        
+
         # Get current count (with automatic fallback)
         count_str = await get_value(key)
         current_count = int(count_str) if count_str else 0
-        
+
         logger.debug(f"Current OTP requests: {current_count}/{max_attempts}")
-        
+
         if current_count >= max_attempts:
             logger.warning(f"❌ Rate limit exceeded: {current_count} requests")
             return False
-        
+
         # Increment counter
         if current_count == 0:
             await set_with_expiry(key, "1", window_seconds)
@@ -150,13 +148,37 @@ async def check_rate_limit(
             new_count = str(current_count + 1)
             await set_with_expiry(key, new_count, window_seconds)
             logger.debug(f"✅ Counter incremented to {new_count}")
-        
+
         return True
-        
+
     except Exception as e:
         logger.error(f"❌ Rate limit check error: {e}")
         # Allow on error to not block users
         return True
+
+
+async def peek_rate_limit(
+    phone_number: str,
+    max_attempts: int = 5,
+) -> bool:
+    """
+    Check whether rate limit is exceeded WITHOUT incrementing the counter.
+
+    Use this for early-exit checks before committing to an operation —
+    the actual increment happens inside check_rate_limit / send_otp_code.
+    Always returns True in testing mode.
+    """
+    if settings.ENVIRONMENT == "testing":
+        return True
+
+    try:
+        key = _get_rate_limit_key(phone_number)
+        count_str = await get_value(key)
+        current_count = int(count_str) if count_str else 0
+        return current_count < max_attempts
+    except Exception as e:
+        logger.error(f"❌ peek_rate_limit error: {e}")
+        return True  # fail open
 
 
 async def send_otp_code(phone_number: str) -> Optional[str]:
