@@ -224,8 +224,9 @@ async def apply_override(
     summary="Get active reroute plan for a disaster",
     response_model=Dict[str, Any],
 )
-async def get_reroute_status(
+async def get_citizen_route(
     disaster_id: str,
+    route_id: str,
     db: AsyncSession = Depends(get_db),
 ):
     """Return the currently active reroute plan for a disaster."""
@@ -237,60 +238,6 @@ async def get_reroute_status(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"No active reroute plan found for disaster_id={disaster_id}",
         )
-    return plan
-
-
-@router.get(
-    "/status/{disaster_id}/route/{route_id}",
-    summary="Get a single assigned route for a citizen",
-    response_model=Dict[str, Any],
-)
-async def get_citizen_route(
-    disaster_id: str,
-    route_id: str,
-    db: AsyncSession = Depends(get_db),
-):
-    """
-    Citizen endpoint — returns geometry for a single assigned route.
-
-    Called by the citizen frontend after receiving a reroute.triggered
-    WebSocket notification containing their route_assignments[user_id].
-
-    Returns only the one route the citizen needs to follow — not the
-    full plan with all routes (that is ERT-only via /status/{disaster_id}).
-    """
-    repo = RerouteRepository(db)
-    plan = await repo.get_active_reroute_plan(disaster_id)
-
-    if not plan:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"No active reroute plan found for disaster_id={disaster_id}",
-        )
-
-    # Find the specific route in chosen_routes
-    chosen_routes = plan.get("chosen_routes", [])
-    route = next((r for r in chosen_routes if r.get("route_id") == route_id), None)
-
-    if not route:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Route {route_id} not found in active plan for disaster {disaster_id}",
-        )
-
-    return {
-        "disaster_id":          disaster_id,
-        "plan_id":              plan.get("id"),
-        "route_id":             route.get("route_id"),
-        "travel_time_seconds":  route.get("travel_time_seconds"),
-        "length_meters":        route.get("length_meters"),
-        "traffic_delay_seconds":route.get("traffic_delay_seconds"),
-        "departure_time":       route.get("departure_time"),
-        "arrival_time":         route.get("arrival_time"),
-        "points":               route.get("points", []),
-        "geojson":              route.get("geojson", {}),
-        "instructions":         route.get("instructions", []),
-    }
 
 @router.get(
         "/plans",
@@ -318,74 +265,3 @@ async def reroute_health(
 ):
     """Check TomTom integration service status and circuit breaker state."""
     return await external.health_check()
-
-
-# ---------------------------------------------------------------------------
-# Simulation endpoints (demo only)
-# ---------------------------------------------------------------------------
-
-class SimulationRequest(BaseModel):
-    disaster_id: str = Field(..., description="Disaster ID with an active reroute plan")
-    speed: str = Field(
-        default="normal",
-        description="Simulation speed: 'slow' (3s/step), 'normal' (1.5s/step), 'fast' (0.5s/step)",
-    )
-
-    @field_validator("speed")
-    @classmethod
-    def validate_speed(cls, v: str) -> str:
-        if v not in ("slow", "normal", "fast"):
-            raise ValueError("speed must be 'slow', 'normal', or 'fast'")
-        return v
-
-
-class SimulationStopRequest(BaseModel):
-    disaster_id: str
-
-
-@router.post(
-    "/simulate/start",
-    summary="Start vehicle movement simulation (demo)",
-    response_model=Dict[str, Any],
-)
-async def start_simulation(
-    request: SimulationRequest,
-):
-    """
-    Start demo simulation — moves registered vehicles along their assigned
-    reroute routes step by step. Publishes vehicle.location_updated events
-    via WebSocket so the frontend can animate vehicle pins on the map.
-
-    Runs in background until all vehicles reach destination or stop is called.
-    """
-    from app.services.simulation_service import start_simulation as _start
-    return await _start(
-        disaster_id=request.disaster_id,
-        speed=request.speed,
-    )
-
-
-@router.post(
-    "/simulate/stop",
-    summary="Stop vehicle movement simulation (demo)",
-    response_model=Dict[str, Any],
-)
-async def stop_simulation(request: SimulationStopRequest):
-    """Stop a running simulation for a disaster."""
-    from app.services.simulation_service import stop_simulation as _stop
-    return await _stop(disaster_id=request.disaster_id)
-
-
-@router.get(
-    "/simulate/status",
-    summary="List all running simulations (demo)",
-    response_model=Dict[str, Any],
-)
-async def simulation_status():
-    """List all active simulations and their status."""
-    from app.services.simulation_service import list_simulations
-    sims = list_simulations()
-    return {
-        "active_simulations": sims,
-        "count": len(sims),
-    }

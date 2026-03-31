@@ -1,46 +1,39 @@
 # File: app/api/v1/notifications_ws.py
 """
-WebSocket Notification Endpoint + Redis pub/sub Listener
+Authenticated WebSocket Notification Endpoint + Redis pub/sub listener.
 
-Delivers real-time alerts to connected clients over an authenticated WebSocket.
+Authentication Flow:
+  Client sends JWT token as a query parameter:
+    ws://host/api/v1/ws/notifications?token=<access_token>
 
-Auth flow (JWT via query param — not Authorization header):
-  ws://host/api/v1/ws/notifications?token=<access_token>
-  1. Validate JWT — close with code 4001 if invalid or expired
-  2. Fetch user profile (phone, email, full_name) from DB
-  3. Register client in connected_clients dict
-  4. Read optional initial location frame (15 s timeout)
-  5. Flush any alerts queued while user was offline
-  6. Enter heartbeat loop — client sends ping every ~3 min to refresh location
+  On connect the server:
+    1. Validates the JWT token (closes with 4001 if invalid/expired)
+    2. Fetches user's real phone + email from DB (users or emergency_teams table)
+    3. Stores user profile in connected_clients registry
+    4. Flushes any queued offline alerts
+    5. Stores user location in Redis (geo targeting)
 
-Heartbeat frame (client → server):
-  {"type": "ping", "lat": 53.34, "lon": -6.26}
-  user_id is NOT required — it comes from the validated token.
+Heartbeat (client → server every 3 min):
+    {"type": "ping", "lat": 53.34, "lon": -6.26}
+    Note: user_id is NO LONGER needed in the frame — it comes from the token.
 
 Alert envelope delivered to client:
-  {
-    "service":    "disaster" | "reroute" | "coordination",
-    "event_type": "disaster.dispatched" | "reroute.triggered" | ...,
-    "severity":   "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | "INFO",
-    "colour":     "red" | "orange" | "yellow" | "blue" | "green",
-    "title":      "...",
-    "message":    "...",
-    "data":       { ... },
-    "timestamp":  "ISO-8601"
-  }
+{
+  "service":    "disaster" | "reroute" | "coordination",
+  "event_type": "disaster.dispatched" | ...,
+  "severity":   "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | "INFO",
+  "colour":     "red" | "orange" | "yellow" | "blue" | "green",
+  "title":      "...",
+  "message":    "...",
+  "data":       { ... },
+  "timestamp":  "ISO-8601"
+}
 
-Targeting:
-  Redis messages may include a "target_user_ids" list. When present, the alert
-  is sent only to those connected users. When absent, it broadcasts to all.
-  The notification_consumer also reads connected_clients to get real phone/email
-  per user for SMS/email delivery without those fields travelling through RabbitMQ.
+The consumer now also receives real phone/email per connected user so it can
+route SMS/Email directly from the notification_consumer without the deployment
+service having to pass those fields through RabbitMQ.
 
-Redis pub/sub:
-  redis_listener() is started as an asyncio task in main.py lifespan.
-  It subscribes to the "app_alerts" channel, strips the targeting field,
-  and fans the alert out via broadcast_to_users().
-
-
+Python 3.9 compatible.
 """
 
 import asyncio
@@ -57,7 +50,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.jwt_handler import decode_token
 from app.core.config import settings
-from app.db.session import get_db
+from app.db.session import get_db                   # FastAPI DB dependency
 from app.services.location_registry import (
     delete_user_location,
     flush_offline_alerts,
@@ -65,29 +58,23 @@ from app.services.location_registry import (
 )
 
 logger = logging.getLogger("notifications_ws")
-
-router = APIRouter(tags=["Notifications"])
+router  = APIRouter(tags=["Notifications"])
 
 REDIS_URL     = settings.REDIS_URL
 REDIS_CHANNEL = "app_alerts"
 
-# Connected client registry
+# ── Connected client registry ─────────────────────────────────
 # user_id → { "ws": WebSocket, "phone": str, "email": str,
 #              "full_name": str, "user_type": str }
 connected_clients: Dict[str, Dict[str, Any]] = {}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# DB helper — fetches real contact details at connect time
-# ─────────────────────────────────────────────────────────────────────────────
+# ── DB helpers (run inside a fresh async session) ─────────────
 
 async def _fetch_user_profile(user_id: str, user_type: str) -> Dict[str, Any]:
     """
-    Fetch phone_number, email, and full_name from the appropriate table.
-
-    Uses the get_db() generator directly (Python 3.9 compatible — no
-    async_session_factory). Returns empty strings if the user is not found
-    so the caller never has to handle None values.
+    Fetch phone_number and email from DB based on user_type.
+    Returns dict with phone, email, full_name. Empty strings if not found.
     """
     profile = {"phone": "", "email": "", "full_name": ""}
     try:
@@ -129,9 +116,7 @@ async def _fetch_user_profile(user_id: str, user_type: str) -> Dict[str, Any]:
     return profile
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Targeted broadcaster
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Targeted broadcaster ──────────────────────────────────────
 
 async def broadcast_to_users(
     message: str,
@@ -139,17 +124,8 @@ async def broadcast_to_users(
     target_roles: Optional[Set[str]] = None,
 ) -> None:
     """
-    Send message to targeted users with optional role filtering.
-
-    Targeting rules:
-    - If target_roles is set, all connected users whose user_type is in
-      target_roles receive the message regardless of geo-targeting.
-    - Geo-targeted users (target_user_ids) always receive the message.
-    - If target_user_ids is None → broadcast to everyone.
-
-    Note: "admin" is not a JWT user_type. EmergencyTeamRole.ADMIN members
-    connect with user_type="emergency_team" — pass target_roles={"emergency_team"}
-    to reach them.
+    Send message to targeted users (or all if target_user_ids is None).
+    Silently removes dead connections.
     """
     dead: Set[str] = set()
     pairs: list = []
@@ -183,18 +159,12 @@ async def broadcast_to_users(
         )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Redis pub/sub listener — started once by main.py lifespan
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Redis listener (started once in main.py lifespan) ─────────
 
 async def redis_listener() -> None:
     """
     Background task: subscribes to Redis app_alerts channel and
     routes each alert to the correct connected clients.
-
-    Uses a health_check_interval to keep the connection alive during
-    idle periods — prevents the remote Redis server from dropping the
-    TCP connection after 60s of inactivity (which causes missed messages).
     """
     logger.info(f"Redis listener starting — channel: {REDIS_CHANNEL}")
     while True:
@@ -269,6 +239,7 @@ async def redis_listener() -> None:
                 except Exception:
                     pass
 
+
 # ── WebSocket endpoint ────────────────────────────────────────
 
 @router.websocket("/ws/notifications")
@@ -277,22 +248,21 @@ async def websocket_notifications(websocket: WebSocket) -> None:
     Authenticated real-time notification WebSocket.
 
     Connect:
-      ws://host/api/v1/ws/notifications?token=<JWT_access_token>
+        ws://localhost:8000/api/v1/ws/notifications?token=<JWT_access_token>
 
-    After connecting, optionally send an initial location frame for geo-targeting:
-      {"lat": 53.3498, "lon": -6.2603}
+    After connecting, optionally send your GPS location (for geo targeting):
+        {"lat": 53.3498, "lon": -6.2603}
 
-    Heartbeat every ~3 minutes to keep the location fresh:
-      {"type": "ping", "lat": 53.3498, "lon": -6.2603}
+    Heartbeat every 3 minutes to keep location fresh:
+        {"type": "ping", "lat": 53.3498, "lon": -6.2603}
 
     The server will:
       - Reject connections without a valid token (close code 4001)
       - Reject expired tokens (close code 4001)
-      - Fetch the user's real phone/email from the DB for SMS/email routing
-      - Flush any alerts queued while the user was offline
-      - Close cleanly if no heartbeat is received within 200 seconds
+      - Fetch your real phone/email from the DB for SMS/Email delivery
+      - Flush any alerts you missed while offline
     """
-    # ── Step 1: Extract and validate JWT from query param ─────────────────────
+    # ── Step 1: Extract and validate JWT from query param ─────
     token = websocket.query_params.get("token")
     if not token:
         await websocket.close(code=4001, reason="token query param required")
@@ -304,7 +274,7 @@ async def websocket_notifications(websocket: WebSocket) -> None:
         return
 
     user_id   = payload.get("sub")
-    user_type = payload.get("user_type", "user")  # "user" or "emergency_team"
+    user_type = payload.get("user_type", "user")   # "user" or "emergency_team"
 
     if not user_id:
         await websocket.close(code=4001, reason="Token missing user identity")
@@ -313,14 +283,14 @@ async def websocket_notifications(websocket: WebSocket) -> None:
     await websocket.accept()
     logger.info(f"[{user_id}] ({user_type}) WS accepted. Fetching profile...")
 
-    # ── Step 2: Fetch real phone + email from DB ──────────────────────────────
+    # ── Step 2: Fetch real phone + email from DB ──────────────
     profile = await _fetch_user_profile(user_id, user_type)
     logger.info(
         f"[{user_id}] Profile: name={profile['full_name']} "
         f"phone={profile['phone']} email={profile['email']}"
     )
 
-    # ── Step 3: Register in connected_clients ─────────────────────────────────
+    # ── Step 3: Register in connected_clients ─────────────────
     connected_clients[user_id] = {
         "ws":        websocket,
         "phone":     profile["phone"],
@@ -331,7 +301,7 @@ async def websocket_notifications(websocket: WebSocket) -> None:
     logger.info(f"[{user_id}] connected. Active: {len(connected_clients)}")
 
     try:
-        # ── Step 4: Read optional initial location frame (15 s timeout) ──────
+        # ── Step 4: Read initial location frame (optional, 15s timeout) ──
         try:
             raw  = await asyncio.wait_for(websocket.receive_text(), timeout=15)
             init = json.loads(raw)
@@ -339,19 +309,17 @@ async def websocket_notifications(websocket: WebSocket) -> None:
             lat = init.get("lat")
             lon = init.get("lon")
             if lat is not None and lon is not None:
-                set_user_location(user_id, float(lat), float(lon))  # sync — no await
+                set_user_location(user_id, float(lat), float(lon))
                 logger.info(f"[{user_id}] Location set: lat={lat} lon={lon}")
         except asyncio.TimeoutError:
-            # Location frame is optional — no location means no geo-targeting
-            # but direct subscriptions (disaster_subscribers) still work
+            # Location frame is optional — no location means no geo targeting
+            # but direct subscriptions still work
             logger.info(f"[{user_id}] No location frame within 15s (geo targeting disabled)")
         except (json.JSONDecodeError, Exception) as exc:
             logger.warning(f"[{user_id}] Location frame parse error: {exc}")
 
         # ── Step 5: Flush offline alerts ──────────────────────
         pending = flush_offline_alerts(user_id)
-        stale_cutoff = datetime.now(timezone.utc) - timedelta(minutes=10)
-        fresh = []
         for alert in pending:
             ts = alert.get("timestamp")
             if ts:
@@ -381,7 +349,7 @@ async def websocket_notifications(websocket: WebSocket) -> None:
                 f"({len(pending) - len(fresh)} stale discarded)"
             )
 
-        # ── Step 6: Keep-alive / heartbeat loop ──────────────────────────────
+        # ── Step 6: Keep-alive / heartbeat loop ───────────────
         while True:
             try:
                 raw   = await asyncio.wait_for(websocket.receive_text(), timeout=30)
@@ -391,14 +359,9 @@ async def websocket_notifications(websocket: WebSocket) -> None:
                     plon = frame.get("lon")
                     if plat is not None and plon is not None:
                         set_user_location(user_id, float(plat), float(plon))
-                    # Send pong back to confirm receipt
-                    await websocket.send_text(json.dumps({"type": "pong"}))
             except asyncio.TimeoutError:
-                # No message from client in 30s — server sends ping to keep alive
-                try:
-                    await websocket.send_text(json.dumps({"type": "ping"}))
-                except Exception:
-                    break  # client gone
+                # Client idle for >200s — close cleanly
+                break
             except (json.JSONDecodeError, Exception):
                 break
 
@@ -408,5 +371,21 @@ async def websocket_notifications(websocket: WebSocket) -> None:
         logger.debug(f"[{user_id}] WS error: {exc}")
     finally:
         connected_clients.pop(user_id, None)
-        delete_user_location(user_id)  # sync — no await
+        delete_user_location(user_id)
         logger.info(f"[{user_id}] disconnected. Active: {len(connected_clients)}")
+
+
+# ── Public helper for notification_consumer ───────────────────
+
+def get_user_contact(user_id: str) -> Dict[str, str]:
+    """
+    Return the phone and email for a currently-connected user.
+    Used by notification_consumer to get real contact details
+    without querying the DB again.
+
+    Returns {"phone": "", "email": ""} if user is offline.
+    """
+    info = connected_clients.get(user_id)
+    if not info:
+        return {"phone": "", "email": ""}
+    return {"phone": info.get("phone", ""), "email": info.get("email", "")}

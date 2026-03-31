@@ -287,50 +287,8 @@ async def root():
     summary="Health Check",
     description="Check status of all major subsystems"
 )
-async def health_check(db: AsyncSession = Depends(get_db)):
+async def health_check():
     """
-    Returns per-subsystem health status.
-    Overall status is 'degraded' if any subsystem is down.
+    Returns health status.
     """
-    from cache.redis_client import check_redis_health
-    from sqlalchemy import text
-
-    results = {}
-
-    # --- Database ---
-    try:
-        await db.execute(text("SELECT 1"))
-        results["database"] = "healthy"
-    except Exception as e:
-        logger.warning(f"Health check — database: {e}")
-        results["database"] = "down"
-
-    # --- Redis ---
-    try:
-        redis_health = await check_redis_health()
-        results["redis"] = redis_health["status"]   # "healthy" | "degraded" | "unhealthy"
-    except Exception as e:
-        logger.warning(f"Health check — redis: {e}")
-        results["redis"] = "down"
-
-    # --- RabbitMQ / publisher ---
-    try:
-        publisher = get_publisher()
-        results["rabbitmq"] = "healthy" if publisher else "down"
-    except Exception as e:
-        logger.warning(f"Health check — rabbitmq: {e}")
-        results["rabbitmq"] = "down"
-
-    overall = "healthy" if all(v == "healthy" for v in results.values()) else "degraded"
-
-    return {
-        "status": overall,
-        "service": settings.APP_NAME,
-        "version": settings.APP_VERSION,
-        "environment": settings.ENVIRONMENT,
-        **results,
-    }
-
-
-
-socket_app = socketio.ASGIApp(sio, other_asgi_app=app)
+    return {"status": "ok"}
