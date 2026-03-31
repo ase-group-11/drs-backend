@@ -292,3 +292,7 @@ async def health_check():
     Returns health status.
     """
     return {"status": "ok"}
+
+
+
+socket_app = socketio.ASGIApp(sio, other_asgi_app = app)
