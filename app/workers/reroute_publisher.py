@@ -102,6 +102,8 @@ class ReroutePublisher:
         route_assignments: Dict[str, str],
         routes: list,
         overflow_count: int = 0,
+        location: Optional[Dict] = None,
+        tracking_id: str = "",
     ) -> bool:
         """
         Publish event when reroute pipeline completes successfully.
@@ -122,6 +124,8 @@ class ReroutePublisher:
                 "route_assignments": route_assignments,
                 "routes": _slim_routes(routes),
                 "overflow_count": overflow_count,
+                "location": location or {},
+                "tracking_id": tracking_id,
                 "timestamp": _now(),
             },
         )

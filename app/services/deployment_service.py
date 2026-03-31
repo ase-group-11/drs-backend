@@ -374,7 +374,6 @@ class DeploymentService:
                     "updated_at": now,
                 })
 
-
             await self.db.flush()
 
             # Collect events — API layer publishes after DB commit
@@ -444,7 +443,6 @@ class DeploymentService:
                     "location_address": dep["location_address"],
                 }))
 
-
             return {
                 "deployment_id": deployment_id,
                 "disaster_id": disaster_id,
@@ -452,7 +450,6 @@ class DeploymentService:
                 "previous_status": current,
                 "new_status": new_status,
                 "updated_at": now.isoformat(),
-
                 "backup_requested": request_immediate_backup,
                 "message": f"Deployment updated: {current} → {new_status}",
                 "_pending_events": pending_events,

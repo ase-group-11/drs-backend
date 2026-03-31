@@ -1255,16 +1255,27 @@ class EmergencyUnitService:
             now = datetime.utcnow()
             
             # FIX: Cancel all active deployments for this unit before decommission
+            # Use separate params for completed_at and updated_at — asyncpg raises
+            # AmbiguousParameterError when the same $N is bound to columns with
+            # different timestamp types (timestamp vs timestamptz).
             await self.db.execute(text("""
                 UPDATE deployments
                 SET deployment_status = 'CANCELLED',
-                    completed_at = :now,
+                    completed_at = :completed_at,
                     assessment_notes = 'Auto-cancelled: unit decommissioned',
-                    updated_at = :now
+                    updated_at = :updated_at
                 WHERE unit_id = :unit_id
                   AND deployment_status NOT IN ('COMPLETED', 'CANCELLED')
                   AND deleted_at IS NULL
-            """), {"unit_id": unit_id, "now": now})
+            """), {"unit_id": unit_id, "completed_at": now, "updated_at": now})
+
+            # FIX: Remove all crew members from this unit before decommissioning.
+            # Without this, unit_crew rows linger and inflate assigned_units_count
+            # on team member profiles even after the unit is gone.
+            await self.db.execute(
+                text("DELETE FROM unit_crew WHERE unit_id = :unit_id"),
+                {"unit_id": unit_id}
+            )
 
             # FIX #5: Atomic conditional UPDATE — the WHERE clause on unit_status NOT IN
             # (DEPLOYED, ON_SCENE) is evaluated inside the same lock as the write, so a

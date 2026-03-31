@@ -33,14 +33,40 @@ EXCHANGE_NAME = "disaster_events"
 
 # Queue → Routing key bindings
 QUEUE_BINDINGS = {
-    "evaluation_queue": ["disaster.verified"],
-    "coordination_queue": ["disaster.verified", "disaster.evaluated", "disaster.backup_requested"],
-    "notification_queue": [
-        "disaster.dispatched", "disaster.verified", "disaster.evaluated",
-        "disaster.updated", "disaster.resolved", "disaster.backup_requested",
-        "disaster.unit_completed", "disaster.false_alarm",
+    # Evaluation pipeline — triggered by new report
+    "evaluation_queue": [
+        "disaster.reported",
     ],
-    "reroute_queue": ["disaster.verified", "disaster.evaluated", "disaster.resolved", "disaster.unit_completed"],
+    # Coordination — acts only on field-confirmed disasters
+    "coordination_queue": [
+        "disaster.verified",
+        "disaster.backup_requested",
+    ],
+    # Notification — receives all user-facing events
+    "notification_queue": [
+        "disaster.evaluated",
+        "disaster.dispatched",
+        "disaster.verified",
+        "disaster.updated",
+        "disaster.resolved",
+        "disaster.backup_requested",
+        "disaster.unit_completed",
+        "disaster.false_alarm",
+    ],
+    # Reroute service trigger queue — bound to disaster_events exchange.
+    # disaster.evaluated: auto-trigger reroute when evaluation says trigger_reroute=True
+    # disaster.verified:  re-evaluate reroute after field confirmation
+    # disaster.resolved:  restore normal flow
+    # disaster.unit_completed: partial clearance check
+    "reroute_queue": [
+        "disaster.evaluated",
+        "disaster.verified",
+        "disaster.resolved",
+        "disaster.unit_completed",
+    ],
+    # NOTE: evacuation_queue is NOT listed here because evacuation.triggered
+    # is published via reroute_publisher.py to the reroute.events exchange.
+    # The binding is set up in reroute_publisher.py connect() method.
 }
 
 

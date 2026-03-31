@@ -224,8 +224,9 @@ async def apply_override(
     summary="Get active reroute plan for a disaster",
     response_model=Dict[str, Any],
 )
-async def get_reroute_status(
+async def get_citizen_route(
     disaster_id: str,
+    route_id: str,
     db: AsyncSession = Depends(get_db),
 ):
     """Return the currently active reroute plan for a disaster."""
@@ -237,7 +238,6 @@ async def get_reroute_status(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"No active reroute plan found for disaster_id={disaster_id}",
         )
-    return plan
 
 @router.get(
         "/plans",

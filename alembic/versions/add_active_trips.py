@@ -11,7 +11,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import UUID
 
 revision = "add_active_trips"
-down_revision = "uc8_evacuation_plans" 
+down_revision = "add_geometry_roadsegments" 
 branch_labels = None
 depends_on = None
 

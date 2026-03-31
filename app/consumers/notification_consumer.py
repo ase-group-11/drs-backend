@@ -67,7 +67,16 @@ _redis_client: Optional[sync_redis.Redis] = None
 def _get_redis() -> sync_redis.Redis:
     global _redis_client
     if _redis_client is None:
-        _redis_client = sync_redis.from_url(REDIS_URL, decode_responses=True)
+        _redis_client = sync_redis.from_url(
+            REDIS_URL,
+            decode_responses=True,
+            socket_keepalive=True,
+            socket_keepalive_options={},
+            socket_connect_timeout=5,
+            socket_timeout=5,          # fail fast instead of waiting 60s
+            retry_on_timeout=True,
+            health_check_interval=30,  # ping Redis every 30s to keep connection alive
+        )
     return _redis_client
 
 # ---------------------------------------------------------------------------
@@ -148,17 +157,40 @@ RADIUS_KM = {
 # ---------------------------------------------------------------------------
 
 def _latlon(d: dict):
-    loc = d.get("location") or {}
-    return (loc.get("lat"), loc.get("lon")) if isinstance(loc, dict) else (None, None)
+    """
+    Extract (lat, lon) from a data dict.
+    Handles multiple formats publishers use:
+      - {"location": {"lat": x, "lon": y}}   (deployment, disaster services)
+      - {"lat": x, "lon": y}                 (evaluation, reroute services)
+      - {"disaster_lat": x, "disaster_lon": y} (evacuation service)
+    Returns (None, None) if no coordinates found.
+    """
+    # Format 1: nested location dict
+    loc = d.get("location")
+    if isinstance(loc, dict) and loc.get("lat") is not None:
+        return loc.get("lat"), loc.get("lon")
+    # Format 2: top-level lat/lon
+    if d.get("lat") is not None:
+        return d.get("lat"), d.get("lon")
+    # Format 3: disaster_lat / disaster_lon (evacuation service)
+    if d.get("disaster_lat") is not None:
+        return d.get("disaster_lat"), d.get("disaster_lon")
+    return None, None
 
 
 def _publish(alert: dict) -> None:
-    """Publish alert envelope to Redis → WebSocket broadcaster."""
+    global _redis_client
     try:
         _get_redis().publish(REDIS_CHANNEL, json.dumps(alert, default=str))
         logger.info(f"[Redis → {REDIS_CHANNEL}] {alert.get('event_type')}")
     except Exception as exc:
-        logger.error(f"Redis publish failed: {exc}")
+        logger.warning(f"Redis publish failed, reconnecting: {exc}")
+        _redis_client = None  # force reconnect on next call
+        try:
+            _get_redis().publish(REDIS_CHANNEL, json.dumps(alert, default=str))
+            logger.info(f"[Redis → {REDIS_CHANNEL}] {alert.get('event_type')} (after reconnect)")
+        except Exception as exc2:
+            logger.error(f"Redis publish failed after reconnect: {exc2}")
 
 
 def _deliver(
@@ -175,14 +207,19 @@ def _deliver(
     broadcast: bool = False,
     location: str = "",
     direct_notify_ids: Optional[Set[str]] = None,
+    target_roles: Optional[Set[str]] = None,
 ) -> None:
     """
     Unified delivery:
     1. Resolve geo targets
-    2. Publish to Redis (WebSocket)
+    2. Publish to Redis (WebSocket) — includes target_roles for role-based routing
     3. Queue for offline users
     4. Email HIGH/CRITICAL to all active users
     5. SMS CRITICAL only to users in impact zone
+
+    target_roles: if set, these user types receive the notification regardless
+                  of geo-targeting (e.g. {"emergency_team"} for ERT-wide alerts,
+                  {"admin"} is always added automatically in broadcast_to_users).
     """
     tracking_id = data.get("tracking_id", "")
 
@@ -211,6 +248,7 @@ def _deliver(
         "message":         message,
         "data":            data,
         "target_user_ids": list(target_ids) if target_ids is not None else None,
+        "target_roles":    list(target_roles) if target_roles is not None else None,
     }
     _publish(alert)
 
@@ -258,24 +296,29 @@ def _deliver(
 def _on_disaster_evaluated(data: dict) -> None:
     severity = data.get("severity", "MEDIUM").upper()
     lat, lon = _latlon(data)
+    disaster_type = (data.get("type") or "disaster").lower()
     _deliver(
         "disaster", "disaster.evaluated", severity,
-        f"Disaster evaluated — {data.get('tracking_id', '')}",
-        f"Severity: {severity}. Confidence: {data.get('confidence', 0):.0%}. "
-        f"Trigger reroute: {data.get('trigger_reroute', False)}.",
+        f"New disaster — {data.get('location_address', data.get('tracking_id', ''))}",
+        f"A {disaster_type} has been reported. "
+        f"Severity: {severity}. Emergency services have been notified.",
         {
-            "disaster_id":         data.get("disaster_id"),
-            "tracking_id":         data.get("tracking_id"),
-            "severity":            severity,
-            "confidence":          data.get("confidence"),
-            "trigger_reroute":     data.get("trigger_reroute"),
-            "trigger_deploy":      data.get("trigger_deploy"),
-            "recommended_services":data.get("recommended_services", []),
-            "affected_roads":      data.get("affected_roads", []),
+            "disaster_id":          data.get("disaster_id"),
+            "tracking_id":          data.get("tracking_id"),
+            "type":                 data.get("type"),
+            "severity":             severity,
+            "confidence":           data.get("confidence"),
+            "trigger_reroute":      data.get("trigger_reroute"),
+            "trigger_deploy":       data.get("trigger_deploy"),
+            "recommended_services": data.get("recommended_services", []),
+            "affected_roads":       data.get("affected_roads", []),
         },
         disaster_id=data.get("disaster_id"),
         disaster_lat=lat, disaster_lon=lon,
         location=data.get("location_address", ""),
+        # Broadcast to ALL connected users — public safety alert.
+        # Anyone using the disaster response app should know about a new disaster.
+        broadcast=True,
     )
 
 
@@ -287,14 +330,16 @@ def _on_disaster_dispatched(data: dict) -> None:
         f"Units dispatched — {data.get('tracking_id', '')}",
         f"{units} unit(s) dispatched with {data.get('priority_level', 'STANDARD')} priority.",
         {
-            "disaster_id":    data.get("disaster_id"),
-            "tracking_id":    data.get("tracking_id"),
+            "disaster_id":      data.get("disaster_id"),
+            "tracking_id":      data.get("tracking_id"),
             "units_dispatched": units,
-            "priority_level": data.get("priority_level"),
+            "priority_level":   data.get("priority_level"),
         },
         disaster_id=data.get("disaster_id"),
         disaster_lat=lat, disaster_lon=lon,
         location=data.get("location_address", ""),
+        # ERT need to know their units are moving; admin monitors deployments
+        target_roles={"emergency_team"},
     )
 
 
@@ -303,22 +348,33 @@ def _on_disaster_verified(data: dict) -> None:
     reporter_id = data.get("reporter_id")
     _deliver(
         "disaster", "disaster.verified", "HIGH",
-        f"Disaster confirmed on-scene — {data.get('tracking_id', '')}",
-        f"Emergency unit confirmed. Report: {data.get('situation_report', 'N/A')}",
+        f"Emergency team on scene — {data.get('tracking_id', '')}",
+        f"Emergency services have arrived. Situation: {data.get('situation_report', 'Under control')}",
         {
-            "disaster_id":       data.get("disaster_id"),
-            "tracking_id":       data.get("tracking_id"),
-            "verified_by_unit":  data.get("verified_by_unit"),
-            "situation_report":  data.get("situation_report"),
+            "disaster_id":      data.get("disaster_id"),
+            "tracking_id":      data.get("tracking_id"),
+            "verified_by_unit": data.get("verified_by_unit"),
+            "situation_report": data.get("situation_report"),
         },
         disaster_id=data.get("disaster_id"),
         disaster_lat=lat, disaster_lon=lon,
         location=data.get("location_address", ""),
         direct_notify_ids={reporter_id} if reporter_id else None,
+        target_roles={"emergency_team"},
+        broadcast=True
     )
 
 
 def _on_disaster_updated(data: dict) -> None:
+    update_type = data.get("update_type", "")
+
+    # Skip internal system updates — not useful to any user
+    # reporter_notification = evaluation service acknowledging the report
+    SKIP_UPDATE_TYPES = {"reporter_notification", "report_received"}
+    if update_type in SKIP_UPDATE_TYPES:
+        logger.info(f"[disaster.updated] skipping internal update_type={update_type}")
+        return
+
     lat, lon = _latlon(data)
     _deliver(
         "disaster", "disaster.updated", "LOW",
@@ -327,11 +383,12 @@ def _on_disaster_updated(data: dict) -> None:
         {
             "disaster_id": data.get("disaster_id"),
             "tracking_id": data.get("tracking_id"),
-            "update_type": data.get("update_type"),
+            "update_type": update_type,
             "details":     data.get("details"),
         },
         disaster_id=data.get("disaster_id"),
         disaster_lat=lat, disaster_lon=lon,
+        target_roles={"emergency_team"},
     )
 
 
@@ -340,15 +397,17 @@ def _on_disaster_resolved(data: dict) -> None:
     _deliver(
         "disaster", "disaster.resolved", "INFO",
         f"Disaster resolved — {data.get('tracking_id', '')}",
-        data.get("resolution_notes", "The situation has been resolved."),
+        data.get("resolution_notes", "The situation has been resolved. Normal conditions resuming."),
         {
-            "disaster_id":       data.get("disaster_id"),
-            "tracking_id":       data.get("tracking_id"),
-            "resolution_notes":  data.get("resolution_notes"),
-            "resolved_time":     data.get("resolved_time"),
+            "disaster_id":      data.get("disaster_id"),
+            "tracking_id":      data.get("tracking_id"),
+            "resolution_notes": data.get("resolution_notes"),
+            "resolved_time":    data.get("resolved_time"),
         },
         disaster_id=data.get("disaster_id"),
         disaster_lat=lat, disaster_lon=lon,
+        target_roles={"emergency_team"},
+        broadcast=True
     )
 
 
@@ -364,15 +423,16 @@ def _on_backup_requested(data: dict) -> None:
         f"URGENT: Backup needed — {data.get('tracking_id', '')}",
         f"Field unit needs backup. Resources: {', '.join(resources)}",
         {
-            "disaster_id":       data.get("disaster_id"),
-            "tracking_id":       data.get("tracking_id"),
-            "requesting_unit":   data.get("requesting_unit"),
-            "resources_needed":  resources,
+            "disaster_id":      data.get("disaster_id"),
+            "tracking_id":      data.get("tracking_id"),
+            "requesting_unit":  data.get("requesting_unit"),
+            "resources_needed": resources,
         },
         disaster_id=data.get("disaster_id"),
         disaster_lat=lat, disaster_lon=lon,
         location=data.get("location_address", ""),
         direct_notify_ids=direct,
+        target_roles={"emergency_team"},  # ERT-wide + admin
     )
 
 
@@ -389,64 +449,102 @@ def _on_unit_completed(data: dict) -> None:
         },
         disaster_id=data.get("disaster_id"),
         disaster_lat=lat, disaster_lon=lon,
+        target_roles={"emergency_team"},
     )
 
 
 def _on_reroute_triggered(data: dict) -> None:
     vehicles = data.get("vehicles_count") or len(data.get("vehicles", []))
     lat, lon = _latlon(data)
+
+    # direct_notify_ids = the exact vehicle user IDs computed by the reroute service.
+    # These citizens get their personal route_assignments in the payload.
+    # ERT/admin get it via target_roles regardless of location.
+    route_assignments = data.get("route_assignments", {})
+    affected_vehicle_ids = set(route_assignments.keys()) if route_assignments else None
+
     _deliver(
         "reroute", "reroute.triggered", "HIGH",
         "Traffic reroute activated",
-        f"{vehicles} vehicles rerouted across {len(data.get('routes', []))} routes. "
-        f"Overflow: {data.get('overflow_count', 0)}.",
+        f"{vehicles} vehicle(s) rerouted. Check your map for the updated route.",
         {
             "disaster_id":      data.get("disaster_id"),
             "plan_id":          data.get("plan_id"),
             "vehicles_count":   vehicles,
-            "vehicles":         data.get("vehicles", []),           # ← citizen routing
-            "route_assignments":data.get("route_assignments", {}),  # ← citizen routing
+            "vehicles":         data.get("vehicles", []),
+            "route_assignments":route_assignments,
             "overflow_count":   data.get("overflow_count", 0),
             "routes":           data.get("routes", []),
         },
         disaster_id=data.get("disaster_id"),
         disaster_lat=lat, disaster_lon=lon,
         radius_km=3.0,
+        direct_notify_ids=affected_vehicle_ids,
+        target_roles={"emergency_team"},  # ERT/admin always gets reroute notifications
     )
 
 
 def _on_route_updated(data: dict) -> None:
     reason = data.get("reason", "congestion")
     lat, lon = _latlon(data)
+
+    reason_titles = {
+        "operator_override": "Emergency corridor reserved",
+        "lane_closure":      "Lane closed ahead",
+        "congestion":        "Heavy congestion detected",
+        "recalculation":     "Route recalculated",
+    }
+    reason_messages = {
+        "operator_override": "An emergency corridor has been reserved. Your route has been updated — please follow the new directions.",
+        "lane_closure":      "A lane closure is ahead. Alternative route assigned.",
+        "congestion":        "Heavy congestion on your route. Alternative route calculated.",
+        "recalculation":     "Your route has been updated due to changing conditions.",
+    }
+    title   = reason_titles.get(reason, f"Route updated — {reason}")
+    msg     = reason_messages.get(reason, f"Traffic routes updated due to {reason}.")
+
     _deliver(
         "reroute", "route.updated", "MEDIUM",
-        f"Routes recalculated — {reason}",
-        f"Traffic routes updated due to {reason}.",
+        title, msg,
         {
-            "disaster_id": data.get("disaster_id"),
-            "reason":      reason,
-            "routes":      data.get("routes", []),
+            "disaster_id":      data.get("disaster_id"),
+            "reason":           reason,
+            "route_assignments":data.get("route_assignments", {}),
+            "routes":           data.get("routes", []),
         },
         disaster_id=data.get("disaster_id"),
         disaster_lat=lat, disaster_lon=lon,
         radius_km=3.0,
+        target_roles={"emergency_team"},
     )
 
 
 def _on_disaster_cleared(data: dict) -> None:
     lat, lon = _latlon(data)
+
+    # Extract the vehicle user IDs that were rerouted — same users
+    # who got reroute.triggered need to know they can resume normal flow.
+    users = data.get("users", [])
+    affected_vehicle_ids = (
+        {u.get("user_id") for u in users if u.get("user_id")}
+        if isinstance(users, list) and users
+        else None
+    )
+
     _deliver(
         "reroute", "disaster.cleared", "INFO",
         "Roads cleared — normal flow restored",
-        f"Disaster cleared. {data.get('cleared_segments', 0)} road segment(s) reopened. "
-        "Normal traffic flow has resumed.",
+        f"The incident has been cleared. {data.get('cleared_segments', 0)} road segment(s) "
+        "reopened. You can resume your normal route.",
         {
-            "disaster_id":     data.get("disaster_id"),
-            "cleared_segments":data.get("cleared_segments"),
+            "disaster_id":      data.get("disaster_id"),
+            "cleared_segments": data.get("cleared_segments"),
         },
         disaster_id=data.get("disaster_id"),
         disaster_lat=lat, disaster_lon=lon,
         radius_km=3.0,
+        direct_notify_ids=affected_vehicle_ids,
+        target_roles={"emergency_team"},
     )
 
 
@@ -468,6 +566,7 @@ def _on_road_impact(data: dict) -> None:
         disaster_lat=lat, disaster_lon=lon,
         radius_km=3.0,
         location=data.get("location_address", ""),
+        target_roles={"emergency_team"},
     )
 
 
@@ -488,6 +587,7 @@ def _on_team_assigned(data: dict) -> None:
         disaster_lat=lat, disaster_lon=lon,
         radius_km=1.0,
         location=data.get("location_address", ""),
+        target_roles={"emergency_team"},
     )
 
 
@@ -508,35 +608,131 @@ def _on_escalation(data: dict) -> None:
         disaster_lat=lat, disaster_lon=lon,
         radius_km=1.0,
         location=data.get("location_address", ""),
+        target_roles={"emergency_team"},
     )
 
 
 def _on_disaster_reported(data: dict) -> None:
-    """evaluation_queue — log only for now."""
+    """evaluation_queue — log only, no user notification (disaster not on map yet)."""
     logger.info(
         f"[evaluation_queue] disaster.reported — "
         f"id={data.get('disaster_id')} type={data.get('type')}"
     )
 
 
+def _on_false_alarm(data: dict) -> None:
+    lat, lon = _latlon(data)
+    _deliver(
+        "disaster", "disaster.false_alarm", "INFO",
+        f"False alarm — {data.get('tracking_id', '')}",
+        "Field unit confirmed no emergency at this location. Report has been closed.",
+        {
+            "disaster_id":      data.get("disaster_id"),
+            "tracking_id":      data.get("tracking_id"),
+            "flagged_by_unit":  data.get("flagged_by_unit"),
+            "situation_report": data.get("situation_report"),
+        },
+        disaster_id=data.get("disaster_id"),
+        disaster_lat=lat, disaster_lon=lon,
+        location=data.get("location_address", ""),
+        target_roles={"emergency_team"},
+        broadcast=True
+    )
+
+
+def _on_evacuation_triggered(data: dict) -> None:
+    """
+    Published by evacuation_service when a plan is activated.
+    CRITICAL — targets users physically inside the evacuation zones.
+    Each user's assigned evacuation route is in data["users"][user_id].
+    """
+    lat   = data.get("lat") or data.get("disaster_lat")
+    lon   = data.get("lon") or data.get("disaster_lon")
+    total = data.get("total_users", 0)
+    _deliver(
+        "evacuation", "evacuation.triggered", "CRITICAL",
+        "EVACUATION ORDER — leave the area now",
+        f"An evacuation has been ordered for your area. "
+        f"{total} people are being evacuated. Follow the route on your map immediately.",
+        {
+            "disaster_id": data.get("disaster_id"),
+            "plan_id":     data.get("plan_id"),
+            "total_users": total,
+            "users":       data.get("users", {}),
+            "timestamp":   data.get("timestamp"),
+        },
+        disaster_id=data.get("disaster_id"),
+        disaster_lat=lat, disaster_lon=lon,
+        radius_km=5.0,
+        location=data.get("location_address", ""),
+        # ERT must also know evacuation is in progress
+        target_roles={"emergency_team"},
+    )
+
+
 # ---------------------------------------------------------------------------
-# Master dispatch table
 # ---------------------------------------------------------------------------
-HANDLERS = {
-    "disaster.evaluated":           _on_disaster_evaluated,
-    "disaster.dispatched":          _on_disaster_dispatched,
-    "disaster.verified":            _on_disaster_verified,
-    "disaster.updated":             _on_disaster_updated,
-    "disaster.resolved":            _on_disaster_resolved,
-    "disaster.backup_requested":    _on_backup_requested,
-    "disaster.unit_completed":      _on_unit_completed,
-    "reroute.triggered":            _on_reroute_triggered,
-    "route.updated":                _on_route_updated,
-    "disaster.cleared":             _on_disaster_cleared,
-    "reroute.road_impact_alert":    _on_road_impact,
-    "coordination.team_assigned":   _on_team_assigned,
-    "coordination.escalation":      _on_escalation,
-    "disaster.reported":            _on_disaster_reported,
+# Per-queue handler tables
+# ---------------------------------------------------------------------------
+# Each queue only triggers the handlers relevant to its purpose.
+# This prevents duplicate notifications when the same event is bound
+# to multiple queues (e.g. disaster.evaluated → notification_queue AND reroute_queue).
+
+# notification_queue — all user-facing notifications
+NOTIFICATION_HANDLERS = {
+    "disaster.evaluated":        _on_disaster_evaluated,
+    "disaster.dispatched":       _on_disaster_dispatched,
+    "disaster.verified":         _on_disaster_verified,
+    "disaster.updated":          _on_disaster_updated,
+    "disaster.resolved":         _on_disaster_resolved,
+    "disaster.backup_requested": _on_backup_requested,
+    "disaster.unit_completed":   _on_unit_completed,
+    "disaster.false_alarm":      _on_false_alarm,
+    "disaster.reported":         _on_disaster_reported,
+}
+
+# notification.reroute — reroute events from reroute_publisher (reroute.events exchange)
+REROUTE_NOTIFICATION_HANDLERS = {
+    "reroute.triggered":         _on_reroute_triggered,
+    "route.updated":             _on_route_updated,
+    "disaster.cleared":          _on_disaster_cleared,
+    "reroute.road_impact_alert": _on_road_impact,
+}
+
+# reroute_queue — disaster events that trigger the reroute service pipeline
+# These are consumed here for LOGGING only — actual reroute triggering is
+# done by the downstream reroute service. No notifications sent from here.
+REROUTE_TRIGGER_HANDLERS = {
+    "disaster.evaluated":  _on_disaster_reported,  # log only
+    "disaster.verified":   _on_disaster_reported,  # log only
+    "disaster.resolved":   _on_disaster_reported,  # log only
+    "disaster.unit_completed": _on_disaster_reported,  # log only
+}
+
+# coordination_queue — team assignment and escalation
+COORDINATION_HANDLERS = {
+    "disaster.verified":         _on_team_assigned,
+    "disaster.backup_requested": _on_escalation,
+}
+
+# evaluation_queue — new disaster reports to be evaluated (log only here)
+EVALUATION_HANDLERS = {
+    "disaster.reported": _on_disaster_reported,
+}
+
+# evacuation_queue — evacuation plan activated
+EVACUATION_HANDLERS = {
+    "evacuation.triggered": _on_evacuation_triggered,
+}
+
+# Map queue name → its handler table
+QUEUE_HANDLERS = {
+    "notification_queue":   NOTIFICATION_HANDLERS,
+    "notification.reroute": REROUTE_NOTIFICATION_HANDLERS,
+    "reroute_queue":        REROUTE_TRIGGER_HANDLERS,
+    "coordination_queue":   COORDINATION_HANDLERS,
+    "evaluation_queue":     EVALUATION_HANDLERS,
+    "evacuation_queue":     EVACUATION_HANDLERS,
 }
 
 ALL_QUEUES = [
@@ -545,6 +741,7 @@ ALL_QUEUES = [
     "reroute_queue",
     "evaluation_queue",
     "coordination_queue",
+    "evacuation_queue",
 ]
 
 # ---------------------------------------------------------------------------
@@ -583,13 +780,16 @@ class UnifiedConsumer:
         return False
 
     def _make_callback(self, queue_name: str):
+        # Get the handler table for this specific queue
+        handlers = QUEUE_HANDLERS.get(queue_name, {})
+
         def callback(ch, method, properties, body):
             try:
                 data       = json.loads(body)
                 event_type = data.get("event_type") or data.get("event", "unknown")
                 data["event_type"] = event_type
                 logger.info(f"[{queue_name}] {event_type}")
-                handler = HANDLERS.get(event_type)
+                handler = handlers.get(event_type)
                 if handler:
                     handler(data)
                 else:

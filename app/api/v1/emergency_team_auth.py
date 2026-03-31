@@ -21,7 +21,10 @@ from app.services.emergency_team_service import EmergencyTeamService
 from app.schemas.emergency_team import (
     EmergencyTeamRegisterRequest,
     EmergencyTeamLoginRequest,
+    EmergencyTeamLoginInitResponse,
+    EmergencyTeamLoginVerifyRequest,
     EmergencyTeamAuthResponse,
+    EmergencyTeamLoginResendOTPRequest,
     ChangePasswordRequest,
 )
 from app.schemas.auth import OTPVerifyRequest, MessageResponse
@@ -116,7 +119,7 @@ async def verify_team_member_registration(
 
 @router.post(
     "/login",
-    response_model=EmergencyTeamAuthResponse,
+    response_model=EmergencyTeamLoginInitResponse,
     status_code=status.HTTP_200_OK,
     summary="Emergency team login",
     description="Login with email/phone + password",

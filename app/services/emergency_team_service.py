@@ -1,530 +1,30 @@
-# # File: app/services/emergency_team_service.py
-# """
-# Emergency team service for emergency responders.
-
-# UPDATED: 
-# - Registration uses OTP (like users)
-# - Login uses password (password-based authentication)
-# """
-
-# from typing import Optional, Dict, Any
-# from sqlalchemy.ext.asyncio import AsyncSession
-# import logging
-
-# from app.repositories.emergency_team_repository import EmergencyTeamRepository
-# from app.services.otp_service import send_otp_code, verify_otp
-# from app.services.registration_cache import (
-#     store_registration_data,
-#     get_registration_data,
-#     delete_registration_data
-# )
-# from app.auth.password_handler import hash_password, verify_password
-# from app.auth.jwt_handler import create_access_token, create_refresh_token
-# from app.db.models.emergency_team import EmergencyTeam
-# from app.db.models.enums import UserStatus, EmergencyTeamRole, Department
-# from app.core.config import settings
-
-# # Setup logging
-# logger = logging.getLogger(__name__)
-
-
-# class EmergencyTeamService:
-#     """Emergency team service for authentication and team management."""
-    
-#     def __init__(self, session: AsyncSession):
-#         """Initialize emergency team service."""
-#         self.session = session
-#         self.team_repo = EmergencyTeamRepository(session)
-    
-#     async def register_team_member(
-#         self,
-#         phone_number: str,
-#         password: str,
-#         full_name: str,
-#         email: str,
-#         role: EmergencyTeamRole,
-#         department: Department,
-#         employee_id: Optional[str] = None
-#     ) -> Dict[str, str]:
-#         """
-#         Register a new emergency team member (send OTP).
-        
-#         UPDATED: Now sends OTP instead of creating account immediately.
-        
-#         Steps:
-#         1. Validate uniqueness (phone, email, employee_id)
-#         2. Hash password
-#         3. Store registration data in Redis cache
-#         4. Generate and send OTP
-#         5. Return success message
-        
-#         Args:
-#             phone_number: Team member's phone number
-#             password: Plain text password (will be hashed and cached)
-#             full_name: Team member's full name
-#             email: Email address
-#             role: Team role (admin, manager, staff)
-#             department: Department (medical, police, fire, it)
-#             employee_id: Optional employee ID
-            
-#         Returns:
-#             Dict with success message and phone number
-            
-#         Raises:
-#             ValueError: If phone, email, or employee_id already exists
-            
-#         Example:
-#             >>> result = await service.register_team_member(
-#             ...     phone_number="+1234567890",
-#             ...     password="SecurePass123!",
-#             ...     full_name="John Doe",
-#             ...     email="john.doe@emergency.ie",
-#             ...     role=EmergencyTeamRole.STAFF,
-#             ...     department=Department.MEDICAL
-#             ... )
-#             >>> # Returns: {"message": "OTP sent to +1234567890"}
-#         """
-#         logger.info(f"📝 Starting emergency team registration for {phone_number}")
-        
-#         try:
-#             # Step 1: Check if phone number already exists
-#             logger.debug(f"🔍 Checking if phone {phone_number} exists...")
-#             if await self.team_repo.phone_exists(phone_number):
-#                 logger.warning(f"❌ Phone {phone_number} already registered")
-#                 raise ValueError(f"Phone number {phone_number} is already registered")
-#             logger.debug("✅ Phone number available")
-            
-#             # Step 2: Check if email already exists
-#             logger.debug(f"🔍 Checking if email {email} exists...")
-#             if await self.team_repo.email_exists(email):
-#                 logger.warning(f"❌ Email {email} already registered")
-#                 raise ValueError(f"Email {email} is already registered")
-#             logger.debug("✅ Email available")
-            
-#             # Step 3: Check if employee ID already exists (if provided)
-#             if employee_id:
-#                 logger.debug(f"🔍 Checking if employee_id {employee_id} exists...")
-#                 if await self.team_repo.employee_id_exists(employee_id):
-#                     logger.warning(f"❌ Employee ID {employee_id} already registered")
-#                     raise ValueError(f"Employee ID {employee_id} is already registered")
-#                 logger.debug("✅ Employee ID available")
-            
-#             # Step 4: Hash password
-#             logger.debug("🔐 Hashing password...")
-#             password_hash = hash_password(password)
-#             logger.debug("✅ Password hashed")
-            
-#             # Step 5: Store registration data in cache
-#             logger.info(f"💾 Storing emergency team registration data in Redis cache...")
-#             try:
-#                 # Store all registration data including password hash
-#                 await store_registration_data(
-#                     phone_number=phone_number,
-#                     full_name=full_name,
-#                     email=email,
-#                     # Additional emergency team specific data
-#                     password_hash=password_hash,
-#                     role=role.value,
-#                     department=department.value,
-#                     employee_id=employee_id
-#                 )
-
-#                 # await store_registration_data(
-#                 #     phone_number=phone_number,
-#                 #     data={
-#                 #         "full_name": full_name,
-#                 #         "email": email,
-#                 #         "password_hash": password_hash,
-#                 #         "role": role.value,
-#                 #         "department": department.value,
-#                 #         "employee_id": employee_id,
-#                 #         "user_type": "emergency_team"
-#                 #     }
-#                 # )
-#                 logger.info("✅ Registration data cached successfully")
-#             except Exception as cache_error:
-#                 logger.error(f"❌ Failed to cache registration data: {cache_error}")
-#                 raise Exception(f"Cache error: {str(cache_error)}")
-            
-#             # Step 6: Generate and send OTP
-#             logger.info(f"📱 Generating and sending OTP to {phone_number}...")
-#             try:
-#                 otp = await send_otp_code(phone_number)
-                
-#                 if not otp:
-#                     logger.error("❌ send_otp_code returned None/False")
-#                     # Clean up cache if OTP sending fails
-#                     await delete_registration_data(phone_number)
-#                     raise Exception("OTP service returned None - check Twilio credentials or set ENVIRONMENT=testing")
-                
-#                 logger.info(f"✅ OTP generated and sent: {otp[:2]}****")
-                
-#             except Exception as otp_error:
-#                 logger.error(f"❌ OTP sending failed: {type(otp_error).__name__}: {otp_error}")
-#                 # Clean up cache
-#                 await delete_registration_data(phone_number)
-#                 raise Exception(f"OTP sending failed: {str(otp_error)}")
-            
-#             logger.info(f"✅ Emergency team registration OTP sent to {phone_number}")
-#             return {
-#                 "message": f"OTP sent successfully to {phone_number}. Please verify to complete registration.",
-#                 "phone_number": phone_number
-#             }
-            
-#         except ValueError as e:
-#             # Re-raise validation errors as-is
-#             raise
-#         except Exception as e:
-#             logger.exception(f"❌ Emergency team registration failed")
-#             raise
-    
-#     async def verify_team_member_registration(
-#         self,
-#         phone_number: str,
-#         otp: str
-#     ) -> Dict[str, Any]:
-#         """
-#         Verify OTP and create emergency team member account.
-        
-#         Steps:
-#         1. Verify OTP from Redis
-#         2. Retrieve registration data from Redis cache
-#         3. Create team member account (status: ACTIVE)
-#         4. Delete registration cache
-#         5. Generate JWT tokens
-#         6. Return team member data + tokens
-        
-#         Args:
-#             phone_number: Team member's phone number
-#             otp: OTP code to verify
-            
-#         Returns:
-#             Dict with team member data and tokens
-            
-#         Raises:
-#             ValueError: If OTP invalid or registration data not found
-#         """
-#         logger.info(f"🔐 Starting emergency team registration verification for {phone_number}")
-        
-#         try:
-#             # Step 1: Verify OTP
-#             logger.debug(f"🔍 Verifying OTP...")
-#             is_valid = await verify_otp(phone_number, otp)
-            
-#             if not is_valid:
-#                 logger.warning(f"❌ Invalid or expired OTP for {phone_number}")
-#                 raise ValueError("Invalid or expired OTP")
-#             logger.debug("✅ OTP verified")
-            
-#             # Step 2: Retrieve registration data from cache
-#             logger.debug(f"💾 Retrieving emergency team registration data from cache...")
-#             reg_data = await get_registration_data(phone_number)
-            
-#             if not reg_data:
-#                 logger.error(f"❌ No registration data found for {phone_number}")
-#                 raise ValueError(
-#                     "Registration data not found. Please register again."
-#                 )
-#             logger.debug(f"✅ Retrieved data: {reg_data.get('full_name')}")
-            
-#             # Step 3: Create emergency team member
-#             logger.info(f"👤 Creating emergency team member account...")
-            
-#             # Convert string back to enums
-#             role = EmergencyTeamRole(reg_data["role"])
-#             department = Department(reg_data["department"])
-            
-#             team_member = await self.team_repo.create(
-#                 phone_number=reg_data["phone_number"],
-#                 password_hash=reg_data["password_hash"],
-#                 full_name=reg_data["full_name"],
-#                 email=reg_data["email"],
-#                 role=role,
-#                 department=department,
-#                 employee_id=reg_data.get("employee_id"),
-#                 status=UserStatus.ACTIVE
-#             )
-#             logger.info(f"✅ Emergency team member created: {team_member.id}")
-            
-#             # Step 4: Delete registration cache
-#             logger.debug("🗑️  Cleaning up registration cache...")
-#             await delete_registration_data(phone_number)
-            
-#             # Step 5: Commit transaction
-#             await self.session.commit()
-#             await self.session.refresh(team_member)
-#             logger.debug("✅ Transaction committed")
-            
-#             # Step 6: Generate JWT tokens
-#             logger.debug("🔑 Generating JWT tokens...")
-#             access_token = create_access_token(
-#                 user_id=team_member.id,
-#                 user_type="emergency_team"
-#             )
-#             refresh_token = create_refresh_token(user_id=team_member.id)
-#             logger.debug("✅ Tokens generated")
-            
-#             logger.info(f"✅ Emergency team registration completed for {phone_number}")
-#             return {
-#                 "team_member": {
-#                     "id": team_member.id,
-#                     "phone_number": team_member.phone_number,
-#                     "full_name": team_member.full_name,
-#                     "email": team_member.email,
-#                     "role": team_member.role.value,
-#                     "department": team_member.department.value,
-#                     "employee_id": team_member.employee_id,
-#                     "status": team_member.status.value,
-#                     "created_at": team_member.created_at.isoformat()
-#                 },
-#                 "tokens": {
-#                     "access_token": access_token,
-#                     "refresh_token": refresh_token,
-#                     "token_type": "bearer",
-#                     "expires_in": settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
-#                 }
-#             }
-            
-#         except ValueError as e:
-#             # Re-raise validation errors
-#             raise
-#         except Exception as e:
-#             logger.exception(f"❌ Emergency team verification failed")
-#             raise
-    
-#     async def login_team_member(
-#         self,
-#         email: str,
-#         password: str
-#     ) -> Dict[str, Any]:
-#         """
-#         Login emergency team member with email and password.
-        
-#         UNCHANGED: Still uses password-based authentication for login.
-        
-#         Steps:
-#         1. Find active team member by email
-#         2. Verify password with Argon2
-#         3. Generate JWT tokens
-#         4. Return team member data + tokens
-        
-#         Args:
-#             email: Team member's email
-#             password: Plain text password
-            
-#         Returns:
-#             Dict with team member data and tokens
-            
-#         Raises:
-#             ValueError: If credentials invalid or account not active
-#         """
-#         logger.info(f"🔑 Starting emergency team login for {email}")
-        
-#         try:
-#             # Get active team member by email
-#             logger.debug("🔍 Getting team member by email...")
-#             team_member = await self.team_repo.get_active_team_member_by_email(email)
-            
-#             if not team_member:
-#                 logger.warning(f"❌ Team member not found or not active: {email}")
-#                 raise ValueError("Invalid credentials or account is not active")
-#             logger.debug(f"✅ Team member found: {team_member.full_name}")
-            
-#             # Verify password
-#             logger.debug("🔐 Verifying password...")
-#             is_valid = verify_password(password, team_member.password_hash)
-            
-#             if not is_valid:
-#                 logger.warning("❌ Invalid password")
-#                 raise ValueError("Invalid credentials")
-#             logger.debug("✅ Password verified")
-            
-#             # Generate JWT tokens
-#             logger.debug("🔑 Generating tokens...")
-#             access_token = create_access_token(
-#                 user_id=team_member.id,
-#                 user_type="emergency_team"
-#             )
-#             refresh_token = create_refresh_token(user_id=team_member.id)
-#             logger.debug("✅ Tokens generated")
-            
-#             logger.info(f"✅ Emergency team login successful for {email}")
-#             return {
-#                 "team_member": {
-#                     "id": team_member.id,
-#                     "phone_number": team_member.phone_number,
-#                     "full_name": team_member.full_name,
-#                     "email": team_member.email,
-#                     "role": team_member.role.value,
-#                     "department": team_member.department.value,
-#                     "employee_id": team_member.employee_id,
-#                     "status": team_member.status.value,
-#                     "created_at": team_member.created_at.isoformat()
-#                 },
-#                 "tokens": {
-#                     "access_token": access_token,
-#                     "refresh_token": refresh_token,
-#                     "token_type": "bearer",
-#                     "expires_in": settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
-#                 }
-#             }
-            
-#         except ValueError as e:
-#             raise
-#         except Exception as e:
-#             logger.exception(f"❌ Emergency team login failed")
-#             raise
-    
-#     async def login_team_member_by_phone(
-#         self,
-#         phone_number: str,
-#         password: str
-#     ) -> Dict[str, Any]:
-#         """
-#         Login emergency team member with phone number and password.
-        
-#         Alternative login method using phone number instead of email.
-#         """
-#         logger.info(f"🔑 Starting emergency team login by phone for {phone_number}")
-        
-#         try:
-#             # Get active team member by phone
-#             team_member = await self.team_repo.get_active_team_member_by_phone(
-#                 phone_number
-#             )
-            
-#             if not team_member:
-#                 logger.warning(f"❌ Team member not found: {phone_number}")
-#                 raise ValueError("Invalid credentials or account is not active")
-            
-#             # Verify password
-#             is_valid = verify_password(password, team_member.password_hash)
-            
-#             if not is_valid:
-#                 logger.warning("❌ Invalid password")
-#                 raise ValueError("Invalid credentials")
-            
-#             # Generate JWT tokens
-#             access_token = create_access_token(
-#                 user_id=team_member.id,
-#                 user_type="emergency_team"
-#             )
-            
-#             refresh_token = create_refresh_token(user_id=team_member.id)
-            
-#             return {
-#                 "team_member": {
-#                     "id": team_member.id,
-#                     "phone_number": team_member.phone_number,
-#                     "full_name": team_member.full_name,
-#                     "email": team_member.email,
-#                     "role": team_member.role.value,
-#                     "department": team_member.department.value,
-#                     "employee_id": team_member.employee_id,
-#                     "status": team_member.status.value,
-#                     "created_at": team_member.created_at.isoformat()
-#                 },
-#                 "tokens": {
-#                     "access_token": access_token,
-#                     "refresh_token": refresh_token,
-#                     "token_type": "bearer",
-#                     "expires_in": settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
-#                 }
-#             }
-            
-#         except ValueError as e:
-#             raise
-#         except Exception as e:
-#             logger.exception(f"❌ Emergency team login by phone failed")
-#             raise
-    
-#     async def get_team_member_by_id(
-#         self, 
-#         team_member_id: str
-#     ) -> Optional[EmergencyTeam]:
-#         """Get team member by ID."""
-#         return await self.team_repo.get_by_id(team_member_id)
-    
-#     async def get_team_member_by_email(
-#         self, 
-#         email: str
-#     ) -> Optional[EmergencyTeam]:
-#         """Get team member by email."""
-#         return await self.team_repo.get_by_email(email)
-    
-#     async def get_team_members_by_department(
-#         self,
-#         department: Department,
-#         skip: int = 0,
-#         limit: int = 100
-#     ) -> list[EmergencyTeam]:
-#         """Get all team members in a department."""
-#         return await self.team_repo.get_by_department(department, skip, limit)
-    
-#     async def change_password(
-#         self,
-#         team_member_id: str,
-#         old_password: str,
-#         new_password: str
-#     ) -> Dict[str, str]:
-#         """Change team member password."""
-#         logger.info(f"🔐 Changing password for team member {team_member_id}")
-        
-#         team_member = await self.team_repo.get_by_id(team_member_id)
-        
-#         if not team_member:
-#             raise ValueError("Team member not found")
-        
-#         # Verify old password
-#         is_valid = verify_password(old_password, team_member.password_hash)
-        
-#         if not is_valid:
-#             raise ValueError("Current password is incorrect")
-        
-#         # Hash new password
-#         new_password_hash = hash_password(new_password)
-        
-#         # Update password
-#         await self.team_repo.update(
-#             team_member_id,
-#             password_hash=new_password_hash
-#         )
-        
-#         await self.session.commit()
-        
-#         return {"message": "Password changed successfully"}
-    
-#     async def deactivate_team_member(
-#         self, 
-#         team_member_id: str
-#     ) -> Dict[str, str]:
-#         """Deactivate a team member account."""
-#         team_member = await self.team_repo.deactivate_team_member(team_member_id)
-        
-#         if not team_member:
-#             raise ValueError("Team member not found")
-        
-#         await self.session.commit()
-        
-#         return {"message": "Team member deactivated successfully"}
-
-
-
 # File: app/services/emergency_team_service.py
 """
 Emergency team service for emergency responders.
 
-UPDATED: 
-- Registration uses OTP (like users)
-- Login uses password (password-based authentication)
+Login flow (2-step MFA):
+  Step 1 — POST /emergency-team/login
+           Verify email + password.
+           On success, send OTP to the member's registered phone number.
+           Return {message, phone_number}.
+
+  Step 2 — POST /emergency-team/login/verify
+           Verify the OTP received via SMS.
+           On success, return JWT tokens + team member data.
+
+Registration flow (unchanged):
+  Step 1 — POST /emergency-team/register       → send OTP
+  Step 2 — POST /emergency-team/register/verify → verify OTP, create account
 """
 
 from typing import Optional, Dict, Any
 from sqlalchemy.ext.asyncio import AsyncSession
 import logging
+import uuid
+import asyncio
 
 from app.repositories.emergency_team_repository import EmergencyTeamRepository
-from app.services.otp_service import send_otp_code, verify_otp
+from app.services.otp_service import send_otp_code, verify_otp, check_rate_limit, peek_rate_limit
 from app.services.registration_cache import (
     store_registration_data,
     get_registration_data,
@@ -536,18 +36,33 @@ from app.db.models.emergency_team import EmergencyTeam
 from app.db.models.enums import UserStatus, EmergencyTeamRole, Department
 from app.core.config import settings
 
-# Setup logging
+# Cache helpers used directly for the login-pending flag
+from cache.redis_client import set_with_expiry, get_value, delete_key
+
 logger = logging.getLogger(__name__)
+
+# Redis key prefix for login session tokens.
+# Stores {phone_number, member_id} keyed by a random token so the client
+# never needs to know or send the phone number.
+_LOGIN_TOKEN_PREFIX = "ert_login_token:"
+
+
+def _login_token_key(token: str) -> str:
+    return f"{_LOGIN_TOKEN_PREFIX}{token}"
 
 
 class EmergencyTeamService:
     """Emergency team service for authentication and team management."""
-    
+
     def __init__(self, session: AsyncSession):
         """Initialize emergency team service."""
         self.session = session
         self.team_repo = EmergencyTeamRepository(session)
-    
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Registration (step 1 + step 2)
+    # ─────────────────────────────────────────────────────────────────────────
+
     async def register_team_member(
         self,
         phone_number: str,
@@ -559,193 +74,86 @@ class EmergencyTeamService:
         employee_id: Optional[str] = None
     ) -> Dict[str, str]:
         """
-        Register a new emergency team member (send OTP).
-        
-        UPDATED: Now sends OTP instead of creating account immediately.
-        
+        Register a new emergency team member — step 1: send OTP.
+
         Steps:
         1. Validate uniqueness (phone, email, employee_id)
         2. Hash password
         3. Store registration data in Redis cache
-        4. Generate and send OTP
+        4. Generate and send OTP to phone_number
         5. Return success message
-        
-        Args:
-            phone_number: Team member's phone number
-            password: Plain text password (will be hashed and cached)
-            full_name: Team member's full name
-            email: Email address
-            role: Team role (admin, manager, staff)
-            department: Department (medical, police, fire, it)
-            employee_id: Optional employee ID
-            
-        Returns:
-            Dict with success message and phone number
-            
-        Raises:
-            ValueError: If phone, email, or employee_id already exists
-            
-        Example:
-            >>> result = await service.register_team_member(
-            ...     phone_number="+1234567890",
-            ...     password="SecurePass123!",
-            ...     full_name="John Doe",
-            ...     email="john.doe@emergency.ie",
-            ...     role=EmergencyTeamRole.STAFF,
-            ...     department=Department.MEDICAL
-            ... )
-            >>> # Returns: {"message": "OTP sent to +1234567890"}
         """
         logger.info(f"📝 Starting emergency team registration for {phone_number}")
-        
-        try:
-            # Step 1: Check if phone number already exists
-            logger.debug(f"🔍 Checking if phone {phone_number} exists...")
-            if await self.team_repo.phone_exists(phone_number):
-                logger.warning(f"❌ Phone {phone_number} already registered")
-                raise ValueError(f"Phone number {phone_number} is already registered")
-            logger.debug("✅ Phone number available")
-            
-            # Step 2: Check if email already exists
-            logger.debug(f"🔍 Checking if email {email} exists...")
-            if await self.team_repo.email_exists(email):
-                logger.warning(f"❌ Email {email} already registered")
-                raise ValueError(f"Email {email} is already registered")
-            logger.debug("✅ Email available")
-            
-            # Step 3: Check if employee ID already exists (if provided)
-            if employee_id:
-                logger.debug(f"🔍 Checking if employee_id {employee_id} exists...")
-                if await self.team_repo.employee_id_exists(employee_id):
-                    logger.warning(f"❌ Employee ID {employee_id} already registered")
-                    raise ValueError(f"Employee ID {employee_id} is already registered")
-                logger.debug("✅ Employee ID available")
-            
-            # Step 4: Hash password
-            logger.debug("🔐 Hashing password...")
-            password_hash = hash_password(password)
-            logger.debug("✅ Password hashed")
-            
-            # Step 5: Store registration data in cache
-            logger.info(f"💾 Storing emergency team registration data in Redis cache...")
-            try:
-                # Store all registration data including password hash
-                await store_registration_data(
-                    phone_number=phone_number,
-                    full_name=full_name,
-                    email=email,
-                    # Additional emergency team specific data
-                    password_hash=password_hash,
-                    role=role.value,
-                    department=department.value,
-                    employee_id=employee_id
-                )
 
-                # await store_registration_data(
-                #     phone_number=phone_number,
-                #     data={
-                #         "full_name": full_name,
-                #         "email": email,
-                #         "password_hash": password_hash,
-                #         "role": role.value,
-                #         "department": department.value,
-                #         "employee_id": employee_id,
-                #         "user_type": "emergency_team"
-                #     }
-                # )
-                logger.info("✅ Registration data cached successfully")
-            except Exception as cache_error:
-                logger.error(f"❌ Failed to cache registration data: {cache_error}")
-                raise Exception(f"Cache error: {str(cache_error)}")
-            
-            # Step 6: Generate and send OTP
-            logger.info(f"📱 Generating and sending OTP to {phone_number}...")
-            try:
-                otp = await send_otp_code(phone_number)
-                
-                if not otp:
-                    logger.error("❌ send_otp_code returned None/False")
-                    # Clean up cache if OTP sending fails
-                    await delete_registration_data(phone_number)
-                    raise Exception("OTP service returned None - check Twilio credentials or set ENVIRONMENT=testing")
-                
-                logger.info(f"✅ OTP generated and sent: {otp[:2]}****")
-                
-            except Exception as otp_error:
-                logger.error(f"❌ OTP sending failed: {type(otp_error).__name__}: {otp_error}")
-                # Clean up cache
+        try:
+            if await self.team_repo.phone_exists(phone_number):
+                raise ValueError(f"Phone number {phone_number} is already registered")
+
+            if await self.team_repo.email_exists(email):
+                raise ValueError(f"Email {email} is already registered")
+
+            if employee_id and await self.team_repo.employee_id_exists(employee_id):
+                raise ValueError(f"Employee ID {employee_id} is already registered")
+
+            password_hash = hash_password(password)
+
+            await store_registration_data(
+                phone_number=phone_number,
+                full_name=full_name,
+                email=email,
+                password_hash=password_hash,
+                role=role.value,
+                department=department.value,
+                employee_id=employee_id
+            )
+
+            otp = await send_otp_code(phone_number)
+            if not otp:
                 await delete_registration_data(phone_number)
-                raise Exception(f"OTP sending failed: {str(otp_error)}")
-            
-            logger.info(f"✅ Emergency team registration OTP sent to {phone_number}")
+                raise Exception("OTP service returned None")
+
+            logger.info(f"✅ Registration OTP sent to {phone_number}")
             return {
                 "message": f"OTP sent successfully to {phone_number}. Please verify to complete registration.",
                 "phone_number": phone_number
             }
-            
-        except ValueError as e:
-            # Re-raise validation errors as-is
+
+        except ValueError:
             raise
-        except Exception as e:
-            logger.exception(f"❌ Emergency team registration failed")
+        except Exception:
+            logger.exception("❌ Emergency team registration failed")
             raise
-    
+
     async def verify_team_member_registration(
         self,
         phone_number: str,
         otp: str
     ) -> Dict[str, Any]:
         """
-        Verify OTP and create emergency team member account.
-        
+        Verify OTP and create emergency team member account — step 2.
+
         Steps:
-        1. Verify OTP from Redis
-        2. Retrieve registration data from Redis cache
+        1. Verify OTP
+        2. Retrieve registration data from Redis
         3. Create team member account (status: ACTIVE)
         4. Delete registration cache
         5. Generate JWT tokens
         6. Return team member data + tokens
-        
-        Args:
-            phone_number: Team member's phone number
-            otp: OTP code to verify
-            
-        Returns:
-            Dict with team member data and tokens
-            
-        Raises:
-            ValueError: If OTP invalid or registration data not found
         """
-        logger.info(f"🔐 Starting emergency team registration verification for {phone_number}")
-        
+        logger.info(f"🔐 Verifying registration OTP for {phone_number}")
+
         try:
-            # Step 1: Verify OTP
-            logger.debug(f"🔍 Verifying OTP...")
             is_valid = await verify_otp(phone_number, otp)
-            
             if not is_valid:
-                logger.warning(f"❌ Invalid or expired OTP for {phone_number}")
                 raise ValueError("Invalid or expired OTP")
-            logger.debug("✅ OTP verified")
-            
-            # Step 2: Retrieve registration data from cache
-            logger.debug(f"💾 Retrieving emergency team registration data from cache...")
+
             reg_data = await get_registration_data(phone_number)
-            
             if not reg_data:
-                logger.error(f"❌ No registration data found for {phone_number}")
-                raise ValueError(
-                    "Registration data not found. Please register again."
-                )
-            logger.debug(f"✅ Retrieved data: {reg_data.get('full_name')}")
-            
-            # Step 3: Create emergency team member
-            logger.info(f"👤 Creating emergency team member account...")
-            
-            # Convert string back to enums
+                raise ValueError("Registration data not found. Please register again.")
+
             role = EmergencyTeamRole(reg_data["role"])
             department = Department(reg_data["department"])
-            
+
             team_member = await self.team_repo.create(
                 phone_number=reg_data["phone_number"],
                 password_hash=reg_data["password_hash"],
@@ -757,29 +165,21 @@ class EmergencyTeamService:
                 status=UserStatus.ACTIVE
             )
             logger.info(f"✅ Emergency team member created: {team_member.id}")
-            
-            # Step 4: Delete registration cache
-            logger.debug("🗑️  Cleaning up registration cache...")
-            await delete_registration_data(phone_number)
 
-            # Step 5: Flush so the team member row is visible within this session
-            # before we refresh — but do NOT commit here. get_db() owns the commit.
-            # (FIX #9: removed explicit session.commit() to eliminate double-commit)
+            await delete_registration_data(phone_number)
             await self.session.flush()
             await self.session.refresh(team_member)
-            logger.debug("✅ Changes flushed")
-            
-            # Step 6: Generate JWT tokens
-            logger.debug("🔑 Generating JWT tokens...")
+
             access_token = create_access_token(
                 user_id=team_member.id,
                 user_type="emergency_team"
             )
-            # refresh_token = create_refresh_token(user_id=team_member.id)
-            refresh_token = create_refresh_token(user_id=team_member.id, user_type="emergency_team")
-            logger.debug("✅ Tokens generated")
-            
-            logger.info(f"✅ Emergency team registration completed for {phone_number}")
+            refresh_token = create_refresh_token(
+                user_id=team_member.id,
+                user_type="emergency_team"
+            )
+
+            logger.info(f"✅ Registration completed for {phone_number}")
             return {
                 "team_member": {
                     "id": team_member.id,
@@ -799,136 +199,215 @@ class EmergencyTeamService:
                     "expires_in": settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
                 }
             }
-            
-        except ValueError as e:
-            # Re-raise validation errors
+
+        except ValueError:
             raise
-        except Exception as e:
-            logger.exception(f"❌ Emergency team verification failed")
+        except Exception:
+            logger.exception("❌ Emergency team registration verification failed")
             raise
-    
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Login — 2-step MFA (email+password → OTP)
+    # ─────────────────────────────────────────────────────────────────────────
+
     async def login_team_member(
         self,
         email: str,
         password: str
-    ) -> Dict[str, Any]:
+    ) -> Dict[str, str]:
         """
-        Login emergency team member with email and password.
-        
-        UNCHANGED: Still uses password-based authentication for login.
-        
-        Steps:
-        1. Find active team member by email
-        2. Verify password with Argon2
-        3. Generate JWT tokens
-        4. Return team member data + tokens
-        
+        Login step 1 — verify email + password, then send OTP.
+
+        Optimisations applied:
+        - Argon2 runs in a thread-pool executor (CPU-bound, was blocking the
+          event loop for ~1-2s on every request)
+        - Rate limit is peeked (no counter increment) before any work is
+          committed, fixing the previous double-increment bug
+        - Twilio SMS is fired as a background asyncio task — the response
+          returns as soon as the login_token is stored in Redis (~50ms),
+          not after the SMS round-trip (~2-4s)
+
         Args:
-            email: Team member's email
-            password: Plain text password
-            
+            email:    Registered email address
+            password: Plain-text password
+
         Returns:
-            Dict with team member data and tokens
-            
+            {"message": "...", "login_token": "<uuid>"}
+
         Raises:
-            ValueError: If credentials invalid or account not active
+            ValueError:        bad credentials / inactive account / rate limited
+            ValueError("rate_limit:..."): rate limit exceeded → router returns 429
         """
-        logger.info(f"🔑 Starting emergency team login for {email}")
-        
+        logger.info(f"🔑 Login step 1 for {email}")
+
         try:
-            # Get active team member by email
-            logger.debug("🔍 Getting team member by email...")
+            # ── 1. DB lookup ──────────────────────────────────────────────────
             team_member = await self.team_repo.get_active_team_member_by_email(email)
-            
             if not team_member:
-                logger.warning(f"❌ Team member not found or not active: {email}")
+                logger.warning(f"❌ Team member not found or inactive: {email}")
                 raise ValueError("Invalid credentials or account is not active")
-            logger.debug(f"✅ Team member found: {team_member.full_name}")
-            
-            # Verify password
-            logger.debug("🔐 Verifying password...")
-            is_valid = verify_password(password, team_member.password_hash)
-            
+
+            # ── 2. Argon2 in thread executor ──────────────────────────────────
+            # verify_password is synchronous and CPU-bound (19 MB, 3 iterations).
+            # Running it in the default ThreadPoolExecutor keeps the event loop
+            # free to handle other requests during the ~1-2s hash check.
+            loop = asyncio.get_running_loop()
+            is_valid = await loop.run_in_executor(
+                None, verify_password, password, team_member.password_hash
+            )
             if not is_valid:
                 logger.warning("❌ Invalid password")
                 raise ValueError("Invalid credentials")
-            logger.debug("✅ Password verified")
-            
-            # Generate JWT tokens
-            logger.debug("🔑 Generating tokens...")
-            access_token = create_access_token(
-                user_id=team_member.id,
-                user_type="emergency_team"
-            )
-            # refresh_token = create_refresh_token(user_id=team_member.id)
-            refresh_token = create_refresh_token(user_id=team_member.id, user_type="emergency_team")
-            logger.debug("✅ Tokens generated")
-            
-            logger.info(f"✅ Emergency team login successful for {email}")
-            return {
-                "team_member": {
-                    "id": team_member.id,
+
+            logger.debug(f"✅ Password verified for {email}")
+
+            # ── 3. Peek rate limit (no increment) ─────────────────────────────
+            # peek_rate_limit reads the counter without touching it.
+            # send_otp_code (called in the background) does the real increment,
+            # so each login attempt consumes exactly one rate-limit slot.
+            if not await peek_rate_limit(team_member.phone_number):
+                raise ValueError(
+                    "rate_limit: Too many OTP requests for this account. "
+                    "Please wait before trying again."
+                )
+
+            # ── 4. Store login session token in Redis ─────────────────────────
+            login_token = str(uuid.uuid4())
+            pending_ttl = settings.OTP_EXPIRY_SECONDS + 60
+            import json as _json
+            await set_with_expiry(
+                _login_token_key(login_token),
+                _json.dumps({
                     "phone_number": team_member.phone_number,
-                    "full_name": team_member.full_name,
-                    "email": team_member.email,
-                    "role": team_member.role.value,
-                    "department": team_member.department.value,
-                    "employee_id": team_member.employee_id,
-                    "status": team_member.status.value,
-                    "created_at": team_member.created_at.isoformat()
-                },
-                "tokens": {
-                    "access_token": access_token,
-                    "refresh_token": refresh_token,
-                    "token_type": "bearer",
-                    "expires_in": settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
-                }
+                    "member_id": team_member.id,
+                }),
+                pending_ttl
+            )
+
+            # ── 5. Fire SMS in background — return immediately ────────────────
+            # The client gets the login_token as soon as the Redis write above
+            # completes (~5ms).  The Twilio round-trip happens concurrently.
+            # If SMS fails, the background task cleans up the token so the
+            # client gets a clean "session not found" on the next step.
+            asyncio.create_task(
+                self._send_login_otp_background(
+                    team_member.phone_number, login_token
+                )
+            )
+
+            logger.info(f"✅ Login token issued for {email}, OTP sending in background")
+            return {
+                "message": (
+                    "Password verified. An OTP is being sent to your registered "
+                    "phone number. Please verify to complete login."
+                ),
+                "login_token": login_token
             }
-            
-        except ValueError as e:
+
+        except ValueError:
             raise
-        except Exception as e:
-            logger.exception(f"❌ Emergency team login failed")
+        except Exception:
+            logger.exception("❌ Login step 1 failed")
             raise
-    
-    async def login_team_member_by_phone(
+
+    async def _send_login_otp_background(
         self,
         phone_number: str,
-        password: str
+        login_token: str
+    ) -> None:
+        """
+        Background task: send OTP via Twilio and clean up on failure.
+
+        Called with asyncio.create_task — not awaited by the login endpoint.
+        If the SMS fails for any reason the login_token is deleted from Redis
+        so the client receives a clean error on step 2 instead of an
+        unexplained "invalid OTP".
+        """
+        try:
+            otp = await send_otp_code(phone_number)
+            if not otp:
+                logger.error(
+                    f"❌ OTP send returned None for {phone_number} — "
+                    "removing login token"
+                )
+                await delete_key(_login_token_key(login_token))
+            else:
+                logger.info(f"✅ Login OTP delivered to {phone_number}")
+        except Exception as exc:
+            logger.error(
+                f"❌ Background OTP send failed for {phone_number}: {exc} — "
+                "removing login token"
+            )
+            await delete_key(_login_token_key(login_token))
+
+    async def verify_login_otp(
+        self,
+        login_token: str,
+        otp: str
     ) -> Dict[str, Any]:
         """
-        Login emergency team member with phone number and password.
-        
-        Alternative login method using phone number instead of email.
+        Login step 2 — verify OTP using login_token and issue JWT tokens.
+
+        Steps:
+        1. Look up the login session by login_token — resolves phone_number server-side
+        2. Verify the OTP for that phone number
+        3. Delete the login session token
+        4. Look up and return the team member + JWT tokens
+
+        Args:
+            login_token: Token returned by step 1 (opaque to client)
+            otp:         6-digit OTP received via SMS
+
+        Returns:
+            {"team_member": {...}, "tokens": {...}}
+
+        Raises:
+            ValueError: invalid token / OTP invalid / account not found
         """
-        logger.info(f"🔑 Starting emergency team login by phone for {phone_number}")
-        
+        logger.info("🔐 Login step 2 (OTP verify)")
+
         try:
-            # Get active team member by phone
+            import json as _json
+
+            # 1. Resolve phone number from login token
+            raw = await get_value(_login_token_key(login_token))
+            if not raw:
+                logger.warning("❌ No active login session for provided token")
+                raise ValueError(
+                    "Invalid or expired login session. Please start login again."
+                )
+
+            session_data = _json.loads(raw)
+            phone_number = session_data["phone_number"]
+
+            # 2. Verify OTP (one-time use — deleted inside verify_otp on success)
+            is_valid = await verify_otp(phone_number, otp)
+            if not is_valid:
+                logger.warning(f"❌ Invalid or expired OTP for session token")
+                raise ValueError("Invalid or expired OTP")
+
+            # 3. Clean up the login session token
+            await delete_key(_login_token_key(login_token))
+
+            # 4. Fetch the team member
             team_member = await self.team_repo.get_active_team_member_by_phone(
                 phone_number
             )
-            
             if not team_member:
-                logger.warning(f"❌ Team member not found: {phone_number}")
-                raise ValueError("Invalid credentials or account is not active")
-            
-            # Verify password
-            is_valid = verify_password(password, team_member.password_hash)
-            
-            if not is_valid:
-                logger.warning("❌ Invalid password")
-                raise ValueError("Invalid credentials")
-            
-            # Generate JWT tokens
+                logger.error("❌ Team member not found after OTP verify")
+                raise ValueError("Account not found or is no longer active")
+
+            # 5. Generate JWT tokens
             access_token = create_access_token(
                 user_id=team_member.id,
                 user_type="emergency_team"
             )
-            
-            # refresh_token = create_refresh_token(user_id=team_member.id)
-            refresh_token = create_refresh_token(user_id=team_member.id, user_type="emergency_team")
-            
+            refresh_token = create_refresh_token(
+                user_id=team_member.id,
+                user_type="emergency_team"
+            )
+
+            logger.info(f"✅ Login complete for {team_member.email}")
             return {
                 "team_member": {
                     "id": team_member.id,
@@ -948,27 +427,112 @@ class EmergencyTeamService:
                     "expires_in": settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
                 }
             }
-            
-        except ValueError as e:
+
+        except ValueError:
             raise
-        except Exception as e:
-            logger.exception(f"❌ Emergency team login by phone failed")
+        except Exception:
+            logger.exception("❌ Login step 2 (OTP verify) failed")
+            raise
+
+    async def resend_login_otp(
+        self, 
+        login_token: str
+    ) -> Dict[str, str]:
+        """
+            Resend the login OTP for an existing login session.
+
+            Steps: 
+            1. Look up login_token in Redis - confirms step 1 was completed
+            2. Peek rate limit - returns error if exceeded (no increment)
+            3. Delete old OTP so stale code can't be used after resend
+            4. Send fresh OTP via Twilio (increments rate limit counter)
+            5. Refresh login_token TTL so session doesn't expire mid-flow
+            6. Return success message
+
+
+            Args: 
+                login_token: Token returned by step 1
+
+            Returns: 
+                {"message": "OTP resent successfully"}
+
+            Raises: 
+                ValueError: invalid/expired token, rate limit exceeded
+        """
+
+        logger.info("Login OTP resend requested")
+
+
+        try:
+            import json as _json
+
+            #1 Resolve phone_number from login_token
+            raw = await get_value(_login_token_key(login_token))
+
+            if not raw:
+                raise ValueError("Invalid or expired login session. Please start login again.")
+            
+            session_data = _json.loads(raw)
+            phone_number = session_data["phone_number"]
+
+            #2 Peek rate limit without incrementing
+
+            if not await peek_rate_limit(phone_number):
+                raise ValueError(
+                    "rate_limit: Too many OTP requests for this account. Please try again later"
+                )
+            
+            #3 Delete old OTP so stale code can't be used after resend
+
+            from app.services.otp_service import delete_otp
+
+            await delete_otp(phone_number)
+
+            #4 Send fresh OTP (this increments the rate limit counter)
+
+            otp = await send_otp_code(phone_number)
+            if not otp:
+                raise Exception("OTP service failed - please try again")
+            
+            #5 Refresh login_token TTL so session stays alive
+
+            pending_ttl = settings.OTP_EXPIRY_SECONDS + 60
+            await set_with_expiry(
+                _login_token_key(login_token), 
+                _json.dumps(session_data), 
+                pending_ttl
+            )
+
+            logger.info(f"Login OTP resent to {phone_number}")
+
+            return {
+                "message" : "OTP resent successfully."
+            }
+        except ValueError:
+            raise
+        except Exception:
+            logger.exception("Login OTP resend failure")
             raise
     
+    
+    # ─────────────────────────────────────────────────────────────────────────
+    # Account management
+    # ─────────────────────────────────────────────────────────────────────────
+
     async def get_team_member_by_id(
-        self, 
+        self,
         team_member_id: str
     ) -> Optional[EmergencyTeam]:
         """Get team member by ID."""
         return await self.team_repo.get_by_id(team_member_id)
-    
+
     async def get_team_member_by_email(
-        self, 
+        self,
         email: str
     ) -> Optional[EmergencyTeam]:
         """Get team member by email."""
         return await self.team_repo.get_by_email(email)
-    
+
     async def get_team_members_by_department(
         self,
         department: Department,
@@ -977,7 +541,7 @@ class EmergencyTeamService:
     ) -> list[EmergencyTeam]:
         """Get all team members in a department."""
         return await self.team_repo.get_by_department(department, skip, limit)
-    
+
     async def change_password(
         self,
         team_member_id: str,
@@ -988,24 +552,12 @@ class EmergencyTeamService:
         Change password for an authenticated team member.
 
         Verifies the current (old) password before applying the new one.
-        Uses raw SQL for the lookup and update to stay consistent with
-        the project's no-ORM rule.
-
-        Args:
-            team_member_id: UUID from the JWT token (get_current_team_member)
-            old_password:   The member's current plaintext password
-            new_password:   The desired new plaintext password (already validated
-                            by the Pydantic schema before this is called)
-
-        Raises:
-            ValueError: Team member not found / old password wrong / account inactive
         """
         from sqlalchemy import text
         from datetime import datetime
 
         logger.info(f"🔐 Changing password for team member {team_member_id}")
 
-        # ── 1. Fetch current password hash + status ──────────────────────────
         fetch_sql = text("""
             SELECT id, password_hash, status
             FROM emergency_teams
@@ -1021,11 +573,9 @@ class EmergencyTeamService:
         if str(member["status"]) != "ACTIVE":
             raise ValueError("Account is not active. Please contact an administrator.")
 
-        # ── 2. Verify old password ────────────────────────────────────────────
         if not verify_password(old_password, member["password_hash"]):
             raise ValueError("Current password is incorrect")
 
-        # ── 3. Hash + persist new password ───────────────────────────────────
         new_hash = hash_password(new_password)
         now = datetime.utcnow()
 
@@ -1047,7 +597,8 @@ class EmergencyTeamService:
 
     async def deactivate_team_member(
         self,
-        team_member_id: str
+        team_member_id: str,
+        requesting_user_id: str
     ) -> Dict[str, str]:
         """Deactivate a team member account."""
         team_member = await self.team_repo.deactivate_team_member(team_member_id)
@@ -1056,5 +607,4 @@ class EmergencyTeamService:
             raise ValueError("Team member not found")
 
         await self.session.commit()
-
         return {"message": "Team member deactivated successfully"}

@@ -16,13 +16,14 @@ Shutdown sequence:
 """
 
 import asyncio
-import logging
+import logging, socketio
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from pathlib import Path
+from sqlalchemy.ext.asyncio import AsyncSession
 
 # ── Core ──────────────────────────────────────────────────────────────────────
 from app.core.config import settings
@@ -69,6 +70,9 @@ from app.api.v1.incident_log import router as incident_log_router  # Audit / inc
 # ── User & notification routers ──────────────────────────────────────────────
 from app.api.v1.user_management import router as user_management_router  # Admin user CRUD
 from app.api.v1.notifications_ws import router as notifications_router   # WebSocket alerts
+from app.workers.reroute_publisher import get_publisher
+
+from app.db.session import get_db
 
 
 # ── Configure logging before anything else ────────────────────────────────────
@@ -128,15 +132,33 @@ async def lifespan(app: FastAPI):
     logger.info("=" * 70)
     logger.info("🛑 Shutting down...")
 
+    # Helper: run a cleanup coroutine with a hard timeout so that a hanging
+    # remote connection (Redis / RabbitMQ / aiohttp on Azure) never blocks
+    # the reload indefinitely.
+    async def _safe_close(coro, label: str, timeout: float = 3.0) -> None:
+        try:
+            await asyncio.wait_for(coro, timeout=timeout)
+            logger.debug(f"✅ {label} closed")
+        except asyncio.TimeoutError:
+            logger.warning(f"⚠️  {label} close timed out after {timeout}s — skipping")
+        except Exception as exc:
+            logger.warning(f"⚠️  {label} close error — {exc}")
+
+    # Cancel the Redis pub/sub listener task.
+    # Give it slightly longer than its own internal wait_for(timeout=5.0) so
+    # that the CancelledError always wins on Python 3.9/3.10 where wait_for
+    # can delay propagation until the inner timeout fires.
     listener_task.cancel()
     try:
-        await listener_task
-    except asyncio.CancelledError:
+        await asyncio.wait_for(asyncio.shield(listener_task), timeout=6.0)
+    except (asyncio.CancelledError, asyncio.TimeoutError):
         pass
 
-    await close_redis_connection()
-    await traffic_provider.close()
-    await publisher.close()
+    # Close remote connections — all guarded so a network blip never stalls
+    # the server for longer than the sum of these timeouts (~9 s worst-case).
+    await _safe_close(close_redis_connection(),   "Redis connection",   timeout=3.0)
+    await _safe_close(traffic_provider.close(),   "TomTom provider",    timeout=3.0)
+    await _safe_close(publisher.close(),          "RabbitMQ publisher", timeout=3.0)
 
     logger.info("✅ Cleanup complete")
     logger.info("=" * 70)
