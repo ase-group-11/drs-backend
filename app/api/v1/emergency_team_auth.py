@@ -30,6 +30,7 @@ from app.schemas.emergency_team import (
     EmergencyTeamLoginInitResponse,
     EmergencyTeamLoginVerifyRequest,
     EmergencyTeamAuthResponse,
+    EmergencyTeamLoginResendOTPRequest,
     ChangePasswordRequest,
 )
 from app.schemas.auth import OTPVerifyRequest, MessageResponse
@@ -200,6 +201,47 @@ async def verify_login_otp(
             detail="OTP verification failed. Please try again.",
         )
 
+@router.post(
+    "/login/resend-otp",
+    response_model=MessageResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Resend login OTP — use if SMS not received within 5 minutes",
+)
+async def resend_login_otp(
+    request: EmergencyTeamLoginResendOTPRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Resends a fresh OTP to the registered phone number for an active
+    login session. The login_token remains the same — client does not
+    need to update anything.
+
+    Requires the login_token from step 1. Returns 401 if the session
+    has expired (older than 6 minutes). Returns 429 if rate limit exceeded.
+    """
+    service = EmergencyTeamService(db)
+    try:
+        result = await service.resend_login_otp(
+            login_token=request.login_token,
+        )
+        return MessageResponse(**result)
+
+    except ValueError as exc:
+        if str(exc).startswith("rate_limit:"):
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many OTP requests. Please wait before trying again.",
+            )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=str(exc)
+        )
+    except Exception as exc:
+        logger.exception("ERT login OTP resend failed")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to resend OTP. Please try again.",
+        )
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Account management

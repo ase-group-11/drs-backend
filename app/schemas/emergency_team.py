@@ -256,6 +256,27 @@ class EmergencyTeamResponse(BaseModel):
         }
     }
 
+class EmergencyTeamLoginResendOTPRequest(BaseModel):
+    """
+        Emergency team login - Resend OTP request schema.
+        Used when the OTP SMS was not received within the 5-minute window.
+    
+    """
+
+    login_token: str = Field(
+        ..., 
+        description = "The login_token received from step 1 (POST /emergency-team/login)"
+    )
+
+    model_config = {
+        "json_schema_extra" : {
+            "examples" : [
+                {
+                    "login_token" : "a3f8c2d1-7b4e-...."
+                }
+            ]
+        }
+    }
 
 class EmergencyTeamAuthResponse(BaseModel):
     """

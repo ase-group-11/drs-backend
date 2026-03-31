@@ -33,7 +33,7 @@ def generate_otp(length: int = None) -> str:
     otp_number = secrets.randbelow(max_value - min_value + 1) + min_value
     otp = str(otp_number)
     
-    logger.debug(f"🎲 Generated OTP: {otp[:2]}**** (length: {len(otp)})")
+    logger.debug(f"🎲 Generated OTP: {otp} (length: {len(otp)})")
     return otp
 
 

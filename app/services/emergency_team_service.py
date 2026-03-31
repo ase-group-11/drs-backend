@@ -60,7 +60,7 @@ class EmergencyTeamService:
         self.team_repo = EmergencyTeamRepository(session)
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Registration (step 1 + step 2)  — UNCHANGED
+    # Registration (step 1 + step 2)
     # ─────────────────────────────────────────────────────────────────────────
 
     async def register_team_member(
@@ -248,7 +248,7 @@ class EmergencyTeamService:
                 raise ValueError("Invalid credentials or account is not active")
 
             # ── 2. Argon2 in thread executor ──────────────────────────────────
-            # verify_password is synchronous and CPU-bound (64 MB, 3 iterations).
+            # verify_password is synchronous and CPU-bound (19 MB, 3 iterations).
             # Running it in the default ThreadPoolExecutor keeps the event loop
             # free to handle other requests during the ~1-2s hash check.
             loop = asyncio.get_running_loop()
@@ -434,8 +434,89 @@ class EmergencyTeamService:
             logger.exception("❌ Login step 2 (OTP verify) failed")
             raise
 
+    async def resend_login_otp(
+        self, 
+        login_token: str
+    ) -> Dict[str, str]:
+        """
+            Resend the login OTP for an existing login session.
+
+            Steps: 
+            1. Look up login_token in Redis - confirms step 1 was completed
+            2. Peek rate limit - returns error if exceeded (no increment)
+            3. Delete old OTP so stale code can't be used after resend
+            4. Send fresh OTP via Twilio (increments rate limit counter)
+            5. Refresh login_token TTL so session doesn't expire mid-flow
+            6. Return success message
+
+
+            Args: 
+                login_token: Token returned by step 1
+
+            Returns: 
+                {"message": "OTP resent successfully"}
+
+            Raises: 
+                ValueError: invalid/expired token, rate limit exceeded
+        """
+
+        logger.info("Login OTP resend requested")
+
+
+        try:
+            import json as _json
+
+            #1 Resolve phone_number from login_token
+            raw = await get_value(_login_token_key(login_token))
+
+            if not raw:
+                raise ValueError("Invalid or expired login session. Please start login again.")
+            
+            session_data = _json.loads(raw)
+            phone_number = session_data["phone_number"]
+
+            #2 Peek rate limit without incrementing
+
+            if not await peek_rate_limit(phone_number):
+                raise ValueError(
+                    "rate_limit: Too many OTP requests for this account. Please try again later"
+                )
+            
+            #3 Delete old OTP so stale code can't be used after resend
+
+            from app.services.otp_service import delete_otp
+
+            await delete_otp(phone_number)
+
+            #4 Send fresh OTP (this increments the rate limit counter)
+
+            otp = await send_otp_code(phone_number)
+            if not otp:
+                raise Exception("OTP service failed - please try again")
+            
+            #5 Refresh login_token TTL so session stays alive
+
+            pending_ttl = settings.OTP_EXPIRY_SECONDS + 60
+            await set_with_expiry(
+                _login_token_key(login_token), 
+                _json.dumps(session_data), 
+                pending_ttl
+            )
+
+            logger.info(f"Login OTP resent to {phone_number}")
+
+            return {
+                "message" : "OTP resent successfully."
+            }
+        except ValueError:
+            raise
+        except Exception:
+            logger.exception("Login OTP resend failure")
+            raise
+    
+    
     # ─────────────────────────────────────────────────────────────────────────
-    # Account management  — UNCHANGED
+    # Account management
     # ─────────────────────────────────────────────────────────────────────────
 
     async def get_team_member_by_id(
