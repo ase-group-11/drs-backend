@@ -1,11 +1,15 @@
 # File: app/api/v1/evacuation.py
 """
-Evacuation API Router — Use Case 8: Plan Evacuation
+Evacuation API Router — Use Case 8: Plan Evacuation (v2)
 
 Mirrors app/api/v1/reroute.py exactly:
   - get_evacuation_service() factory function uses Depends() injection
   - All dependencies (DB, TomTom, mapping, publisher) come from the factory
   - Auth: app.auth.dependencies.get_current_team_member
+
+v2 changes:
+  - /route-blockage no longer takes affected_zone_ids
+  - /escalate takes increased_radius_km + additional_roads instead of new_zone_ids
 """
 
 import logging
@@ -61,7 +65,6 @@ def get_evacuation_service(
 async def plan_evacuation(
     data: PlanEvacuationRequest,
     service: EvacuationService = Depends(get_evacuation_service),
-    
 ):
     return await service.plan_evacuation(
         disaster_id=data.disaster_id,
@@ -76,7 +79,6 @@ async def approve_evacuation(
     plan_id: str,
     data: ApproveEvacuationRequest,
     service: EvacuationService = Depends(get_evacuation_service),
-    
 ):
     return await service.approve_evacuation(
         plan_id=plan_id, approved_by=data.approved_by, notes=data.notes)
@@ -88,7 +90,6 @@ async def approve_evacuation(
 async def activate_evacuation(
     plan_id: str,
     service: EvacuationService = Depends(get_evacuation_service),
-    
 ):
     return await service.activate_evacuation(plan_id=plan_id)
 
@@ -99,7 +100,6 @@ async def activate_evacuation(
 async def get_progress(
     plan_id: str,
     service: EvacuationService = Depends(get_evacuation_service),
-    
 ):
     return await service.get_progress(plan_id=plan_id)
 
@@ -109,7 +109,6 @@ async def update_progress(
     plan_id: str,
     data: UpdateProgressRequest,
     service: EvacuationService = Depends(get_evacuation_service),
-    
 ):
     return await service.update_progress(
         plan_id=plan_id, completion_metrics=data.completion_metrics)
@@ -124,7 +123,6 @@ async def handle_route_blockage(
     return await service.handle_route_blockage(
         plan_id=plan_id,
         blocked_roads=data.blocked_roads,
-        affected_zone_ids=data.affected_zone_ids,
     )
 
 
@@ -133,10 +131,13 @@ async def handle_escalation(
     plan_id: str,
     data: EscalationRequest,
     service: EvacuationService = Depends(get_evacuation_service),
-    
 ):
     return await service.handle_disaster_escalation(
-        plan_id=plan_id, new_zone_ids=data.new_zone_ids, reason=data.reason)
+        plan_id=plan_id,
+        increased_radius_km=data.increased_radius_km,
+        additional_roads=data.additional_roads,
+        reason=data.reason,
+    )
 
 
 # ── CRUD ──────────────────────────────────────────────────────────────────────
@@ -145,7 +146,6 @@ async def handle_escalation(
 async def list_plans(
     disaster_id: Optional[str] = Query(None, description="Filter by disaster ID"),
     service: EvacuationService = Depends(get_evacuation_service),
-    
 ):
     plans = await service.list_plans(disaster_id=disaster_id)
     return {"evacuation_plans": plans, "count": len(plans)}
@@ -155,6 +155,5 @@ async def list_plans(
 async def get_plan(
     plan_id: str,
     service: EvacuationService = Depends(get_evacuation_service),
-    
 ):
     return await service.get_plan(plan_id=plan_id)
