@@ -172,22 +172,18 @@ class EvacuationRepository:
         self,
         disaster_id: str,
         plan_ref: str,
-        impact_area: Dict,
+        impact_zones: List[Dict],
         population_stats: Dict,
         blocked_roads: List[Dict],
         traffic_snapshot: Dict,
         shelters_with_capacity: List[Dict],
-        best_routes: Dict,
+        best_routes_per_zone: Dict,
         transport_plan: Dict,
         allocations: Dict,
         auto_approved: bool,
     ) -> str:
         plan_id = str(uuid.uuid4())
 
-        # created_at / updated_at are TIMESTAMP WITH TIME ZONE (base model columns)
-        now_aware = datetime.now(tz=timezone.utc)
-
-        # Store road names (strings) not full segment dicts
         road_names = [s.get("road_name", "") for s in blocked_roads]
 
         await self.db.execute(
@@ -197,13 +193,13 @@ class EvacuationRepository:
                     impact_zones, population_stats, blocked_roads, traffic_snapshot,
                     shelters_with_capacity, best_routes_per_zone,
                     transport_plan, allocations, completion_metrics,
-                    auto_approved, created_at, updated_at
+                    auto_approved
                 ) VALUES (
                     :id, :ref, :did,
                     CASE WHEN :auto_status THEN 'APPROVED' ELSE 'PENDING' END,
                     :zones, :pop, :roads, :traffic,
                     :shelters, :routes, :transport, :alloc, :metrics,
-                    :auto_flag, :created_at, :updated_at
+                    :auto_flag
                 )
             """),
             {
@@ -212,19 +208,15 @@ class EvacuationRepository:
                 "did":         disaster_id,
                 "auto_status": auto_approved,
                 "auto_flag":   auto_approved,
-                # Reuse the existing impact_zones column — now stores impact_area as a list
-                "zones":       json.dumps([impact_area]),
+                "zones":       json.dumps(impact_zones),
                 "pop":         json.dumps(population_stats),
                 "roads":       json.dumps(road_names),
                 "traffic":     json.dumps(traffic_snapshot),
                 "shelters":    json.dumps(shelters_with_capacity),
-                # Reuse the existing best_routes_per_zone column — now keyed by disaster_id
-                "routes":      json.dumps(best_routes),
+                "routes":      json.dumps(best_routes_per_zone),
                 "transport":   json.dumps(transport_plan),
                 "alloc":       json.dumps(allocations),
                 "metrics":     json.dumps({}),
-                "created_at":  now_aware,
-                "updated_at":  now_aware,
             },
         )
         await self.db.flush()
@@ -250,24 +242,13 @@ class EvacuationRepository:
         return self._deserialise(dict(row))
 
     async def update_plan(self, plan_id: str, **fields) -> bool:
-        """
-        Generic column updater.
-
-        Callers pass keyword args matching column names.
-        JSON-serialises dict/list values automatically.
-
-        updated_at is TIMESTAMP WITH TIME ZONE — use aware datetime.
-        All other timestamp fields (approved_at, activated_at, completed_at)
-        are TIMESTAMP WITHOUT TIME ZONE — callers pass naive datetimes for those.
-        """
         if not fields:
             return True
 
         set_clauses = []
-        # updated_at is WITH TIME ZONE on the base model
         params: Dict[str, Any] = {
             "pid":        plan_id,
-            "updated_at": datetime.now(tz=timezone.utc),
+            "updated_at": datetime.utcnow(),   # naive — matches TIMESTAMP WITHOUT TIME ZONE
         }
 
         for col, val in fields.items():

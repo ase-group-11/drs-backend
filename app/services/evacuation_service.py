@@ -411,12 +411,12 @@ class EvacuationService:
         plan_id  = await self.db.save_plan(
             disaster_id=disaster_id,
             plan_ref=plan_ref,
-            impact_area=impact_area,
+            impact_zones=[impact_area],           # wrap single area in list
             population_stats=population_stats,
             blocked_roads=blocked_roads,
             traffic_snapshot=traffic_snapshot,
             shelters_with_capacity=shelters,
-            best_routes=best_routes,
+            best_routes_per_zone=best_routes,     # rename to match repo
             transport_plan=transport_plan,
             allocations=allocations,
             auto_approved=auto_approve,
