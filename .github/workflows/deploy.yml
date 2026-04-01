@@ -54,6 +54,17 @@ jobs:
               --env-file .env \
               -p 8000:8000 \
               drs-backend:latest
+
+            docker stop drs-notifications-consumer 2>/dev/null || true
+            docker rm drs-notifications-consumer 2>/dev/null || true
+
+            # Run consumer using same image
+            docker run -d \
+              --name drs-notifications-consumer \
+              --restart unless-stopped \
+              --env-file .env \
+              drs-backend:latest \
+              python -m app.consumers.notification_consumer
           "
 
       - name: Health check
