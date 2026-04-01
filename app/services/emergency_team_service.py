@@ -608,3 +608,161 @@ class EmergencyTeamService:
 
         await self.session.commit()
         return {"message": "Team member deactivated successfully"}
+    # ─────────────────────────────────────────────────────────────────────────
+    # Forgot Password (step 1 + step 2)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    async def forgot_password_request(self, email: str) -> Dict[str, str]:
+        """
+        Forgot password — Step 1.
+
+        Flow:
+        1. Look up email in DB — same response whether found or not (no enumeration)
+        2. If found and ACTIVE: generate a secure 10-char temporary password
+        3. Hash it and store in Redis for 15 minutes (single-use)
+        4. Send the temp password to the user's email via SendGrid
+        5. Return a generic success message
+
+        The temp password is NOT returned in the response — it is emailed only.
+        """
+        import json as _json
+        import secrets
+        import string
+        from sqlalchemy import text
+        from datetime import datetime
+        from app.services.alert_channels import send_forgot_password_email
+
+        logger.info(f"🔑 Forgot password request for: {email}")
+
+        result = await self.session.execute(
+            text("""
+                SELECT id, full_name, email, status
+                FROM emergency_teams
+                WHERE email = :email AND deleted_at IS NULL
+            """),
+            {"email": email},
+        )
+        member = result.mappings().first()
+
+        # Always return the same message — never reveal if email is registered
+        generic_msg = "If this email is registered you will receive a temporary password shortly."
+
+        if not member:
+            logger.warning(f"Forgot password: email not found — {email}")
+            return {"message": generic_msg}
+
+        if str(member["status"]) != "ACTIVE":
+            logger.warning(f"Forgot password: inactive account — {email}")
+            return {"message": generic_msg}
+
+        # Generate a secure temp password (uppercase + lowercase + digit + 7 random)
+        alphabet = string.ascii_letters + string.digits
+        temp_password = (
+            secrets.choice(string.ascii_uppercase)
+            + secrets.choice(string.ascii_lowercase)
+            + secrets.choice(string.digits)
+            + "".join(secrets.choice(alphabet) for _ in range(7))
+        )
+        temp_list = list(temp_password)
+        secrets.SystemRandom().shuffle(temp_list)
+        temp_password = "".join(temp_list)
+
+        # Hash and store in Redis — 15 min TTL, single-use
+        temp_hash = hash_password(temp_password)
+        redis_key = f"ert_forgot_pwd:{str(member['id'])}"
+        await set_with_expiry(
+            redis_key,
+            _json.dumps({
+                "member_id": str(member["id"]),
+                "temp_hash": temp_hash,
+                "email": email,
+            }),
+            900,  # 15 minutes
+        )
+
+        # Build and send email via SendGrid
+        full_name = member["full_name"] or "Team Member"
+        email_sent = send_forgot_password_email(
+            to_email=email,
+            full_name=full_name,
+            temp_password=temp_password,
+        )
+
+        if email_sent:
+            logger.info(f"✅ Temporary password emailed to {email}")
+        else:
+            logger.error(f"❌ Failed to send forgot-password email to {email}")
+            # Still return success — don't reveal email send failure
+            # (attacker could use failure to confirm valid emails)
+
+        return {"message": generic_msg}
+
+    async def reset_password_with_temp(
+        self,
+        email: str,
+        temp_password: str,
+        new_password: str,
+    ) -> Dict[str, str]:
+        """
+        Forgot password — Step 2.
+
+        Flow:
+        1. Look up member by email
+        2. Retrieve temp hash from Redis
+        3. Delete it immediately — single-use regardless of outcome
+        4. Verify temp_password against stored hash
+        5. Update DB with new password hash
+        """
+        import json as _json
+        from sqlalchemy import text
+        from datetime import datetime
+
+        logger.info(f"🔑 Password reset attempt for: {email}")
+
+        result = await self.session.execute(
+            text("""
+                SELECT id, email, status
+                FROM emergency_teams
+                WHERE email = :email AND deleted_at IS NULL
+            """),
+            {"email": email},
+        )
+        member = result.mappings().first()
+
+        if not member:
+            raise ValueError("Invalid email or temporary password.")
+
+        if str(member["status"]) != "ACTIVE":
+            raise ValueError("Account is not active. Please contact an administrator.")
+
+        redis_key = f"ert_forgot_pwd:{str(member['id'])}"
+        raw = await get_value(redis_key)
+
+        if not raw:
+            raise ValueError(
+                "Temporary password has expired or was never issued. "
+                "Please request a new one."
+            )
+
+        stored = _json.loads(raw)
+
+        # Delete from Redis immediately — single-use, even if verify fails
+        await delete_key(redis_key)
+
+        if not verify_password(temp_password, stored["temp_hash"]):
+            raise ValueError("Invalid temporary password.")
+
+        new_hash = hash_password(new_password)
+        now = datetime.utcnow()
+        await self.session.execute(
+            text("""
+                UPDATE emergency_teams
+                SET password_hash = :password_hash,
+                    updated_at    = :updated_at
+                WHERE id = :id AND deleted_at IS NULL
+            """),
+            {"password_hash": new_hash, "updated_at": now, "id": str(member["id"])},
+        )
+
+        logger.info(f"✅ Password reset successful for {email}")
+        return {"message": "Password reset successfully. You can now log in with your new password."}
