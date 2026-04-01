@@ -21,10 +21,10 @@ jobs:
       - name: Create .env file on VM
         run: |
           ssh -o StrictHostKeyChecking=no ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
-            "mkdir -p /opt/drs-app/backend"
+            "mkdir -p ~/drs-app/backend"
           echo "${{ secrets.ENV_FILE }}" | ssh -o StrictHostKeyChecking=no \
             ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
-            "cat > /opt/drs-app/backend/.env"
+            "cat > ~/drs-app/backend/.env"
 
       - name: Copy code to VM
         run: |
@@ -36,21 +36,18 @@ jobs:
             --exclude='venv' \
             --exclude='ase-env' \
             -e "ssh -o StrictHostKeyChecking=no" \
-            ./ ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:/opt/drs-app/backend/
+            ./ ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:~/drs-app/backend/
 
       - name: Build and run Docker container on VM
         run: |
           ssh -o StrictHostKeyChecking=no ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} "
-            cd /opt/drs-app/backend
+            cd ~/drs-app/backend
 
-            # Stop and remove old container if running
             docker stop drs-backend 2>/dev/null || true
             docker rm drs-backend 2>/dev/null || true
 
-            # Build fresh image
             docker build -t drs-backend:latest .
 
-            # Run container
             docker run -d \
               --name drs-backend \
               --restart unless-stopped \
