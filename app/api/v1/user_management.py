@@ -522,7 +522,10 @@ async def get_user(
                 (SELECT COUNT(*) FROM emergency_units eu WHERE eu.commander_id = et.id AND eu.deleted_at IS NULL) as commanding_units,
                 (SELECT ARRAY_AGG(eu.unit_code) FROM unit_crew uc
                  JOIN emergency_units eu ON uc.unit_id = eu.id
-                 WHERE uc.team_member_id = et.id AND eu.deleted_at IS NULL) as unit_codes
+                 WHERE uc.team_member_id = et.id AND eu.deleted_at IS NULL) as unit_codes,
+                (SELECT ARRAY_AGG(eu.id::text) FROM unit_crew uc
+                 JOIN emergency_units eu ON uc.unit_id = eu.id
+                 WHERE uc.team_member_id = et.id AND eu.deleted_at IS NULL) as unit_ids
             FROM emergency_teams et
             WHERE et.id = :user_id AND et.deleted_at IS NULL
         """)
@@ -546,6 +549,7 @@ async def get_user(
                     "commanding_units": row["commanding_units"] or 0,
                 },
                 "unit_codes": row["unit_codes"] or [],
+                "unit_ids": row["unit_ids"] or [],
                 "created_at": row["created_at"].isoformat() if row["created_at"] else None,
                 "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
             }
