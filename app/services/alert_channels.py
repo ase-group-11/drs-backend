@@ -172,3 +172,155 @@ def build_html(
         '</body>'
         '</html>'
     )
+    
+# ── Forgot Password Email ─────────────────────────────────────
+ 
+def send_forgot_password_email(
+    to_email: str,
+    full_name: str,
+    temp_password: str,
+) -> bool:
+    """
+    Send forgot-password email with temporary password via SendGrid.
+ 
+    Uses the same send_email() helper — no extra config needed.
+    """
+    plain = (
+        f"Hi {full_name},\n\n"
+        f"You requested a password reset for your Dublin Disaster Response account.\n\n"
+        f"Temporary password: {temp_password}\n\n"
+        f"This password expires in 15 minutes and can only be used once.\n\n"
+        f"Steps to reset:\n"
+        f"1. Go to the Reset Password page\n"
+        f"2. Enter your email and the temporary password above\n"
+        f"3. Set your new password\n\n"
+        f"If you did not request this, please ignore this email.\n\n"
+        f"Dublin City Disaster Response System"
+    )
+ 
+    html = _build_forgot_password_html(full_name, temp_password)
+ 
+    return send_email(
+        to_email=to_email,
+        subject="Your Temporary Password — Dublin Disaster Response",
+        plain=plain,
+        html=html,
+    )
+ 
+ 
+def _build_forgot_password_html(full_name: str, temp_password: str) -> str:
+    """Clean, professional HTML email for the forgot-password flow."""
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Password Reset</title>
+</head>
+<body style="margin:0;padding:0;background:#f3f4f6;font-family:Arial,Helvetica,sans-serif;">
+ 
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f3f4f6;padding:32px 0;">
+    <tr>
+      <td align="center">
+        <table width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;">
+ 
+          <!-- Header -->
+          <tr>
+            <td style="background:#1d4ed8;padding:24px 32px;border-radius:8px 8px 0 0;">
+              <p style="margin:0;color:#93c5fd;font-size:12px;letter-spacing:2px;text-transform:uppercase;">
+                Dublin City Disaster Response
+              </p>
+              <h1 style="margin:8px 0 0;color:#ffffff;font-size:22px;font-weight:700;">
+                🔐 Password Reset Request
+              </h1>
+            </td>
+          </tr>
+ 
+          <!-- Body -->
+          <tr>
+            <td style="background:#ffffff;padding:32px;border-left:1px solid #e5e7eb;border-right:1px solid #e5e7eb;">
+              <p style="margin:0 0 16px;font-size:15px;color:#374151;">
+                Hi <strong>{full_name}</strong>,
+              </p>
+              <p style="margin:0 0 24px;font-size:14px;color:#6b7280;line-height:1.7;">
+                We received a request to reset your password. Use the temporary password
+                below to access the Reset Password page and set a new password.
+              </p>
+ 
+              <!-- Temp password box -->
+              <table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 24px;">
+                <tr>
+                  <td style="background:#eff6ff;border:2px dashed #1d4ed8;border-radius:8px;padding:20px;text-align:center;">
+                    <p style="margin:0 0 8px;font-size:11px;color:#6b7280;text-transform:uppercase;letter-spacing:2px;">
+                      Temporary Password
+                    </p>
+                    <p style="margin:0;font-size:28px;font-weight:700;color:#1d4ed8;letter-spacing:4px;font-family:Courier,monospace;">
+                      {temp_password}
+                    </p>
+                  </td>
+                </tr>
+              </table>
+ 
+              <!-- Expiry warning -->
+              <table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 24px;">
+                <tr>
+                  <td style="background:#fef3c7;border-left:4px solid #f59e0b;border-radius:4px;padding:12px 16px;">
+                    <p style="margin:0;font-size:13px;color:#92400e;">
+                      ⏱ <strong>Expires in 15 minutes</strong> &nbsp;·&nbsp;
+                      🔒 <strong>Single use only</strong> — this code becomes invalid after use.
+                    </p>
+                  </td>
+                </tr>
+              </table>
+ 
+              <!-- Steps -->
+              <p style="margin:0 0 12px;font-size:14px;font-weight:700;color:#374151;">
+                How to reset your password:
+              </p>
+              <table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 24px;">
+                <tr>
+                  <td style="background:#f9fafb;border-radius:6px;padding:16px 20px;">
+                    <p style="margin:0 0 8px;font-size:13px;color:#4b5563;">
+                      <span style="display:inline-block;width:22px;height:22px;background:#1d4ed8;color:#fff;border-radius:50%;text-align:center;line-height:22px;font-size:12px;font-weight:700;margin-right:8px;">1</span>
+                      Go to the <strong>Forgot Password</strong> page in the app
+                    </p>
+                    <p style="margin:0 0 8px;font-size:13px;color:#4b5563;">
+                      <span style="display:inline-block;width:22px;height:22px;background:#1d4ed8;color:#fff;border-radius:50%;text-align:center;line-height:22px;font-size:12px;font-weight:700;margin-right:8px;">2</span>
+                      Enter your email address
+                    </p>
+                    <p style="margin:0 0 8px;font-size:13px;color:#4b5563;">
+                      <span style="display:inline-block;width:22px;height:22px;background:#1d4ed8;color:#fff;border-radius:50%;text-align:center;line-height:22px;font-size:12px;font-weight:700;margin-right:8px;">3</span>
+                      Enter the temporary password shown above
+                    </p>
+                    <p style="margin:0;font-size:13px;color:#4b5563;">
+                      <span style="display:inline-block;width:22px;height:22px;background:#1d4ed8;color:#fff;border-radius:50%;text-align:center;line-height:22px;font-size:12px;font-weight:700;margin-right:8px;">4</span>
+                      Choose and confirm your new password
+                    </p>
+                  </td>
+                </tr>
+              </table>
+ 
+              <p style="margin:0;font-size:13px;color:#9ca3af;line-height:1.6;">
+                Didn't request this? You can safely ignore this email —
+                your account password has <strong>not</strong> been changed.
+              </p>
+            </td>
+          </tr>
+ 
+          <!-- Footer -->
+          <tr>
+            <td style="background:#f9fafb;padding:16px 32px;border:1px solid #e5e7eb;border-top:none;border-radius:0 0 8px 8px;text-align:center;">
+              <p style="margin:0;font-size:11px;color:#9ca3af;">
+                Dublin City Disaster Response System &nbsp;·&nbsp;
+                Automated message — do not reply to this email
+              </p>
+            </td>
+          </tr>
+ 
+        </table>
+      </td>
+    </tr>
+  </table>
+ 
+</body>
+</html>"""

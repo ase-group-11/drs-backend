@@ -1,15 +1,22 @@
 # File: app/api/v1/emergency_team_auth.py
 """
 Emergency Team Authentication API — UC1
-Login is now a 2-step MFA flow:
-  Step 1  POST /emergency-team/login         → verify email + password → send OTP
-  Step 2  POST /emergency-team/login/verify  → verify OTP → return JWT tokens
-Registration (unchanged):
+
+Login flow (2-step MFA):
+  Step 1  POST /emergency-team/login          → verify email + password → send OTP
+  Step 2  POST /emergency-team/login/verify   → verify OTP → return JWT tokens
+
+Registration:
   Step 1  POST /emergency-team/register        → send OTP
   Step 2  POST /emergency-team/register/verify → verify OTP, create account
+
 Account management:
-  POST /emergency-team/change-password      → update password (JWT required)
-  POST /emergency-team/deactivate/{id}      → deactivate account (admin only)
+  POST /emergency-team/change-password         → update password (JWT required)
+  POST /emergency-team/deactivate/{id}         → deactivate account (admin only)
+
+Forgot Password:
+  Step 1  POST /emergency-team/forgot-password  → verify email, get temp password
+  Step 2  POST /emergency-team/reset-password   → verify temp password, set new password
 """
 
 import logging
@@ -26,8 +33,11 @@ from app.schemas.emergency_team import (
     EmergencyTeamLoginRequest,
     EmergencyTeamLoginInitResponse,
     EmergencyTeamLoginVerifyRequest,
+    EmergencyTeamLoginResendOTPRequest,
     EmergencyTeamAuthResponse,
     ChangePasswordRequest,
+    ForgotPasswordRequest,
+    ResetPasswordRequest,
 )
 from app.schemas.auth import OTPVerifyRequest, MessageResponse
 from app.db.models.enums import EmergencyTeamRole, Department
@@ -38,7 +48,7 @@ router = APIRouter(prefix="/emergency-team", tags=["ERT Auth — UC1"])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Registration (step 1 + step 2)
+# Registration
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.post(
@@ -61,7 +71,6 @@ async def register_team_member(
         from app.utils.enum_utils import coerce_enum
         role       = coerce_enum(EmergencyTeamRole, request.role)
         department = coerce_enum(Department, request.department)
-
         result = await service.register_team_member(
             phone_number=request.phone_number,
             password=request.password,
@@ -72,20 +81,13 @@ async def register_team_member(
             employee_id=request.employee_id,
         )
         return MessageResponse(**result)
-
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
     except Exception as exc:
         logger.exception("ERT registration step 1 failed")
         if "rate limit" in str(exc).lower():
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail="Too many OTP requests. Please try again later.",
-            )
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Registration failed. Please try again.",
-        )
+            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Too many OTP requests. Please try again later.")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Registration failed. Please try again.")
 
 
 @router.post(
@@ -112,12 +114,9 @@ async def verify_registration(
         return EmergencyTeamAuthResponse(**result)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
-    except Exception as exc:
+    except Exception:
         logger.exception("ERT registration step 2 failed")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Verification failed. Please try again.",
-        )
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Verification failed. Please try again.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -147,15 +146,14 @@ async def login_team_member(
             password=request.password,
         )
         return EmergencyTeamLoginInitResponse(**result)
-
     except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc))
-    except Exception as exc:
+        detail = str(exc)
+        if detail.startswith("rate_limit:"):
+            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=detail.replace("rate_limit:", "").strip())
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=detail)
+    except Exception:
         logger.exception("ERT login step 1 failed")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Login failed. Please try again.",
-        )
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Login failed. Please try again.")
 
 
 @router.post(
@@ -184,19 +182,40 @@ async def verify_login_otp(
             otp=request.otp,
         )
         return EmergencyTeamAuthResponse(**result)
-
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc))
-    except Exception as exc:
+    except Exception:
         logger.exception("ERT login step 2 failed")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="OTP verification failed. Please try again.",
-        )
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="OTP verification failed. Please try again.")
 
 
+@router.post(
+    "/login/resend-otp",
+    response_model=MessageResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Resend login OTP — use when SMS was not received",
+)
+async def resend_login_otp(
+    request: EmergencyTeamLoginResendOTPRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    service = EmergencyTeamService(db)
+    try:
+        result = await service.resend_login_otp(login_token=request.login_token)
+        return MessageResponse(**result)
+    except ValueError as exc:
+        detail = str(exc)
+        if detail.startswith("rate_limit:"):
+            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=detail.replace("rate_limit:", "").strip())
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail)
+    except Exception:
+        logger.exception("Login OTP resend failed")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to resend OTP. Please try again.")
 
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Account management
+# ─────────────────────────────────────────────────────────────────────────────
 
 @router.post(
     "/change-password",
@@ -237,11 +256,6 @@ async def deactivate_team_member(
     db: AsyncSession = Depends(get_db),
     current_user: Dict[str, Any] = Depends(get_current_team_member),
 ):
-    """
-    Soft-deactivates a team member account (sets status=INACTIVE).
-    They can no longer log in but their data is retained for audit.
-    Requires: emergency team Bearer token (admin role enforced in service).
-    """
     service = EmergencyTeamService(db)
     try:
         result = await service.deactivate_team_member(
@@ -251,9 +265,85 @@ async def deactivate_team_member(
         return MessageResponse(**result)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc))
-    except Exception as exc:
+    except Exception:
         logger.exception("Deactivation failed")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Deactivation failed. Please try again.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Forgot Password — no auth required (user is locked out)
+# ─────────────────────────────────────────────────────────────────────────────
+ 
+@router.post(
+    "/forgot-password",
+    response_model=MessageResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Forgot password — step 1: request temporary password by email",
+)
+async def forgot_password(
+    request: ForgotPasswordRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Step 1 of the forgot password flow. No authentication required.
+ 
+    - Verifies the email exists in the database
+    - Generates a secure temporary password (valid 15 minutes, single-use)
+    - Sends the temporary password to the user's registered email via SendGrid
+    - Always returns a generic success message (no email enumeration)
+ 
+    Postman test flow:
+      1. POST /emergency-team/forgot-password  → check your email for temp password
+      2. POST /emergency-team/reset-password   → submit email + temp_password + new_password
+      3. POST /emergency-team/login            → log in with new password
+    """
+    service = EmergencyTeamService(db)
+    try:
+        result = await service.forgot_password_request(email=request.email)
+        return MessageResponse(**result)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    except Exception:
+        logger.exception("forgot_password failed")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Deactivation failed. Please try again.",
+            detail="Failed to process request. Please try again.",
+        )
+ 
+ 
+@router.post(
+    "/reset-password",
+    response_model=MessageResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Forgot password — step 2: verify temp password and set new password",
+)
+async def reset_password(
+    request: ResetPasswordRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Step 2 of the forgot password flow. No authentication required.
+ 
+    - Verifies the temporary password (single-use, expires in 15 minutes)
+    - Sets the new password in the database
+    - After success the user can log in normally with the new password
+ 
+    Errors:
+    - 400: email not found, temp password invalid, or temp password expired
+    """
+    service = EmergencyTeamService(db)
+    try:
+        result = await service.reset_password_with_temp(
+            email=request.email,
+            temp_password=request.temp_password,
+            new_password=request.new_password,
+        )
+        return MessageResponse(**result)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    except Exception:
+        logger.exception("reset_password failed")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to reset password. Please try again.",
         )
