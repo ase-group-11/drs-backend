@@ -60,7 +60,7 @@ spec:
       containers:
       - name: drs-consumer
         image: drs-backend:latest
-        imagePullPolicy: Never
+        imagePullPolicy: Always
         command: ["python", "-m", "app.consumers.notification_consumer"]
         envFrom:
         - secretRef:
