@@ -40,7 +40,7 @@ from typing import Dict, List, Optional, Any
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
-
+_traffic_inflight_locks: dict = {}
 
 class LiveMapService:
     """
@@ -53,8 +53,8 @@ class LiveMapService:
     """
     
     # Cache TTLs in seconds
-    DISASTER_CACHE_TTL = 60  # 1 minute
-    TRAFFIC_CACHE_TTL = 30   # 30 seconds
+    DISASTER_CACHE_TTL = 1800  # 30 minutes
+    TRAFFIC_CACHE_TTL = 300   # 5 minutes
     
     def __init__(
         self,
@@ -178,7 +178,12 @@ class LiveMapService:
                 - flow: List of traffic flow segments
             Returns None if provider is down and no cached data exists.
         """
-        cache_key = f"live_map:traffic:{bounds}:{style}"
+
+        def _normalize_bounds(bounds: str) -> str:
+            parts = [round(float(x), 2) for x in bounds.split(",")]
+            return ",".join(str(p) for p in parts)
+        
+        cache_key = f"live_map:traffic:{_normalize_bounds(bounds)}:{style}"
         
         try:
             # Try to get live traffic data
@@ -189,44 +194,59 @@ class LiveMapService:
                 return json.loads(cached_data)
         except Exception as e:
             logger.warning(f"cache read failed: {e}")
-        try:
-            traffic_data = await self.traffic_provider.get_traffic(bounds=bounds)
-
-            if traffic_data:
-                traffic_data["style"] = style
-
-                try:
-            
-                # Success - cache the live data
-                    await self.cache.setex(
-                        cache_key,
-                        self.TRAFFIC_CACHE_TTL,
-                        json.dumps(traffic_data)
-                    )
-                    logger.info(f"Successfully cached traffic data")
-                except Exception as cache_error:
-                    logger.warning(f"Failed to cache traffic data: {cache_error}")
-            
-            logger.info(f"Successfully fetched and cached live traffic data")
-            return traffic_data
-            
-        except Exception as e:
-            # Provider failed - try to use cached data
-            logger.warning(
-                f"Traffic provider failed ({type(e).__name__}: {e}), "
-                f"attempting to use cached data"
-            )
+        
+        if cache_key not in _traffic_inflight_locks:
+            _traffic_inflight_locks[cache_key] = asyncio.Lock()
+        
+        async with _traffic_inflight_locks[cache_key]:
             try:
                 cached_data = await self.cache.get(cache_key)
                 if cached_data is not None:
-                    logger.info(f"Using cached traffic data (stale-while-revalidate)")
+                    logger.info(f"Cache HIT (post-lock) for traffic: {cache_key}")
                     return json.loads(cached_data)
-            except Exception as cache_error:
-                logger.warning(f"Cache fallback failed: {cache_error}")
-            
-            # No cached data available
-            logger.error(f"No cached traffic data available, returning None")
-            return None
+            except Exception:
+                pass
+
+            try:
+                traffic_data = await self.traffic_provider.get_traffic(bounds=bounds)
+
+                if traffic_data:
+                    traffic_data["style"] = style
+
+                    try:
+                
+                    # Success - cache the live data
+                        await self.cache.setex(
+                            cache_key,
+                            self.TRAFFIC_CACHE_TTL,
+                            json.dumps(traffic_data)
+                        )
+                        logger.info(f"Successfully cached traffic data")
+                    except Exception as cache_error:
+                        logger.warning(f"Failed to cache traffic data: {cache_error}")
+                
+                logger.info(f"Successfully fetched and cached live traffic data")
+                return traffic_data
+                
+            except Exception as e:
+                # Provider failed - try to use cached data
+                logger.warning(
+                    f"Traffic provider failed ({type(e).__name__}: {e}), "
+                    f"attempting to use cached data"
+                )
+                try:
+                    cached_data = await self.cache.get(cache_key)
+                    if cached_data is not None:
+                        logger.info(f"Using cached traffic data (stale-while-revalidate)")
+                        return json.loads(cached_data)
+                except Exception as cache_error:
+                    logger.warning(f"Cache fallback failed: {cache_error}")
+                
+                # No cached data available
+                logger.error(f"No cached traffic data available, returning None")
+                return None
+            finally:
+                _traffic_inflight_locks.pop(cache_key, None)
     
     async def get_live_map_data(
         self,

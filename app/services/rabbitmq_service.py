@@ -21,7 +21,7 @@ Queues:
 
 import json
 import logging
-import pika
+import pika, threading
 from typing import Dict, Any, Optional
 from datetime import datetime
 
@@ -77,6 +77,7 @@ class RabbitMQService:
         self.connection: Optional[pika.BlockingConnection] = None
         self.channel: Optional[pika.channel.Channel] = None
         self.rabbitmq_url = settings.RABBITMQ_URL
+        self._lock = threading.Lock()
 
     def connect(self):
         """Establish connection to RabbitMQ and setup exchange + queues."""
@@ -124,38 +125,39 @@ class RabbitMQService:
             routing_key: e.g. 'disaster.reported', 'disaster.resolved'
             message: dict payload (will be JSON-serialized)
         """
-        try:
-            self._ensure_connection()
+        with self._lock:
+            try:
+                self._ensure_connection()
 
-            if not self.channel:
-                logger.warning(f"RabbitMQ not available. Skipping publish: {routing_key}")
+                if not self.channel:
+                    logger.warning(f"RabbitMQ not available. Skipping publish: {routing_key}")
+                    return False
+
+                # Add timestamp to message
+                message["published_at"] = datetime.utcnow().isoformat()
+                message["event_type"] = routing_key
+
+                body = json.dumps(message, default=str)
+
+                self.channel.basic_publish(
+                    exchange=EXCHANGE_NAME,
+                    routing_key=routing_key,
+                    body=body,
+                    properties=pika.BasicProperties(
+                        delivery_mode=2,  # persistent message
+                        content_type="application/json",
+                    ),
+                )
+
+                logger.info(f"Published to RabbitMQ: {routing_key} → {message.get('disaster_id', 'unknown')}")
+                return True
+
+            except Exception as e:
+                logger.error(f"Failed to publish to RabbitMQ: {e}")
+                # Reset connection so next call will reconnect
+                self.connection = None
+                self.channel = None
                 return False
-
-            # Add timestamp to message
-            message["published_at"] = datetime.utcnow().isoformat()
-            message["event_type"] = routing_key
-
-            body = json.dumps(message, default=str)
-
-            self.channel.basic_publish(
-                exchange=EXCHANGE_NAME,
-                routing_key=routing_key,
-                body=body,
-                properties=pika.BasicProperties(
-                    delivery_mode=2,  # persistent message
-                    content_type="application/json",
-                ),
-            )
-
-            logger.info(f"Published to RabbitMQ: {routing_key} → {message.get('disaster_id', 'unknown')}")
-            return True
-
-        except Exception as e:
-            logger.error(f"Failed to publish to RabbitMQ: {e}")
-            # Reset connection so next call will reconnect
-            self.connection = None
-            self.channel = None
-            return False
 
     def close(self):
         """Close RabbitMQ connection."""

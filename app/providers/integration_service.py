@@ -55,6 +55,8 @@ _circuit_breaker = pybreaker.CircuitBreaker(
     name="tomtom_circuit_breaker",
 )
 
+_tomtom_semaphore = asyncio.Semaphore(3)
+
 
 # ---------------------------------------------------------------------------
 # Mock TomTom responses for testing / degraded mode
@@ -156,7 +158,7 @@ class IntegrationService:
 
     # Cache TTLs (seconds)
     TRAFFIC_CACHE_TTL = 30   # traffic flow changes slowly — serve from cache
-    ROUTING_CACHE_TTL = 60   # routes rarely change within a minute
+    ROUTING_CACHE_TTL = 300   # routes rarely change within a minute
 
     def __init__(
         self,
@@ -174,6 +176,7 @@ class IntegrationService:
         self.timeout = timeout
         self._session: Optional[aiohttp.ClientSession] = None
         self._redis = None  # Lazily initialised on first cache call
+        self._inflight_locks: dict = {}
 
         # Auto-switch to mock if no API key or testing environment
         if not self.api_key or settings.ENVIRONMENT == "testing":
@@ -203,8 +206,8 @@ class IntegrationService:
                 settings.REDIS_URL,
                 encoding="utf-8",
                 decode_responses=True,
-                socket_connect_timeout=2,
-                socket_timeout=2,
+                socket_connect_timeout=3,
+                socket_timeout=5,
             )
             return self._redis
         except Exception as e:
@@ -402,19 +405,32 @@ class IntegrationService:
         cached = await self._cache_get(cache_key)
         if cached:
             return cached
+        
+        if cache_key not in self._inflight_locks:
+            self._inflight_locks[cache_key] = asyncio.Lock()
 
-        try:
-            result = await self._get_directions_with_breaker(
-                origin, destination, avoid or [], alternatives, max_alternatives
-            )
-            await self._cache_set(cache_key, result, self.ROUTING_CACHE_TTL)
-            return result
-        except pybreaker.CircuitBreakerError:
-            logger.warning("get_directions: circuit breaker open — returning mock routes")
-            return {"routes": parse_routing_response(MOCK_ROUTING_RESPONSE), "mode": "degraded"}
-        except Exception as e:
-            logger.error(f"get_directions failed: {e}")
-            return {"routes": parse_routing_response(MOCK_ROUTING_RESPONSE), "mode": "degraded"}
+        async with self._inflight_locks[cache_key]:
+            cached = await self._cache_get(cache_key)
+            if cached:
+                return cached
+
+            try:
+                async with _tomtom_semaphore:
+
+                    result = await self._get_directions_with_breaker(
+                        origin, destination, avoid or [], alternatives, max_alternatives
+                    )
+                    await asyncio.sleep(0.25) 
+                await self._cache_set(cache_key, result, self.ROUTING_CACHE_TTL)
+                return result
+            except pybreaker.CircuitBreakerError:
+                logger.warning("get_directions: circuit breaker open — returning mock routes")
+                return {"routes": parse_routing_response(MOCK_ROUTING_RESPONSE), "mode": "degraded"}
+            except Exception as e:
+                logger.error(f"get_directions failed: {e}")
+                return {"routes": parse_routing_response(MOCK_ROUTING_RESPONSE), "mode": "degraded"}
+            finally: 
+                self._inflight_locks.pop(cache_key, None)
 
 
     async def fetch_segment_geometry(
@@ -616,10 +632,12 @@ class IntegrationService:
 
         # Call TomTom directly, skipping cache check
         try:
-            result = await self._get_directions_with_breaker(
-                origin, destination, combined_avoid, True, 3
-            )
-            # Cache the new override result
+            async with _tomtom_semaphore:
+                result = await self._get_directions_with_breaker(
+                    origin, destination, combined_avoid, True, 3
+                )
+                await asyncio.sleep(0.25) 
+                # Cache the new override result
             await self._cache_set(cache_key, result, self.ROUTING_CACHE_TTL)
             return result
         except Exception as e:

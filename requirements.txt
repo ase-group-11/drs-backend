@@ -63,7 +63,7 @@ azure-storage-blob==12.23.0
 pika==1.3.2
 
 # Machine Learning (Phase 2 — XGBoost severity classifier)
-xgboost>=2.0.0
+# xgboost>=2.0.0
 scikit-learn>=1.4.0
 numpy>=1.26.0
 pandas>=2.2.0

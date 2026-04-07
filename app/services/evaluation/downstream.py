@@ -286,3 +286,243 @@ class HttpRerouteClient(BaseRerouteClient):
                 disaster_id, e,
             )
             # Never raise — downstream failures must not block evaluation response
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DirectCoordinationClient
+# ─────────────────────────────────────────────────────────────────────────────
+
+class DirectCoordinationClient(BaseCoordinationClient):
+    """
+    Real implementation of BaseCoordinationClient that calls the service layer
+    directly — no HTTP round-trips, no auth tokens needed.
+
+    trigger_deploy:
+        1. Maps recommended_services (["fire", "medical", "police"]) to unit types
+        2. Queries EmergencyUnitService.list_available_units(disaster_id, unit_type)
+           PostGIS orders results by nearest station automatically
+        3. Picks top N units per type based on severity
+        4. Calls DeploymentService.dispatch_units(disaster_id, unit_ids, priority)
+        5. Publishes disaster.dispatched RabbitMQ event
+
+    trigger_evacuation:
+        1. Calls EvacuationService.plan_evacuation(disaster_id, auto_approve=True)
+        2. Calls EvacuationService.activate_evacuation(plan_id)
+
+    Both methods are fire-and-forget — failures are logged but never raised.
+    """
+
+    # Map evaluation service strings to emergency_units.unit_type enum values
+    _SERVICE_TO_UNIT_TYPE: dict = {
+        "fire":    "FIRE_ENGINE",
+        "medical": "AMBULANCE",
+        "police":  "PATROL_CAR",
+        "rescue":  "RESCUE",
+        "hazmat":  "HAZMAT",
+    }
+
+    # How many units to dispatch per service type, keyed by severity
+    _UNITS_PER_TYPE: dict = {
+        "CRITICAL": 3,
+        "HIGH":     2,
+        "MEDIUM":   1,
+        "LOW":      1,
+        "INFO":     1,
+    }
+
+    # Map severity to dispatch priority_level
+    _PRIORITY_MAP: dict = {
+        "CRITICAL": "CRITICAL",
+        "HIGH":     "HIGH",
+        "MEDIUM":   "STANDARD",
+        "LOW":      "STANDARD",
+        "INFO":     "STANDARD",
+    }
+
+    def __init__(self, db) -> None:
+        """
+        Args:
+            db: AsyncSession shared with the evaluation service request.
+        """
+        self._db = db
+
+    # -------------------------------------------------------------------------
+    # trigger_deploy
+    # -------------------------------------------------------------------------
+
+    async def trigger_deploy(
+        self,
+        disaster_id: str,
+        services: List[str],
+        severity: str,
+    ) -> None:
+        """
+        Dispatch the nearest available emergency units for each recommended service.
+
+        Steps:
+          1. For each service in recommended_services:
+               a. Map service name to unit_type
+               b. list_available_units(disaster_id, unit_type) sorted nearest first
+               c. Take top N based on severity
+          2. Collect all selected unit IDs
+          3. dispatch_units(disaster_id, unit_ids, priority_level)
+          4. Publish disaster.dispatched via RabbitMQ
+        """
+        try:
+            from app.services.emergency_unit_service import EmergencyUnitService
+            from app.services.deployment_service import DeploymentService
+            from app.services.rabbitmq_service import get_rabbitmq_service
+
+            unit_service       = EmergencyUnitService(self._db)
+            deployment_service = DeploymentService(self._db)
+
+            severity_upper = (severity or "MEDIUM").upper()
+            units_per_type = self._UNITS_PER_TYPE.get(severity_upper, 1)
+            priority_level = self._PRIORITY_MAP.get(severity_upper, "STANDARD")
+
+            selected_unit_ids: List[str] = []
+
+            for service_name in (services or []):
+                unit_type = self._SERVICE_TO_UNIT_TYPE.get(service_name.lower())
+                if not unit_type:
+                    logger.warning(
+                        "DirectCoordinationClient.trigger_deploy: "
+                        "unknown service '%s' — skipping",
+                        service_name,
+                    )
+                    continue
+
+                available = await unit_service.list_available_units(
+                    disaster_id=disaster_id,
+                    unit_type=unit_type,
+                )
+
+                # Take top N nearest units (PostGIS already sorted by distance)
+                chosen = [u["id"] for u in available[:units_per_type]]
+                if not chosen:
+                    logger.warning(
+                        "DirectCoordinationClient.trigger_deploy: "
+                        "no available %s units for disaster=%s",
+                        unit_type, disaster_id,
+                    )
+                    continue
+
+                selected_unit_ids.extend(chosen)
+                logger.info(
+                    "DirectCoordinationClient.trigger_deploy: "
+                    "selected %d %s unit(s) for disaster=%s",
+                    len(chosen), unit_type, disaster_id,
+                )
+
+            if not selected_unit_ids:
+                logger.warning(
+                    "DirectCoordinationClient.trigger_deploy: "
+                    "no units available for disaster=%s services=%s — skipping dispatch",
+                    disaster_id, services,
+                )
+                return
+
+            result = await deployment_service.dispatch_units(
+                disaster_id=disaster_id,
+                unit_ids=selected_unit_ids,
+                priority_level=priority_level,
+                special_instructions="Auto-dispatched by evaluation service",
+            )
+
+            # Publish disaster.dispatched RabbitMQ event.
+            # Normally done via BackgroundTasks in the API layer — we do it
+            # directly here since we bypass the API layer entirely.
+            pending_event = result.pop("_pending_event", None)
+            if pending_event:
+                try:
+                    svc = get_rabbitmq_service()
+                    svc.publish(pending_event["topic"], pending_event["payload"])
+                except Exception as pub_exc:
+                    logger.warning(
+                        "DirectCoordinationClient: RabbitMQ publish failed "
+                        "for disaster=%s — %s",
+                        disaster_id, pub_exc,
+                    )
+
+            logger.info(
+                "DirectCoordinationClient.trigger_deploy: "
+                "dispatched %d unit(s) to disaster=%s priority=%s",
+                len(selected_unit_ids), disaster_id, priority_level,
+            )
+
+        except Exception:
+            logger.exception(
+                "DirectCoordinationClient.trigger_deploy failed for disaster=%s",
+                disaster_id,
+            )
+            # Never raise — downstream failures must not block evaluation response
+
+    # -------------------------------------------------------------------------
+    # trigger_evacuation
+    # -------------------------------------------------------------------------
+
+    async def trigger_evacuation(
+        self,
+        disaster_id: str,
+        estimated_population: int,
+        impact_radius_km: float,
+    ) -> None:
+        """
+        Plan and immediately activate an evacuation for the disaster zone.
+
+        Steps:
+          1. plan_evacuation(disaster_id, auto_approve=True)
+             auto_approve skips the manual approval step — plan comes back APPROVED
+          2. activate_evacuation(plan_id)
+             sends evacuation alerts to all users in affected zones and
+             triggers evacuation.triggered notification via RabbitMQ
+        """
+        try:
+            from app.providers.integration_service import get_integration_service
+            from app.repositories.evacuation_repository import EvacuationRepository
+            from app.services.evacuation_service import EvacuationService
+            from app.services.instant_map_updates import MappingService
+            from app.socket.manager import sio
+            from app.workers.reroute_publisher import get_publisher
+
+            # get_publisher is sync (returns module-level singleton)
+            publisher       = get_publisher()
+            evacuation_repo = EvacuationRepository(self._db)
+            integration     = get_integration_service()
+            mapping         = MappingService(sio=sio)
+
+            evacuation_service = EvacuationService(
+                db=evacuation_repo,
+                external=integration,
+                mapping=mapping,
+                publisher=publisher,
+            )
+
+            # Phase 1 — plan with auto_approve=True (skips manual approval)
+            plan_result = await evacuation_service.plan_evacuation(
+                disaster_id=disaster_id,
+                auto_approve=True,
+            )
+            plan_id = plan_result["plan_id"]
+
+            logger.info(
+                "DirectCoordinationClient.trigger_evacuation: "
+                "plan %s created and auto-approved for disaster=%s "
+                "population=%d radius=%.1fkm",
+                plan_id, disaster_id, estimated_population, impact_radius_km,
+            )
+
+            # Phase 3 — activate (sends alerts, pushes notifications)
+            await evacuation_service.activate_evacuation(plan_id=plan_id)
+
+            logger.info(
+                "DirectCoordinationClient.trigger_evacuation: "
+                "evacuation activated for disaster=%s plan=%s",
+                disaster_id, plan_id,
+            )
+
+        except Exception:
+            logger.exception(
+                "DirectCoordinationClient.trigger_evacuation failed for disaster=%s",
+                disaster_id,
+            )
+            # Never raise — downstream failures must not block evaluation response

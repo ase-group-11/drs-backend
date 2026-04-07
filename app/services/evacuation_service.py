@@ -287,7 +287,10 @@ class EvacuationService:
         blocked_roads = await self.db.get_blocked_roads(disaster_id)
 
         # 4. Traffic (via IntegrationService — circuit breaker + retry included)
-        traffic_snapshot = await self.fetch_traffic_data()
+        traffic_snapshot = await self.fetch_traffic_data(
+            lat = disaster["lat"],
+            lon = disaster["lon"]
+        )
 
         # 5. Shelters
         shelters = get_all_shelters()
@@ -608,10 +611,10 @@ class EvacuationService:
     # HELPERS
     # ═════════════════════════════════════════════════════════════════════════
 
-    async def fetch_traffic_data(self) -> Dict[str, Any]:
+    async def fetch_traffic_data(self, lat: float = 53.3498, lon: float = -6.2603) -> Dict[str, Any]:
         """Step 4: traffic via self.external (same path as UC7)."""
         try:
-            return await self.external.fetch_traffic_data(EVACUATION_REGION)
+            return await self.external.fetch_traffic_data(lat = lat, lon = lon)
         except Exception as exc:
             logger.warning(f"[UC8] Traffic fetch degraded: {exc}")
             return {"source": "fallback", "available": False, "segments": []}
@@ -631,13 +634,15 @@ class EvacuationService:
         try:
             if self.publisher.is_connected:
                 all_routes = [r for zr in best_routes_per_zone.values() for r in (zr or [])]
+                users_serializable = [
+                    {**u, "user_id" : str(u["user_id"])} if "user_id" in u else u for u in users
+                ]
                 await self.publisher.publish_reroute_triggered(
                     disaster_id=disaster_id,
-                    vehicles=users,
+                    plan_id=plan_id,
+                    vehicles=users_serializable,
                     routes=all_routes,
                     route_assignments={},
-                    trigger_source="evacuation",
-                    vehicles_affected=len(users),
                 )
                 return len(users)
         except Exception as exc:
@@ -681,7 +686,7 @@ class EvacuationService:
             all_routes = [r for zone_routes in routes.values()
                           for r in (zone_routes if isinstance(zone_routes, list) else [])]
             await self.mapping.highlight_alternative_routes(
-                routes=all_routes, region_id=EVACUATION_REGION)
+                routes=all_routes)
             logger.info(f"[UC8] Socket.IO reroute_alert emitted ({len(all_routes)} routes)")
         except Exception as exc:
             logger.warning(f"[UC8] MappingService failed (non-fatal): {exc}")
@@ -725,6 +730,8 @@ class EvacuationService:
         traffic_snapshot: Dict,
     ) -> Dict[str, Any]:
         """PAR block: concurrent route computation for all zones."""
+        # semaphore = asyncio.Semaphore(3)
+
         results = await asyncio.gather(
             *[self._compute_zone_routes(z, shelters, blocked_roads, traffic_snapshot)
               for z in impact_zones],
@@ -749,6 +756,7 @@ class EvacuationService:
         candidates = []
         for shelter in shelters:
             try:
+
                 result = await self.external.get_directions(
                     origin={"lat": zone["lat"], "lng": zone["lon"]},
                     destination={"lat": shelter["lat"], "lng": shelter["lon"]},

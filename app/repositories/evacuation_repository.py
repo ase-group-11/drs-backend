@@ -133,7 +133,7 @@ class EvacuationRepository:
         plan_id = str(uuid.uuid4())
 
         # created_at / updated_at are TIMESTAMP WITH TIME ZONE (base model columns)
-        now_aware = datetime.now(tz=timezone.utc)
+        now_aware = datetime.now()
 
         # Store road names (strings) not full segment dicts
         road_names = [s.get("road_name", "") for s in blocked_roads]
@@ -211,7 +211,7 @@ class EvacuationRepository:
         # updated_at is WITH TIME ZONE on the base model
         params: Dict[str, Any] = {
             "pid":        plan_id,
-            "updated_at": datetime.now(tz=timezone.utc),
+            "updated_at": datetime.now(),
         }
 
         for col, val in fields.items():
