@@ -85,7 +85,7 @@ jobs:
 
       - name: Health check (VM)
         run: |
-          sleep 10
+          sleep 20
           ssh -o StrictHostKeyChecking=no ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
             "curl -f http://localhost:8000/health || (docker logs drs-backend --tail 50 && exit 1)"
 
