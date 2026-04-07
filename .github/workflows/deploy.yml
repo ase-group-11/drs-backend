@@ -93,19 +93,19 @@ jobs:
       - name: Rolling deploy to K3s
         run: |
           ssh -o StrictHostKeyChecking=no ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} "
-            sudo k3s kubectl set image deployment/drs-api \
+            kubectl set image deployment/drs-api \
               drs-api=ghcr.io/${{ github.repository_owner }}/drs-backend:${{ github.sha }} \
               -n drs
 
-            sudo k3s kubectl set image deployment/drs-consumer \
+            kubectl set image deployment/drs-consumer \
               drs-consumer=ghcr.io/${{ github.repository_owner }}/drs-backend:${{ github.sha }} \
               -n drs
 
-            sudo k3s kubectl rollout status deployment/drs-api -n drs --timeout=120s
-            sudo k3s kubectl rollout status deployment/drs-consumer -n drs --timeout=60s
+            kubectl rollout status deployment/drs-api -n drs --timeout=120s
+            kubectl rollout status deployment/drs-consumer -n drs --timeout=60s
           "
 
       - name: Verify K3s pods
         run: |
           ssh -o StrictHostKeyChecking=no ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
-            "sudo k3s kubectl get pods -n drs -o wide"
+            "kubectl get pods -n drs -o wide"
