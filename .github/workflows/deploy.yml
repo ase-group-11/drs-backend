@@ -59,7 +59,7 @@ jobs:
             docker push ghcr.io/${{ github.repository_owner }}/drs-backend:latest
             docker push ghcr.io/${{ github.repository_owner }}/drs-backend:${{ github.sha }}
           "
-
+          
       - name: Run Docker containers on VM
         run: |
           ssh -o StrictHostKeyChecking=no ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} "
@@ -82,14 +82,12 @@ jobs:
               drs-backend:latest \
               python -m app.consumers.notification_consumer
           "
-
       - name: Health check (VM)
         run: |
           sleep 25
           ssh -o StrictHostKeyChecking=no \
               ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
               'docker ps --filter name=drs-backend --filter status=running --format "{{.Names}}: {{.Status}}" | grep drs-backend || (docker logs drs-backend --tail 30 && exit 1)'
-
       - name: Rolling deploy to K3s
         run: |
           ssh -o StrictHostKeyChecking=no ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} "
