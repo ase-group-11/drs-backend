@@ -86,8 +86,11 @@ jobs:
       - name: Health check (VM)
         run: |
           sleep 20
-          ssh -o StrictHostKeyChecking=no ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
-            "curl -f http://localhost:8000/health || (docker logs drs-backend --tail 50 && exit 1)"
+          ssh -o StrictHostKeyChecking=no \
+              -o ServerAliveInterval=10 \
+              -o ServerAliveCountMax=3 \
+              ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
+              'curl -sf http://127.0.0.1:8000/health'
 
       - name: Rolling deploy to K3s
         run: |
