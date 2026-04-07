@@ -88,21 +88,23 @@ jobs:
           ssh -o StrictHostKeyChecking=no \
               ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
               'docker ps --filter name=drs-backend --filter status=running --format "{{.Names}}: {{.Status}}" | grep drs-backend || (docker logs drs-backend --tail 30 && exit 1)'
+
       - name: Rolling deploy to K3s
         run: |
           ssh -o StrictHostKeyChecking=no ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} "
-            kubectl set image deployment/drs-api \
+            KUBECONFIG=/home/azureuser/.kube/config kubectl set image deployment/drs-api \
               drs-api=ghcr.io/${{ github.repository_owner }}/drs-backend:${{ github.sha }} \
               -n drs
-            kubectl set image deployment/drs-consumer \
+
+            KUBECONFIG=/home/azureuser/.kube/config kubectl set image deployment/drs-consumer \
               drs-consumer=ghcr.io/${{ github.repository_owner }}/drs-backend:${{ github.sha }} \
               -n drs
 
-            kubectl rollout status deployment/drs-api -n drs --timeout=120s
-            kubectl rollout status deployment/drs-consumer -n drs --timeout=60s
+            KUBECONFIG=/home/azureuser/.kube/config kubectl rollout status deployment/drs-api -n drs --timeout=120s
+            KUBECONFIG=/home/azureuser/.kube/config kubectl rollout status deployment/drs-consumer -n drs --timeout=60s
           "
 
       - name: Verify K3s pods
         run: |
           ssh -o StrictHostKeyChecking=no ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
-            "kubectl get pods -n drs -o wide"
+            "KUBECONFIG=/home/azureuser/.kube/config kubectl get pods -n drs -o wide"
