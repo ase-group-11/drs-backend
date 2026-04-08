@@ -29,16 +29,7 @@ jobs:
           echo "${{ secrets.ENV_FILE }}" | ssh -o StrictHostKeyChecking=no \
             ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
             "cat > ~/drs-app/backend/.env"
-            
-      - name: Update K8s secret from .env
-        run: |
-          ssh -o StrictHostKeyChecking=no ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} "
-            KUBECONFIG=/home/azureuser/.kube/config kubectl create secret generic drs-secrets \
-              --from-env-file=~/drs-app/backend/.env \
-              --namespace=drs \
-              --dry-run=client -o yaml | \
-            KUBECONFIG=/home/azureuser/.kube/config kubectl apply -f -
-          "
+
 
       - name: Copy code to VM
         run: |
@@ -79,6 +70,16 @@ jobs:
             docker rm drs-notifications-consumer 2>/dev/null || true
           "
 
+      - name: Update K8s secret from .env
+        run: |
+          ssh -o StrictHostKeyChecking=no ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} "
+            KUBECONFIG=/home/azureuser/.kube/config kubectl create secret generic drs-secrets \
+              --from-env-file=/home/azureuser/drs-app/backend/.env \
+              --namespace=drs \
+              --dry-run=client -o yaml | \
+            KUBECONFIG=/home/azureuser/.kube/config kubectl apply -f -
+          "
+          
       - name: Rolling deploy to K3s
         run: |
           ssh -o StrictHostKeyChecking=no ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} "
