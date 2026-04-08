@@ -4,7 +4,7 @@ metadata:
   name: drs-api
   namespace: drs
 spec:
-  replicas: 3
+  replicas: 1
   selector:
     matchLabels:
       app: drs-api
