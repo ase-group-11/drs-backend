@@ -1,0 +1,74 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: drs-api
+  namespace: drs
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: drs-api
+  template:
+    metadata:
+      labels:
+        app: drs-api
+    spec:
+      containers:
+      - name: drs-api
+        image: drs-backend:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8000
+        envFrom:
+        - secretRef:
+            name: drs-secrets
+        resources:
+          requests:
+            cpu: 200m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 15
+          periodSeconds: 5
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: drs-consumer
+  namespace: drs
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: drs-consumer
+  template:
+    metadata:
+      labels:
+        app: drs-consumer
+    spec:
+      containers:
+      - name: drs-consumer
+        image: drs-backend:latest
+        imagePullPolicy: Always
+        command: ["python", "-m", "app.consumers.notification_consumer"]
+        envFrom:
+        - secretRef:
+            name: drs-secrets
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 300m
+            memory: 256Mi

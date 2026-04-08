@@ -203,7 +203,7 @@ async def list_all(
     disaster_type: Optional[str] = None,
     limit: int = 50,
     db: AsyncSession = Depends(get_db),
-    current_user: Dict[str, Any] = Depends(get_current_team_member),
+    current_user: Dict[str, Any] = Depends(get_current_user),
 ):
     service = DisasterService(db)
     return await service.list_disasters(

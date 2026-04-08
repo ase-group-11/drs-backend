@@ -184,6 +184,10 @@ class EvacuationRepository:
     ) -> str:
         plan_id = str(uuid.uuid4())
 
+        # created_at / updated_at are TIMESTAMP WITH TIME ZONE (base model columns)
+        now_aware = datetime.now()
+
+        # Store road names (strings) not full segment dicts
         road_names = [s.get("road_name", "") for s in blocked_roads]
 
         await self.db.execute(
@@ -248,7 +252,7 @@ class EvacuationRepository:
         set_clauses = []
         params: Dict[str, Any] = {
             "pid":        plan_id,
-            "updated_at": datetime.utcnow(),   # naive — matches TIMESTAMP WITHOUT TIME ZONE
+            "updated_at": now_aware,   # naive — matches TIMESTAMP WITHOUT TIME ZONE
         }
 
         for col, val in fields.items():

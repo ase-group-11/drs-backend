@@ -1,8 +1,12 @@
-name: Deploy Backend to VM
+name: Deploy Backend to VM + K3s
 
 on:
   push:
     branches: ["main"]
+
+permissions:
+  contents: read
+  packages: write
 
 jobs:
   deploy:
@@ -26,6 +30,7 @@ jobs:
             ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
             "cat > ~/drs-app/backend/.env"
 
+
       - name: Copy code to VM
         run: |
           rsync -az --delete \
@@ -38,27 +43,59 @@ jobs:
             -e "ssh -o StrictHostKeyChecking=no" \
             ./ ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:~/drs-app/backend/
 
-      - name: Build and run Docker container on VM
+      - name: Build Docker image on VM
         run: |
           ssh -o StrictHostKeyChecking=no ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} "
             cd ~/drs-app/backend
-
-            docker stop drs-backend 2>/dev/null || true
-            docker rm drs-backend 2>/dev/null || true
-
-            docker build -t drs-backend:latest .
-
-            docker run -d \
-              --name drs-backend \
-              --restart unless-stopped \
-              --env-file .env \
-              --network host \
-              -p 8000:8000 \
-              drs-backend:latest
+            docker build -t drs-backend:latest \
+              -t ghcr.io/${{ github.repository_owner }}/drs-backend:latest \
+              -t ghcr.io/${{ github.repository_owner }}/drs-backend:${{ github.sha }} .
           "
 
-      - name: Health check
+      - name: Push image to GHCR
         run: |
-          sleep 10
+          ssh -o StrictHostKeyChecking=no ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} "
+            echo '${{ secrets.GITHUB_TOKEN }}' | \
+              docker login ghcr.io -u ${{ github.actor }} --password-stdin
+            docker push ghcr.io/${{ github.repository_owner }}/drs-backend:latest
+            docker push ghcr.io/${{ github.repository_owner }}/drs-backend:${{ github.sha }}
+          "
+
+      - name: Stop Docker containers on VM (K3s handles the app now)
+        run: |
+          ssh -o StrictHostKeyChecking=no ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} "
+            docker stop drs-backend 2>/dev/null || true
+            docker rm drs-backend 2>/dev/null || true
+            docker stop drs-notifications-consumer 2>/dev/null || true
+            docker rm drs-notifications-consumer 2>/dev/null || true
+          "
+
+      - name: Update K8s secret from .env
+        run: |
+          ssh -o StrictHostKeyChecking=no ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} "
+            KUBECONFIG=/home/azureuser/.kube/config kubectl create secret generic drs-secrets \
+              --from-env-file=/home/azureuser/drs-app/backend/.env \
+              --namespace=drs \
+              --dry-run=client -o yaml | \
+            KUBECONFIG=/home/azureuser/.kube/config kubectl apply -f -
+          "
+          
+      - name: Rolling deploy to K3s
+        run: |
+          ssh -o StrictHostKeyChecking=no ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} "
+            KUBECONFIG=/home/azureuser/.kube/config kubectl set image deployment/drs-api \
+              drs-api=ghcr.io/${{ github.repository_owner }}/drs-backend:${{ github.sha }} \
+              -n drs
+
+            KUBECONFIG=/home/azureuser/.kube/config kubectl set image deployment/drs-consumer \
+              drs-consumer=ghcr.io/${{ github.repository_owner }}/drs-backend:${{ github.sha }} \
+              -n drs
+
+            echo 'Deploy triggered successfully. Pods updating in background.'
+          "
+
+      - name: Verify K3s pods
+        run: |
+          sleep 30
           ssh -o StrictHostKeyChecking=no ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
-            "curl -f http://localhost:8000/health || (docker logs drs-backend --tail 50 && exit 1)"
+            "KUBECONFIG=/home/azureuser/.kube/config kubectl get pods -n drs -o wide"
