@@ -184,10 +184,8 @@ class EvacuationRepository:
     ) -> str:
         plan_id = str(uuid.uuid4())
 
-        # created_at / updated_at are TIMESTAMP WITH TIME ZONE (base model columns)
-        now_aware = datetime.now()
-
-        # Store road names (strings) not full segment dicts
+        # Drop created_at / updated_at from INSERT — server_default handles them.
+        # Passing Python datetimes here causes naive/aware conflicts with asyncpg.
         road_names = [s.get("road_name", "") for s in blocked_roads]
 
         await self.db.execute(
@@ -246,13 +244,22 @@ class EvacuationRepository:
         return self._deserialise(dict(row))
 
     async def update_plan(self, plan_id: str, **fields) -> bool:
+        """
+        Generic column updater.
+
+        Callers pass keyword args matching column names.
+        JSON-serialises dict/list values automatically.
+
+        All timestamp columns in evacuation_plans are TIMESTAMP WITHOUT TIME ZONE.
+        Always use datetime.utcnow() (naive) — never datetime.now(tz=timezone.utc).
+        """
         if not fields:
             return True
 
         set_clauses = []
         params: Dict[str, Any] = {
             "pid":        plan_id,
-            "updated_at": now_aware,   # naive — matches TIMESTAMP WITHOUT TIME ZONE
+            "updated_at": datetime.utcnow(),  # naive — matches TIMESTAMP WITHOUT TIME ZONE
         }
 
         for col, val in fields.items():
@@ -301,6 +308,40 @@ class EvacuationRepository:
         )
         row = result.mappings().first()
         return dict(row) if row else None
+    
+    async def get_on_scene_transport_units(self, disaster_id: str) -> List[Dict[str, Any]]:
+        """
+        Return ambulances and rescue units already ON_SCENE for this disaster.
+        These are physically present — prioritised over the AVAILABLE pool.
+        """
+        try:
+            result = await self.db.execute(
+                text("""
+                    SELECT
+                        eu.id,
+                        eu.unit_code,
+                        LOWER(eu.unit_type::text)  AS unit_type,
+                        eu.capacity,
+                        dep.id                     AS deployment_id,
+                        dep.deployment_status
+                    FROM deployments dep
+                    JOIN emergency_units eu ON dep.unit_id = eu.id
+                    WHERE dep.disaster_id       = :did
+                    AND dep.deployment_status IN ('ON_SCENE', 'IN_PROGRESS')
+                    AND eu.unit_type IN (
+                            CAST('AMBULANCE' AS unit_type),
+                            CAST('RESCUE'    AS unit_type)
+                        )
+                    AND dep.deleted_at IS NULL
+                    AND eu.deleted_at  IS NULL
+                """),
+                {"did": disaster_id},
+            )
+            rows = result.mappings().all()
+            return [dict(r) for r in rows]
+        except Exception as exc:
+            logger.warning(f"[UC8] get_on_scene_transport_units failed: {exc}")
+            return []
 
     # -------------------------------------------------------------------------
     # Helpers

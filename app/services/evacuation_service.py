@@ -355,21 +355,21 @@ class EvacuationService:
         Phase 1: gather data, compute routes, save plan.
 
         Steps:
-          1. getDisaster + buildImpactArea  → evaluation metadata
-          2. getPopulationProfile           → from impact area (real data)
-          3. getBlockedRoads                → self.db (UC7's road_segments table)
-          4. getTrafficConditions           → self.external (IntegrationService)
-          5. getNearestShelters             → nearest N shelters to disaster
-          6. getAvailableTransportUnits     → self.db (emergency_units table)
-          7. computeRoutes                  → self.external.get_directions() per shelter
-                                              with Redis caching (300s TTL)
-          8. computeTransportNeeds +
-             allocateResources              → uses real unit counts from DB
-          9. saveEvacuationPlan             → self.db
+        1. getDisaster + buildImpactArea  → evaluation metadata from UC5
+        2. getPopulationProfile           → derived from impact area
+        3. getBlockedRoads                → UC7's road_segments table
+        4. getTrafficConditions           → IntegrationService (TomTom / fallback)
+        5. getNearestShelters             → N closest shelters to disaster centre
+        6. getOnSceneUnits                → deployments ON_SCENE for this disaster (priority)
+            getAvailableUnits              → emergency_units AVAILABLE (fallback top-up)
+        7. computeRoutes                  → TomTom per shelter, Redis cached 300s
+        8. computeTransportNeeds +
+            allocateResources              → real unit counts, on-scene first
+        9. saveEvacuationPlan             → self.db
         """
         logger.info(f"[UC8-Phase1] Planning evacuation for disaster {disaster_id}")
 
-        # 1. Impact area from evaluation metadata
+        # 1. Disaster + impact area
         disaster = await self.db.get_disaster(disaster_id)
         if not disaster:
             raise HTTPException(status_code=404, detail="Disaster not found.")
@@ -384,29 +384,54 @@ class EvacuationService:
         # 2. Population profile
         population_stats = get_population_profile(impact_area)
 
-        # 3. Blocked roads (UC7's table)
+        # 3. Blocked roads
         blocked_roads = await self.db.get_blocked_roads(disaster_id)
 
-        # 4. Traffic (via IntegrationService — circuit breaker + retry included)
-        traffic_snapshot = await self.fetch_traffic_data(
-            lat = disaster["lat"],
-            lon = disaster["lon"]
+        # 4. Traffic
+        traffic_snapshot = await self.fetch_traffic_data()
+
+        # 5. Nearest shelters
+        shelters = get_nearest_shelters(
+            impact_area["center_lat"], impact_area["center_lon"]
         )
 
-        # 5. Nearest shelters (not all 8 — just the closest ones)
-        shelters = get_nearest_shelters(
-            impact_area["center_lat"], impact_area["center_lon"])
+        # 6. Transport units — on-scene first, available pool as top-up
+        on_scene_rows  = await self.db.get_on_scene_transport_units(disaster_id)
+        available_rows = await self.db.get_available_transport_units()
 
-        # 6. Available transport units from DB
-        available_units = await self.db.get_available_transport_units()
+        # Group on-scene rows by unit_type (individual rows → summary dicts)
+        on_scene_types: set = {str(r["unit_type"]).lower() for r in on_scene_rows}
+        on_scene_summary: Dict[str, Dict] = {}
+        for r in on_scene_rows:
+            utype = str(r["unit_type"]).lower()
+            on_scene_summary.setdefault(
+                utype,
+                {"unit_type": utype, "available_count": 0, "capacity": r["capacity"]},
+            )
+            on_scene_summary[utype]["available_count"] += 1
 
-        # 7. Route computation with Redis caching
+        # Only include available units for types not already covered on-scene
+        available_top_up = [
+            r for r in available_rows
+            if str(r["unit_type"]).lower() not in on_scene_types
+        ]
+        all_units = list(on_scene_summary.values()) + available_top_up
+
+        logger.info(
+            f"[UC8-Phase1] Units: {len(on_scene_rows)} on-scene "
+            f"({list(on_scene_summary.keys())}), "
+            f"{len(available_top_up)} available top-up"
+        )
+
+        # 7. Routes (disaster centre → each shelter, Redis cached)
         best_routes = await self._compute_routes(
-            impact_area, shelters, blocked_roads, traffic_snapshot)
+            impact_area, shelters, blocked_roads, traffic_snapshot
+        )
 
-        # 8. Transport + allocation using real unit counts
+        # 8. Transport needs + allocation
         transport_plan = compute_transport_needs(
-            population_stats, impact_area, best_routes, available_units)
+            population_stats, impact_area, best_routes, all_units
+        )
         allocations = allocate_resources(transport_plan)
 
         # 9. Persist
@@ -414,40 +439,58 @@ class EvacuationService:
         plan_id  = await self.db.save_plan(
             disaster_id=disaster_id,
             plan_ref=plan_ref,
-            impact_zones=[impact_area],           # wrap single area in list
+            impact_zones=[impact_area],       # repo expects List[Dict]
             population_stats=population_stats,
             blocked_roads=blocked_roads,
             traffic_snapshot=traffic_snapshot,
             shelters_with_capacity=shelters,
-            best_routes_per_zone=best_routes,     # rename to match repo
+            best_routes_per_zone=best_routes, # keyed by disaster_id
             transport_plan=transport_plan,
             allocations=allocations,
             auto_approved=auto_approve,
         )
 
-        logger.info(f"[UC8-Phase1] Plan {plan_ref} saved (pop={impact_area['population']}, "
-                     f"shelters={len(shelters)}, routes={len(best_routes)})")
+        ambulances_on_scene = len([
+            r for r in on_scene_rows
+            if str(r["unit_type"]).lower() == "ambulance"
+        ])
+
+        logger.info(
+            f"[UC8-Phase1] Plan {plan_ref} saved — "
+            f"pop={impact_area['population']}, "
+            f"vulnerable={population_stats['vulnerable']}, "
+            f"ambulances={transport_plan['total_ambulances']} "
+            f"({ambulances_on_scene} on-scene + "
+            f"{len(available_top_up)} available), "
+            f"shelters={len(shelters)}, routes={len(best_routes)}"
+        )
+
         return {
-            "plan_id": plan_id, "plan_ref": plan_ref, "disaster_id": disaster_id,
+            "plan_id":    plan_id,
+            "plan_ref":   plan_ref,
+            "disaster_id": disaster_id,
             "plan_status": "APPROVED" if auto_approve else "PENDING",
             "impact_area": {
-                "center": f"{impact_area['center_lat']}, {impact_area['center_lon']}",
-                "radius_km": impact_area["radius_km"],
-                "affected_roads": impact_area["affected_roads"],
+                "center":                    f"{impact_area['center_lat']}, {impact_area['center_lon']}",
+                "radius_km":                 impact_area["radius_km"],
+                "affected_roads":            impact_area["affected_roads"],
                 "affected_facilities_count": len(impact_area["affected_facilities"]),
             },
-            "shelters_count": len(shelters),
+            "shelters_count":            len(shelters),
             "total_population_affected": population_stats["total"],
-            "total_vulnerable": population_stats["vulnerable"],
+            "total_vulnerable":          population_stats["vulnerable"],
             "transport_plan_summary": {
                 "total_ambulances":       transport_plan["total_ambulances"],
+                "ambulances_on_scene":    ambulances_on_scene,
                 "ambulances_available":   transport_plan["ambulances_available"],
                 "rescue_units_needed":    transport_plan["rescue_units_needed"],
+                "rescue_units_available": transport_plan["rescue_units_available"],
             },
             "auto_approved": auto_approve,
             "message": (
                 "Plan created and auto-approved. Call /activate to start evacuation."
-                if auto_approve else "Plan created. Awaiting approval via /approve."
+                if auto_approve else
+                "Plan created. Awaiting approval via /approve."
             ),
         }
 
@@ -864,91 +907,60 @@ class EvacuationService:
         blocked_roads: List[Dict],
         traffic_snapshot: Dict,
     ) -> Dict[str, Any]:
-        """PAR block: concurrent route computation for all zones."""
-        # semaphore = asyncio.Semaphore(3)
-
-        results = await asyncio.gather(
-            *[self._compute_zone_routes(z, shelters, blocked_roads, traffic_snapshot)
-              for z in impact_zones],
-            return_exceptions=True,
-        )
-        return {
-            zone["zone_id"]: ([] if isinstance(r, Exception) else r)
-            for zone, r in zip(impact_zones, results)
-        }
-
-    async def _compute_zone_routes(
-        self,
-        zone: Dict,
-        shelters: List[Dict],
-        blocked_roads: List[Dict],
-        traffic_snapshot: Dict,
-    ) -> List[Dict]:
-        """
-        Compute routes from disaster centre to each shelter.
-
-        Redis cache key: evac:route:{disaster_id}:{shelter_id}:{blocked_roads_hash}
-        TTL: 300s (5 min).
-
-        With MAX_SHELTERS_TO_ROUTE=3, this makes at most 3 TomTom calls
-        per invocation (down from 64 in the old zone×shelter model).
-        """
         disaster_id = impact_area.get("disaster_id", "unknown")
         roads_hash  = _hash_blocked_roads(blocked_roads)
         origin_lat  = impact_area["center_lat"]
         origin_lon  = impact_area["center_lon"]
+        semaphore   = asyncio.Semaphore(3)   # max 3 concurrent TomTom calls
 
         candidates = []
         for shelter in shelters:
             cache_key = _route_cache_key(disaster_id, shelter["shelter_id"], roads_hash)
 
-            # Try Redis cache first
             cached = await self._cache_get(cache_key)
             if cached:
                 candidates.extend(cached if isinstance(cached, list) else [cached])
                 continue
 
-            # Cache miss → call TomTom
-            try:
-
-                result = await self.external.get_directions(
-                    origin={"lat": origin_lat, "lng": origin_lon},
-                    destination={"lat": shelter["lat"], "lng": shelter["lon"]},
-                    avoid=blocked_roads,
-                    alternatives=False,
-                )
-                routes = result.get("routes", [])
-                if routes:
-                    r = routes[0]
-                    route_data = {
-                        "route_id":               str(uuid.uuid4()),
-                        "origin_label":           impact_area.get("area_name", "impact_area"),
-                        "origin_lat":             origin_lat,
-                        "origin_lon":             origin_lon,
-                        "destination_shelter_id": shelter["shelter_id"],
-                        "shelter_name":           shelter["name"],
-                        "shelter_capacity":       shelter["capacity"],
-                        "distance_km":            round(r.get("length_meters", 0) / 1000, 2),
-                        "estimated_time_min":     round(r.get("travel_time_seconds", 0) / 60, 1),
-                        "travel_time_seconds":    r.get("travel_time_seconds", 0),
-                        "length_meters":          r.get("length_meters", 0),
-                        "traffic_delay_seconds":  r.get("traffic_delay_seconds", 0),
-                        "points":                 r.get("points", []),
-                        "geojson":                r.get("geojson"),
-                        "waypoints":              r.get("waypoints", []),
-                        "fallback":               False,
-                    }
-                    candidates.append(route_data)
-                    # Cache the successful route
-                    await self._cache_set(cache_key, route_data, ROUTE_CACHE_TTL)
-                else:
+            async with semaphore:
+                try:
+                    result = await self.external.get_directions(
+                        origin={"lat": origin_lat, "lng": origin_lon},
+                        destination={"lat": shelter["lat"], "lng": shelter["lon"]},
+                        avoid=blocked_roads,
+                        alternatives=False,
+                    )
+                    routes = result.get("routes", [])
+                    if routes:
+                        r = routes[0]
+                        route_data = {
+                            "route_id":               str(uuid.uuid4()),
+                            "origin_label":           impact_area.get("area_name", "impact_area"),
+                            "origin_lat":             origin_lat,
+                            "origin_lon":             origin_lon,
+                            "destination_shelter_id": shelter["shelter_id"],
+                            "shelter_name":           shelter["name"],
+                            "shelter_capacity":       shelter["capacity"],
+                            "distance_km":            round(r.get("length_meters", 0) / 1000, 2),
+                            "estimated_time_min":     round(r.get("travel_time_seconds", 0) / 60, 1),
+                            "travel_time_seconds":    r.get("travel_time_seconds", 0),
+                            "length_meters":          r.get("length_meters", 0),
+                            "traffic_delay_seconds":  r.get("traffic_delay_seconds", 0),
+                            "points":                 r.get("points", []),
+                            "geojson":                r.get("geojson"),
+                            "waypoints":              r.get("waypoints", []),
+                            "fallback":               False,
+                        }
+                        candidates.append(route_data)
+                        await self._cache_set(cache_key, route_data, ROUTE_CACHE_TTL)
+                    else:
+                        fb = straight_line_fallback(origin_lat, origin_lon, shelter)
+                        if fb:
+                            candidates.append(fb)
+                except Exception:
                     fb = straight_line_fallback(origin_lat, origin_lon, shelter)
                     if fb:
                         candidates.append(fb)
-            except Exception:
-                fb = straight_line_fallback(origin_lat, origin_lon, shelter)
-                if fb:
-                    candidates.append(fb)
 
         scored = score_and_select_routes(candidates, traffic_snapshot)
         return {disaster_id: scored}
