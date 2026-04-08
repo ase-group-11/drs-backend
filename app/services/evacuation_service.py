@@ -773,44 +773,37 @@ class EvacuationService:
             logger.warning(f"[UC8] Traffic fetch degraded: {exc}")
             return {"source": "fallback", "available": False, "segments": []}
 
-    async def broadcast_alerts(
-        self,
-        users: List[Dict],
-        disaster_id: str,
-        plan_id: str,
-        best_routes: Dict,
-        shelters: List[Dict],
-    ) -> int:
-        """Publish via self.publisher. Falls back to Twilio if MQ disconnected."""
+    async def broadcast_alerts(self, users, disaster_id, plan_id, best_routes, shelters) -> int:
         if not users:
             return 0
+
+        # RabbitMQ — mobile push (fire and forget, non-fatal)
         try:
             if self.publisher.is_connected:
                 all_routes = [
                     r for zr in best_routes.values()
                     for r in (zr if isinstance(zr, list) else [zr])
                 ]
-                await self.publisher.publish_reroute_triggered(
+                await self.publisher.publish_evacuation_triggered(
                     disaster_id=disaster_id,
+                    plan_id=plan_id,
                     vehicles=users,
                     routes=all_routes,
-                    route_assignments={},
-                    trigger_source="evacuation",
-                    vehicles_affected=len(users),
+                    total_users=len(users),
                 )
-                return len(users)
         except Exception as exc:
-            logger.warning(f"[UC8] RabbitMQ publish failed, falling back to Twilio: {exc}")
+            logger.warning(f"[UC8] RabbitMQ publish failed: {exc}")
 
+        # Twilio SMS — always sent regardless of RabbitMQ status
         from app.services.twilio_service import send_sms
         sent = 0
         for u in users:
             try:
-                msg = (
+                if await send_sms(
+                    u["phone_number"],
                     "EVACUATION ALERT: Please evacuate immediately. "
                     "Proceed to the nearest shelter. Call 999 for help."
-                )
-                if await send_sms(u["phone_number"], msg):
+                ):
                     sent += 1
             except Exception:
                 pass

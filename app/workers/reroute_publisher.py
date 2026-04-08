@@ -243,6 +243,29 @@ def _slim_routes(routes: list) -> list:
         for r in routes
     ]
 
+async def publish_evacuation_triggered(
+    self,
+    disaster_id: str,
+    plan_id: str,
+    vehicles: list,
+    routes: list,
+    total_users: int = 0,
+    location: str = "",
+) -> bool:
+    return await self._publish(
+        routing_key="evacuation.triggered",
+        payload={
+            "event":       "evacuation.triggered",
+            "disaster_id": disaster_id,
+            "plan_id":     plan_id,
+            "vehicles":    vehicles,
+            "routes":      _slim_routes(routes),
+            "total_users": total_users,
+            "location_address": location,
+            "timestamp":   _now(),
+        },
+    )
+
 
 # ---------------------------------------------------------------------------
 # Module-level singleton (wired in FastAPI lifespan)
