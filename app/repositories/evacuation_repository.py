@@ -8,6 +8,11 @@ provides async methods, returns plain dicts (not ORM objects).
 
 Methods match exactly what EvacuationService needs so the service
 stays free of raw SQL and is fully testable by mocking this class.
+
+v2 changes:
+  - get_disaster() now returns disaster_metadata (evaluation enrichment)
+  - get_available_transport_units() queries emergency_units table
+  - get_users_in_impact_area() replaces get_users_in_zones()
 """
 
 import json
@@ -37,20 +42,65 @@ class EvacuationRepository:
     # -------------------------------------------------------------------------
 
     async def get_disaster(self, disaster_id: str) -> Optional[Dict[str, Any]]:
-        """Fetch disaster with PostGIS lat/lon extraction."""
+        """
+        Fetch disaster with PostGIS lat/lon extraction AND disaster_metadata.
+
+        disaster_metadata contains the evaluation enrichment written by UC5:
+          - impact_radius_km, estimated_population
+          - affected_roads, affected_facilities
+        These drive the impact-area model (no more hardcoded zones).
+        """
         result = await self.db.execute(
             text("""
                 SELECT id, tracking_id, type, severity, disaster_status,
                        ST_Y(location::geometry) AS lat,
                        ST_X(location::geometry) AS lon,
-                       location_address, people_affected, road_blocked
+                       location_address, people_affected, road_blocked,
+                       disaster_metadata
                 FROM disasters
                 WHERE id = :did AND deleted_at IS NULL
             """),
             {"did": disaster_id},
         )
         row = result.mappings().first()
-        return dict(row) if row else None
+        if not row:
+            return None
+        d = dict(row)
+        # disaster_metadata is JSONB — may already be a dict or may be a string
+        if isinstance(d.get("disaster_metadata"), str):
+            try:
+                d["disaster_metadata"] = json.loads(d["disaster_metadata"])
+            except (json.JSONDecodeError, TypeError):
+                d["disaster_metadata"] = {}
+        return d
+
+    # -------------------------------------------------------------------------
+    # Emergency units — real DB data for transport allocation
+    # -------------------------------------------------------------------------
+
+    async def get_available_transport_units(self) -> List[Dict[str, Any]]:
+        """
+        Return available emergency units grouped by unit_type.
+
+        Used by compute_transport_needs() to allocate real units instead
+        of fictional BUS_CAPACITY / AMBULANCE_CAPACITY constants.
+        """
+        try:
+            result = await self.db.execute(
+                text("""
+                    SELECT unit_type, COUNT(*) AS available_count, capacity
+                    FROM emergency_units
+                    WHERE unit_status = 'AVAILABLE'
+                      AND deleted_at IS NULL
+                    GROUP BY unit_type, capacity
+                    ORDER BY unit_type
+                """)
+            )
+            rows = result.mappings().all()
+            return [dict(r) for r in rows]
+        except Exception as exc:
+            logger.warning(f"[UC8] get_available_transport_units failed: {exc}")
+            return []
 
     # -------------------------------------------------------------------------
     # Blocked roads — reads UC7's road_segments table
@@ -83,26 +133,28 @@ class EvacuationRepository:
     # Users
     # -------------------------------------------------------------------------
 
-    async def get_users_in_zones(self, zones: List[Dict]) -> List[Dict[str, Any]]:
+    async def get_users_in_impact_area(self, impact_area: Dict) -> List[Dict[str, Any]]:
         """
-        Return registered users. Note: users table has no lat/lon so we
-        broadcast to all active users as safe-side approach.
+        Return registered users to notify about evacuation.
+
+        Note: users table has no lat/lon so we broadcast to all active users
+        as safe-side approach. The impact_area metadata is attached to each
+        user record so the notification layer can include it.
         """
         try:
             result = await self.db.execute(
                 text("SELECT id, full_name, phone_number FROM users "
                      "WHERE deleted_at IS NULL LIMIT 500")
             )
-            rows  = result.mappings().all()
-            first = zones[0] if zones else {}
+            rows = result.mappings().all()
             return [
                 {**dict(u),
-                 "zone_id":   first.get("zone_id", ""),
-                 "zone_name": first.get("name", "affected area")}
+                 "impact_area_id": impact_area.get("disaster_id", ""),
+                 "area_name":      impact_area.get("area_name", "affected area")}
                 for u in rows
             ]
         except Exception as exc:
-            logger.warning(f"[UC8] get_users_in_zones: {exc}")
+            logger.warning(f"[UC8] get_users_in_impact_area: {exc}")
             return []
 
     # -------------------------------------------------------------------------
@@ -145,21 +197,21 @@ class EvacuationRepository:
                     impact_zones, population_stats, blocked_roads, traffic_snapshot,
                     shelters_with_capacity, best_routes_per_zone,
                     transport_plan, allocations, completion_metrics,
-                    auto_approved, created_at, updated_at
+                    auto_approved
                 ) VALUES (
                     :id, :ref, :did,
                     CASE WHEN :auto_status THEN 'APPROVED' ELSE 'PENDING' END,
                     :zones, :pop, :roads, :traffic,
                     :shelters, :routes, :transport, :alloc, :metrics,
-                    :auto_flag, :created_at, :updated_at
+                    :auto_flag
                 )
             """),
             {
                 "id":          plan_id,
                 "ref":         plan_ref,
                 "did":         disaster_id,
-                "auto_status": auto_approved,   # used in CASE WHEN
-                "auto_flag":   auto_approved,   # stored in auto_approved column
+                "auto_status": auto_approved,
+                "auto_flag":   auto_approved,
                 "zones":       json.dumps(impact_zones),
                 "pop":         json.dumps(population_stats),
                 "roads":       json.dumps(road_names),
@@ -169,8 +221,6 @@ class EvacuationRepository:
                 "transport":   json.dumps(transport_plan),
                 "alloc":       json.dumps(allocations),
                 "metrics":     json.dumps({}),
-                "created_at":  now_aware,
-                "updated_at":  now_aware,
             },
         )
         await self.db.flush()
@@ -196,22 +246,13 @@ class EvacuationRepository:
         return self._deserialise(dict(row))
 
     async def update_plan(self, plan_id: str, **fields) -> bool:
-        """
-        Generic column updater. Callers pass keyword args matching column names.
-        JSON-serialises dict/list values automatically.
-
-        updated_at is TIMESTAMP WITH TIME ZONE — use aware datetime.
-        All other timestamp fields (approved_at, activated_at, completed_at)
-        are TIMESTAMP WITHOUT TIME ZONE — callers pass naive datetimes for those.
-        """
         if not fields:
             return True
 
         set_clauses = []
-        # updated_at is WITH TIME ZONE on the base model
         params: Dict[str, Any] = {
             "pid":        plan_id,
-            "updated_at": datetime.now(),
+            "updated_at": now_aware,   # naive — matches TIMESTAMP WITHOUT TIME ZONE
         }
 
         for col, val in fields.items():
