@@ -29,6 +29,16 @@ jobs:
           echo "${{ secrets.ENV_FILE }}" | ssh -o StrictHostKeyChecking=no \
             ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
             "cat > ~/drs-app/backend/.env"
+            
+      - name: Update K8s secret from .env
+        run: |
+          ssh -o StrictHostKeyChecking=no ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} "
+            KUBECONFIG=/home/azureuser/.kube/config kubectl create secret generic drs-secrets \
+              --from-env-file=~/drs-app/backend/.env \
+              --namespace=drs \
+              --dry-run=client -o yaml | \
+            KUBECONFIG=/home/azureuser/.kube/config kubectl apply -f -
+          "
 
       - name: Copy code to VM
         run: |
