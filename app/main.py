@@ -281,6 +281,19 @@ async def root():
     }
 
 
+# @app.get(
+#     "/health",
+#     tags=["Root"],
+#     summary="Health Check",
+#     description="Check status of all major subsystems"
+# )
+# async def health_check():
+#     """
+#     Returns health status.
+#     """
+#     return {"status": "ok"}
+
+
 @app.get(
     "/health",
     tags=["Root"],
@@ -288,11 +301,62 @@ async def root():
     description="Check status of all major subsystems"
 )
 async def health_check():
-    """
-    Returns health status.
-    """
-    return {"status": "ok"}
+    import time
+    from sqlalchemy import text
 
+    health = {
+        "status": "ok",
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "services": {}
+    }
+
+    # ── PostgreSQL ────────────────────────────────────────────────
+    try:
+        from app.db.session import async_session_factory
+        async with async_session_factory() as session:
+            await session.execute(text("SELECT 1"))
+        health["services"]["postgresql"] = {"status": "ok"}
+    except Exception as e:
+        health["services"]["postgresql"] = {"status": "error", "detail": str(e)}
+        health["status"] = "degraded"
+
+    # ── Redis ─────────────────────────────────────────────────────
+    try:
+        from cache.redis_client import check_redis_health
+        redis_health = await check_redis_health()
+        health["services"]["redis"] = redis_health
+        if redis_health.get("status") != "healthy":
+            health["status"] = "degraded"
+    except Exception as e:
+        health["services"]["redis"] = {"status": "error", "detail": str(e)}
+        health["status"] = "degraded"
+
+    # ── RabbitMQ ──────────────────────────────────────────────────
+    try:
+        from app.services.rabbitmq_service import get_rabbitmq_service
+        svc = get_rabbitmq_service()
+        if svc.connection and not svc.connection.is_closed:
+            health["services"]["rabbitmq"] = {"status": "ok"}
+        else:
+            health["services"]["rabbitmq"] = {"status": "error", "detail": "connection closed"}
+            health["status"] = "degraded"
+    except Exception as e:
+        health["services"]["rabbitmq"] = {"status": "error", "detail": str(e)}
+        health["status"] = "degraded"
+
+    # ── TomTom ────────────────────────────────────────────────────
+    try:
+        from app.providers.integration_service import get_integration_service
+        integration = get_integration_service()
+        circuit_state = str(integration.circuit_breaker.current_state)
+        health["services"]["tomtom"] = {
+            "status": "ok" if circuit_state == "closed" else "degraded",
+            "circuit_breaker": circuit_state
+        }
+    except Exception as e:
+        health["services"]["tomtom"] = {"status": "error", "detail": str(e)}
+
+    return health
 
 
 socket_app = socketio.ASGIApp(sio, other_asgi_app = app)
