@@ -54,20 +54,27 @@ class ReroutePublisher:
         """Open connection, channel, and declare the topic exchange."""
         try:
             self._connection = await aio_pika.connect_robust(self.url)
-            self._channel = await self._connection.channel()
-            self._exchange = await self._channel.declare_exchange(
+            self._channel    = await self._connection.channel()
+            self._exchange   = await self._channel.declare_exchange(
                 EXCHANGE_NAME,
                 ExchangeType.TOPIC,
                 durable=True,
             )
-            # Pre-declare the notification queue and bind it so messages
-            # are held even before the NotificationConsumer connects
-            queue = await self._channel.declare_queue(
+
+            # notification.reroute — reroute/traffic events
+            reroute_queue = await self._channel.declare_queue(
                 "notification.reroute",
                 durable=True,
             )
             for routing_key in ["reroute.triggered", "route.updated", "disaster.cleared"]:
-                await queue.bind(self._exchange, routing_key=routing_key)
+                await reroute_queue.bind(self._exchange, routing_key=routing_key)
+
+            # evacuation_queue — evacuation plan activated
+            evac_queue = await self._channel.declare_queue(
+                "evacuation_queue",
+                durable=True,
+            )
+            await evac_queue.bind(self._exchange, routing_key="evacuation.triggered")
 
             logger.info(f"ReroutePublisher: connected to {self.url}, exchange={EXCHANGE_NAME}")
         except Exception as e:
@@ -181,6 +188,29 @@ class ReroutePublisher:
                 "timestamp": _now(),
             },
         )
+    
+    async def publish_evacuation_triggered(
+        self,
+        disaster_id: str,
+        plan_id: str,
+        vehicles: list,
+        routes: list,
+        total_users: int = 0,
+        location: str = "",
+    ) -> bool:
+        return await self._publish(
+            routing_key="evacuation.triggered",
+            payload={
+                "event":       "evacuation.triggered",
+                "disaster_id": disaster_id,
+                "plan_id":     plan_id,
+                "vehicles":    vehicles,
+                "routes":      _slim_routes(routes),
+                "total_users": total_users,
+                "location_address": location,
+                "timestamp":   _now(),
+            },
+        )
 
     # -------------------------------------------------------------------------
     # Internal
@@ -242,29 +272,6 @@ def _slim_routes(routes: list) -> list:
         }
         for r in routes
     ]
-
-async def publish_evacuation_triggered(
-    self,
-    disaster_id: str,
-    plan_id: str,
-    vehicles: list,
-    routes: list,
-    total_users: int = 0,
-    location: str = "",
-) -> bool:
-    return await self._publish(
-        routing_key="evacuation.triggered",
-        payload={
-            "event":       "evacuation.triggered",
-            "disaster_id": disaster_id,
-            "plan_id":     plan_id,
-            "vehicles":    vehicles,
-            "routes":      _slim_routes(routes),
-            "total_users": total_users,
-            "location_address": location,
-            "timestamp":   _now(),
-        },
-    )
 
 
 # ---------------------------------------------------------------------------
