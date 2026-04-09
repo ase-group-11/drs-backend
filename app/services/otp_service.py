@@ -220,8 +220,17 @@ async def send_otp_code(phone_number: str) -> Optional[str]:
         success = await send_sms(phone_number, message)
         
         if not success:
-            logger.error("❌ SMS sending failed")
-            # Delete OTP if SMS fails
+            logger.error("❌ SMS sending failed (Twilio unavailable or rate-limited)")
+            if settings.ENVIRONMENT != "production":
+                # In dev: keep OTP in Redis and log it so login still works
+                # without SMS (useful when Twilio free tier is exhausted).
+                # NEVER do this in production.
+                logger.warning(
+                    f"⚠️  DEV FALLBACK — OTP for {phone_number} is: {otp} "
+                    f"(SMS failed, use this code to log in)"
+                )
+                return otp
+            # In production: delete OTP and raise so the caller gets a proper error
             await delete_key(_get_otp_key(phone_number))
             logger.debug("🗑️  OTP deleted due to SMS failure")
             raise Exception("SMS service failed to send OTP")
