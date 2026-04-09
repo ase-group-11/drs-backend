@@ -39,18 +39,18 @@ spec:
             memory: 512Mi
         livenessProbe:
           httpGet:
-            path: /health
-            port: 8000
-          initialDelaySeconds: 60
-          periodSeconds: 30
-          failureThreshold: 3
-          timeoutSeconds: 10
-        readinessProbe:
-          httpGet:
-            path: /health
+            path: /health/live   # instant, no I/O
             port: 8000
           initialDelaySeconds: 30
-          periodSeconds: 10
+          periodSeconds: 20
+          failureThreshold: 3
+          timeoutSeconds: 5
+        readinessProbe:
+          httpGet:
+            path: /health/ready  # DB check, but much less frequent
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 600       # was 10 — less DB load
           failureThreshold: 3
           timeoutSeconds: 10
 ---
@@ -97,10 +97,17 @@ spec:
             command:
             - python
             - -c
-            - "import pika; conn = pika.BlockingConnection(pika.URLParameters('amqp://localhost')); conn.close()"
+            # Read the RabbitMQ URL from the env var that already exists in the pod
+            # instead of hardcoding amqp://localhost (which was always failing)
+            - |
+              import os, pika
+              url = os.environ.get('RABBITMQ_URL', os.environ.get('AMQP_URL', 'amqp://localhost'))
+              conn = pika.BlockingConnection(pika.URLParameters(url))
+              conn.close()
           initialDelaySeconds: 30
           periodSeconds: 30
           failureThreshold: 3
+          timeoutSeconds: 10
 ---
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
@@ -121,6 +128,13 @@ spec:
       target:
         type: Utilization
         averageUtilization: 70
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 120  # default 300 — faster recovery after fix
+      policies:
+      - type: Percent
+        value: 50
+        periodSeconds: 60
 ---
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
@@ -141,3 +155,6 @@ spec:
       target:
         type: Utilization
         averageUtilization: 70
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 120

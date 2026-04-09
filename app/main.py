@@ -294,13 +294,23 @@ async def root():
 #     return {"status": "ok"}
 
 
+@app.get("/health/live", tags=["Health"], include_in_schema=False)
+async def liveness():
+    """Kubernetes liveness probe — just proves the process is alive."""
+    return {"status": "ok"}
+
 @app.get(
-    "/health",
-    tags=["Root"],
-    summary="Health Check",
+    "/health/ready",
+    tags=["Health"],
+    summary="Readiness Check",
     description="Check status of all major subsystems"
 )
-async def health_check():
+async def readiness_check():
+    """
+    Kubernetes readiness probe — proves the app can serve traffic.
+    Uses the existing connection pool (no new connections opened).
+    Returns 503 if any critical dependency is unhealthy.
+    """
     import time
     from sqlalchemy import text
 
@@ -310,12 +320,11 @@ async def health_check():
         "services": {}
     }
 
-    # ── PostgreSQL ────────────────────────────────────────────────
-    # In health_check(), change PostgreSQL check to use existing connection pool:
+    # ── PostgreSQL — reuse pool, don't open a new session ─────────
     try:
-        from app.db.session import async_session_factory
-        async with async_session_factory() as session:
-            await asyncio.wait_for(session.execute(text("SELECT 1")), timeout=3.0)
+        from app.db.session import async_engine
+        async with async_engine.connect() as conn:
+            await asyncio.wait_for(conn.execute(text("SELECT 1")), timeout=3.0)
         health["services"]["postgresql"] = {"status": "ok"}
     except asyncio.TimeoutError:
         health["services"]["postgresql"] = {"status": "error", "detail": "timeout"}
@@ -335,18 +344,16 @@ async def health_check():
         health["services"]["redis"] = {"status": "error", "detail": str(e)}
         health["status"] = "degraded"
 
-    # ── RabbitMQ ──────────────────────────────────────────────────
+    # ── RabbitMQ — connection state check only, no new connection ─
     try:
-        from app.services.rabbitmq_service import get_rabbitmq_service
-        svc = get_rabbitmq_service()
-        if svc.connection and not svc.connection.is_closed:
+        publisher = get_publisher()
+        if publisher.is_connected:
             health["services"]["rabbitmq"] = {"status": "ok"}
         else:
-            health["services"]["rabbitmq"] = {"status": "error", "detail": "connection closed"}
-            health["status"] = "degraded"
+            # Degraded but not critical — app still functions without it
+            health["services"]["rabbitmq"] = {"status": "degraded", "detail": "not connected"}
     except Exception as e:
         health["services"]["rabbitmq"] = {"status": "error", "detail": str(e)}
-        health["status"] = "degraded"
 
     # ── TomTom ────────────────────────────────────────────────────
     try:
@@ -360,7 +367,11 @@ async def health_check():
     except Exception as e:
         health["services"]["tomtom"] = {"status": "error", "detail": str(e)}
 
-    return health
+    # Only PostgreSQL is truly critical for readiness
+    if health["services"].get("postgresql", {}).get("status") != "ok":
+        from fastapi import Response
+        return JSONResponse(status_code=503, content=health)
 
+    return health
 
 socket_app = socketio.ASGIApp(sio, other_asgi_app = app)
