@@ -311,11 +311,15 @@ async def health_check():
     }
 
     # ── PostgreSQL ────────────────────────────────────────────────
+    # In health_check(), change PostgreSQL check to use existing connection pool:
     try:
         from app.db.session import async_session_factory
         async with async_session_factory() as session:
-            await session.execute(text("SELECT 1"))
+            await asyncio.wait_for(session.execute(text("SELECT 1")), timeout=3.0)
         health["services"]["postgresql"] = {"status": "ok"}
+    except asyncio.TimeoutError:
+        health["services"]["postgresql"] = {"status": "error", "detail": "timeout"}
+        health["status"] = "degraded"
     except Exception as e:
         health["services"]["postgresql"] = {"status": "error", "detail": str(e)}
         health["status"] = "degraded"
