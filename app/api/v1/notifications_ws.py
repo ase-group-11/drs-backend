@@ -188,14 +188,6 @@ async def broadcast_to_users(
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def redis_listener() -> None:
-    """
-    Background task: subscribes to Redis app_alerts channel and
-    routes each alert to the correct connected clients.
-
-    Uses a health_check_interval to keep the connection alive during
-    idle periods — prevents the remote Redis server from dropping the
-    TCP connection after 60s of inactivity (which causes missed messages).
-    """
     logger.info(f"Redis listener starting — channel: {REDIS_CHANNEL}")
     while True:
         client = None
@@ -204,40 +196,27 @@ async def redis_listener() -> None:
                 REDIS_URL,
                 decode_responses=True,
                 socket_keepalive=True,
-                socket_connect_timeout=5,
-                socket_timeout=10,
-                health_check_interval=30,  # ping Redis every 30s to keep alive
+                socket_connect_timeout=10,
+                health_check_interval=30,
             )
             pubsub = client.pubsub()
             await pubsub.subscribe(REDIS_CHANNEL)
             logger.info(f"Subscribed to Redis channel: {REDIS_CHANNEL}")
 
-            while True:
-                # Use get_message with timeout instead of async for
-                # so we can send keepalive pings and detect disconnects
-                try:
-                    raw = await asyncio.wait_for(
-                        pubsub.get_message(ignore_subscribe_messages=True),
-                        timeout=5.0,
-                    )
-                except asyncio.TimeoutError:
-                    # No message in 5s — send a keepalive ping
-                    try:
-                        await client.ping()
-                    except Exception:
-                        logger.warning("Redis keepalive ping failed — reconnecting")
-                        break  # exit inner loop → reconnect
-                    continue
-
+            # listen() blocks until a message
+            # arrives, yielding control to the event loop between messages.
+            # No busy loop, no manual timeout, no ping needed.
+            async for raw in pubsub.listen():
                 if raw is None:
                     continue
+                if raw.get("type") != "message":
+                    continue  # skip subscribe/unsubscribe confirmations
 
                 try:
                     payload = json.loads(raw["data"])
                 except (json.JSONDecodeError, TypeError, KeyError):
                     continue
 
-                # Strip targeting fields before forwarding to clients
                 target_list  = payload.pop("target_user_ids", None)
                 target_roles = payload.pop("target_roles", None)
                 target_ids   = set(target_list) if target_list is not None else None
@@ -249,9 +228,6 @@ async def redis_listener() -> None:
 
         except asyncio.CancelledError:
             logger.info("Redis listener cancelled — shutting down")
-            # Clean up before returning so the task exits cleanly.
-            # Use a hard timeout: if the remote Redis server is unreachable
-            # aclose() can hang indefinitely, which blocks the whole reload.
             if client:
                 try:
                     await asyncio.wait_for(client.aclose(), timeout=2.0)
@@ -262,13 +238,11 @@ async def redis_listener() -> None:
             logger.error(f"Redis listener error: {exc} — retrying in 3s")
             await asyncio.sleep(3)
         finally:
-            # Clean up on any non-cancellation exit (reconnect loop, errors).
             if client:
                 try:
                     await asyncio.wait_for(client.aclose(), timeout=2.0)
                 except Exception:
                     pass
-
 # ── WebSocket endpoint ────────────────────────────────────────
 
 @router.websocket("/ws/notifications")
