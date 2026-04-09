@@ -5,6 +5,7 @@ metadata:
   namespace: drs
 spec:
   replicas: 3
+  revisionHistoryLimit: 2
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -56,6 +57,7 @@ metadata:
   namespace: drs
 spec:
   replicas: 2
+  revisionHistoryLimit: 2
   strategy:
     type: RollingUpdate
     rollingUpdate:
