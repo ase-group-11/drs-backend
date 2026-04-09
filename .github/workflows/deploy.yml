@@ -95,6 +95,14 @@ jobs:
               drs-consumer=ghcr.io/${{ github.repository_owner }}/drs-backend:${{ github.sha }} \
               -n drs
 
+            KUBECONFIG=/home/azureuser/.kube/config kubectl set image deployment/drs-celery-worker \
+              drs-celery-worker=ghcr.io/${{ github.repository_owner }}/drs-backend:${{ github.sha }} \
+              -n drs
+
+            KUBECONFIG=/home/azureuser/.kube/config kubectl set image deployment/drs-celery-beat \
+              drs-celery-beat=ghcr.io/${{ github.repository_owner }}/drs-backend:${{ github.sha }} \
+              -n drs
+
             echo 'Deploy triggered successfully. Pods updating in background'
           "
 
