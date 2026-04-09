@@ -4,7 +4,12 @@ metadata:
   name: drs-api
   namespace: drs
 spec:
-  replicas: 1
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   selector:
     matchLabels:
       app: drs-api
@@ -13,9 +18,11 @@ spec:
       labels:
         app: drs-api
     spec:
+      imagePullSecrets:
+        - name: ghcr-secret
       containers:
       - name: drs-api
-        image: drs-backend:latest
+        image: ghcr.io/ase-group-11/drs-backend:latest
         imagePullPolicy: Always
         ports:
         - containerPort: 8000
@@ -48,7 +55,12 @@ metadata:
   name: drs-consumer
   namespace: drs
 spec:
-  replicas: 1
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   selector:
     matchLabels:
       app: drs-consumer
@@ -57,9 +69,11 @@ spec:
       labels:
         app: drs-consumer
     spec:
+      imagePullSecrets:
+        - name: ghcr-secret
       containers:
       - name: drs-consumer
-        image: drs-backend:latest
+        image: ghcr.io/ase-group-11/drs-backend:latest
         imagePullPolicy: Always
         command: ["python", "-m", "app.consumers.notification_consumer"]
         envFrom:
@@ -72,3 +86,44 @@ spec:
           limits:
             cpu: 300m
             memory: 256Mi
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: drs-api
+  namespace: drs
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: drs-api
+  minReplicas: 3
+  maxReplicas: 6
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: drs-consumer
+  namespace: drs
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: drs-consumer
+  minReplicas: 2
+  maxReplicas: 4
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
