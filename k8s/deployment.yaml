@@ -109,6 +109,92 @@ spec:
           failureThreshold: 3
           timeoutSeconds: 10
 ---
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: drs-celery-worker
+  namespace: drs
+spec:
+  replicas: 2
+  revisionHistoryLimit: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: drs-celery-worker
+  template:
+    metadata:
+      labels:
+        app: drs-celery-worker
+    spec:
+      imagePullSecrets:
+        - name: ghcr-secret
+      containers:
+      - name: drs-celery-worker
+        image: ghcr.io/ase-group-11/drs-backend:latest
+        imagePullPolicy: Always
+        command: ["celery", "-A", "app.workers.celery_app", "worker", "--loglevel=info", "--concurrency=2"]
+        envFrom:
+        - secretRef:
+            name: drs-secrets
+        resources:
+          requests:
+            cpu: 200m
+            memory: 256Mi
+          limits:
+            cpu: 600m
+            memory: 512Mi
+        livenessProbe:
+          exec:
+            command: ["celery", "-A", "app.workers.celery_app", "inspect", "ping", "--timeout", "5"]
+          initialDelaySeconds: 30
+          periodSeconds: 60
+          failureThreshold: 3
+          timeoutSeconds: 10
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: drs-celery-beat
+  namespace: drs
+spec:
+  # MUST be 1 — running multiple Beat instances causes duplicate task scheduling
+  replicas: 1
+  revisionHistoryLimit: 2
+  strategy:
+    # Recreate: ensures the old Beat pod is fully stopped before the new one starts.
+    # RollingUpdate would briefly run two Beat instances and fire duplicate tasks.
+    type: Recreate
+  selector:
+    matchLabels:
+      app: drs-celery-beat
+  template:
+    metadata:
+      labels:
+        app: drs-celery-beat
+    spec:
+      imagePullSecrets:
+        - name: ghcr-secret
+      containers:
+      - name: drs-celery-beat
+        image: ghcr.io/ase-group-11/drs-backend:latest
+        imagePullPolicy: Always
+        command: ["celery", "-A", "app.workers.celery_app", "beat", "--loglevel=info"]
+        envFrom:
+        - secretRef:
+            name: drs-secrets
+        resources:
+          requests:
+            cpu: 50m
+            memory: 128Mi
+          limits:
+            cpu: 200m
+            memory: 256Mi
+---
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:

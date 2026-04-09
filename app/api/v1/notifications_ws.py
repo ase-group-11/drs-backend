@@ -197,6 +197,12 @@ async def redis_listener() -> None:
                 decode_responses=True,
                 socket_keepalive=True,
                 socket_connect_timeout=10,
+                # socket_timeout: detect silently-dead TCP connections.
+                # health_check_interval does NOT fire during pubsub.listen()
+                # (it only fires via execute_command). Without a socket timeout,
+                # Kubernetes killing idle connections causes listen() to block
+                # forever with no reconnect and no notifications delivered.
+                socket_timeout=30,
                 health_check_interval=30,
             )
             pubsub = client.pubsub()
