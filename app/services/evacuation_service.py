@@ -21,6 +21,7 @@ v2 changes:
   - Redis caching at the evacuation layer (300s TTL) prevents redundant
     TomTom calls across plan/blockage/escalation workflows.
   - Shelters remain hardcoded (stable infrastructure data).
+  - On-scene ambulances are prioritised over available pool units.
 """
 
 import asyncio
@@ -29,7 +30,7 @@ import json
 import logging
 import math
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException, status
@@ -43,20 +44,16 @@ logger = logging.getLogger(__name__)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-# Transport capacity by unit_type — how many evacuees each unit type can carry.
-# Crew capacity (emergency_units.capacity) is for team members, not evacuees.
-# These are standard emergency planning figures.
 TRANSPORT_CAPACITY: Dict[str, int] = {
-    "ambulance":       8,   # wheelchair van / accessible minibus
-    "fire_engine":     0,   # fire trucks don't transport evacuees
-    "patrol_car":      0,   # not for evacuation transport
-    "rapid_response":  0,   # fast response, not transport
-    "hazmat":          0,   # specialised, not for evacuation
-    "rescue":          4,   # can carry limited rescued persons
-    "command":         0,   # mobile command post
+    "ambulance":      8,   # wheelchair van / accessible minibus
+    "fire_engine":    0,
+    "patrol_car":     0,
+    "rapid_response": 0,
+    "hazmat":         0,
+    "rescue":         4,
+    "command":        0,
 }
 
-# Default vulnerable ratio when not derivable from facility data
 DEFAULT_VULNERABLE_RATIO = 0.15
 
 CONGESTION_WEIGHTS = {
@@ -64,25 +61,19 @@ CONGESTION_WEIGHTS = {
 }
 
 EVACUATION_REGION = "region-dublin-city"
-
-# Route cache TTL (seconds) — evacuation routes are stable for longer
-# than live traffic; 5 min avoids TomTom spam on blockage/escalation flows.
-ROUTE_CACHE_TTL = 300
-
-# Max shelters to route to from the disaster centre.
-# Nearest N shelters are selected — avoids routing to distant ones.
+ROUTE_CACHE_TTL   = 300   # seconds
 MAX_SHELTERS_TO_ROUTE = 3
 
 # ── Dublin evacuation shelters (stable infrastructure) ────────────────────────
 DUBLIN_SHELTERS: List[Dict[str, Any]] = [
-    {"shelter_id": "shelter_croke_park",    "name": "Croke Park",              "lat": 53.3608, "lon": -6.2510, "capacity": 15000},
-    {"shelter_id": "shelter_aviva",         "name": "Aviva Stadium",           "lat": 53.3338, "lon": -6.2286, "capacity": 10000},
-    {"shelter_id": "shelter_rds",           "name": "RDS Arena",               "lat": 53.3213, "lon": -6.2265, "capacity": 8000},
-    {"shelter_id": "shelter_phoenix_park",  "name": "Phoenix Park Visitor Ctr", "lat": 53.3560, "lon": -6.3260, "capacity": 5000},
-    {"shelter_id": "shelter_tallaght",      "name": "Tallaght Stadium",        "lat": 53.2876, "lon": -6.3740, "capacity": 7000},
-    {"shelter_id": "shelter_malahide",      "name": "Malahide Castle Grounds", "lat": 53.4508, "lon": -6.1541, "capacity": 4000},
-    {"shelter_id": "shelter_blanchardstown","name": "Blanchardstown Centre",    "lat": 53.3900, "lon": -6.3800, "capacity": 6000},
-    {"shelter_id": "shelter_leopardstown",  "name": "Leopardstown Racecourse", "lat": 53.2800, "lon": -6.1800, "capacity": 5000},
+    {"shelter_id": "shelter_croke_park",     "name": "Croke Park",               "lat": 53.3608, "lon": -6.2510, "capacity": 15000},
+    {"shelter_id": "shelter_aviva",          "name": "Aviva Stadium",            "lat": 53.3338, "lon": -6.2286, "capacity": 10000},
+    {"shelter_id": "shelter_rds",            "name": "RDS Arena",                "lat": 53.3213, "lon": -6.2265, "capacity": 8000},
+    {"shelter_id": "shelter_phoenix_park",   "name": "Phoenix Park Visitor Ctr", "lat": 53.3560, "lon": -6.3260, "capacity": 5000},
+    {"shelter_id": "shelter_tallaght",       "name": "Tallaght Stadium",         "lat": 53.2876, "lon": -6.3740, "capacity": 7000},
+    {"shelter_id": "shelter_malahide",       "name": "Malahide Castle Grounds",  "lat": 53.4508, "lon": -6.1541, "capacity": 4000},
+    {"shelter_id": "shelter_blanchardstown", "name": "Blanchardstown Centre",    "lat": 53.3900, "lon": -6.3800, "capacity": 6000},
+    {"shelter_id": "shelter_leopardstown",   "name": "Leopardstown Racecourse",  "lat": 53.2800, "lon": -6.1800, "capacity": 5000},
 ]
 
 
@@ -98,7 +89,7 @@ def get_nearest_shelters(
     """Return the N nearest shelters to the disaster centre, sorted by distance."""
     shelters_with_dist = []
     for s in DUBLIN_SHELTERS:
-        dist = math.sqrt((s["lat"] - lat) ** 2 + (s["lon"] - lon) ** 2) * 111  # km approx
+        dist = math.sqrt((s["lat"] - lat) ** 2 + (s["lon"] - lon) ** 2) * 111
         shelters_with_dist.append({**s, "_dist_km": dist})
     shelters_with_dist.sort(key=lambda s: s["_dist_km"])
     return shelters_with_dist[:max_count]
@@ -107,9 +98,7 @@ def get_nearest_shelters(
 def build_impact_area(disaster: Dict) -> Dict[str, Any]:
     """
     Build an impact-area dict from the disaster record + evaluation metadata.
-
     Replaces the old get_zones_near_disaster() which returned hardcoded DUBLIN_ZONES.
-    Population, affected roads, facilities all come from UC5's evaluation.
     """
     meta = (disaster.get("disaster_metadata") or {}).get("evaluation", {})
 
@@ -117,20 +106,17 @@ def build_impact_area(disaster: Dict) -> Dict[str, Any]:
     if estimated_population <= 0:
         estimated_population = disaster.get("people_affected", 0) or 100
 
-    # Derive vulnerable count from facility types or use default ratio
     affected_facilities = meta.get("affected_facilities") or []
-    vulnerable_ratio = DEFAULT_VULNERABLE_RATIO
-    # Boost ratio if schools or hospitals are in the impact area
-    facility_text = " ".join(
+    vulnerable_ratio    = DEFAULT_VULNERABLE_RATIO
+    facility_text       = " ".join(
         f.get("name", f) if isinstance(f, dict) else str(f)
         for f in affected_facilities
     ).lower()
     if any(kw in facility_text for kw in ("school", "hospital", "nursing", "creche", "montessori")):
-        vulnerable_ratio = 0.25  # higher ratio near schools/care facilities
+        vulnerable_ratio = 0.25
 
     vulnerable_count = max(1, int(estimated_population * vulnerable_ratio))
 
-    # affected_roads may be list of strings or list of dicts
     affected_roads = meta.get("affected_roads") or []
     road_names = []
     for r in affected_roads:
@@ -154,7 +140,7 @@ def build_impact_area(disaster: Dict) -> Dict[str, Any]:
 
 
 def get_population_profile(impact_area: Dict) -> Dict[str, Any]:
-    """Build population stats from the impact area (replaces zone-sum approach)."""
+    """Build population stats from the impact area."""
     total = impact_area["population"]
     vuln  = impact_area["vulnerable_count"]
     return {
@@ -173,39 +159,33 @@ def compute_transport_needs(
 ) -> Dict[str, Any]:
     """
     Compute transport needs using real available units from the DB.
-
-    available_units comes from EvacuationRepository.get_available_transport_units()
-    and contains rows like {"unit_type": "ambulance", "available_count": 5, "capacity": 4}.
+    available_units rows: {"unit_type": "ambulance", "available_count": 5, "capacity": 4}
     """
     total = population_stats["total"]
     vuln  = population_stats["vulnerable"]
 
-    # Build a capacity map from DB units
-    unit_summary = {}
+    unit_summary: Dict[str, Dict] = {}
     for row in available_units:
-        utype = str(row["unit_type"]).lower()
+        utype         = str(row["unit_type"]).lower()
         transport_cap = TRANSPORT_CAPACITY.get(utype, 0)
         if transport_cap > 0:
             if utype not in unit_summary:
                 unit_summary[utype] = {"available": 0, "transport_capacity": transport_cap}
             unit_summary[utype]["available"] += row["available_count"]
 
-    # Calculate how many of each type we need
     ambulances_available = unit_summary.get("ambulance", {}).get("available", 0)
-    ambulance_cap = unit_summary.get("ambulance", {}).get("transport_capacity", 8)
-    rescue_available = unit_summary.get("rescue", {}).get("available", 0)
-    rescue_cap = unit_summary.get("rescue", {}).get("transport_capacity", 4)
+    ambulance_cap        = unit_summary.get("ambulance", {}).get("transport_capacity", 8)
+    rescue_available     = unit_summary.get("rescue", {}).get("available", 0)
+    rescue_cap           = unit_summary.get("rescue", {}).get("transport_capacity", 4)
 
     ambulances_needed = max(1, math.ceil(vuln / ambulance_cap)) if ambulance_cap > 0 else 0
-    rescue_needed = 0
+    rescue_needed     = 0
 
-    # If not enough ambulances, supplement with rescue units
     if ambulances_needed > ambulances_available and rescue_available > 0:
-        shortfall = (ambulances_needed - ambulances_available) * ambulance_cap
+        shortfall     = (ambulances_needed - ambulances_available) * ambulance_cap
         rescue_needed = min(rescue_available, math.ceil(shortfall / rescue_cap)) if rescue_cap > 0 else 0
-        ambulances_needed = ambulances_available  # cap to what's available
+        ambulances_needed = ambulances_available
 
-    # Build route schedules
     schedules = []
     for route_key, routes in best_routes.items():
         if not routes:
@@ -221,23 +201,23 @@ def compute_transport_needs(
         })
 
     return {
-        "total_ambulances":      ambulances_needed,
-        "ambulances_available":  ambulances_available,
-        "rescue_units_needed":   rescue_needed,
+        "total_ambulances":       ambulances_needed,
+        "ambulances_available":   ambulances_available,
+        "rescue_units_needed":    rescue_needed,
         "rescue_units_available": rescue_available,
-        "total_people":          total,
-        "total_vulnerable":      vuln,
-        "unit_summary":          unit_summary,
-        "schedules":             schedules,
+        "total_people":           total,
+        "total_vulnerable":       vuln,
+        "unit_summary":           unit_summary,
+        "schedules":              schedules,
     }
 
 
 def allocate_resources(transport_plan: Dict) -> Dict[str, Any]:
     return {
-        "ambulances_allocated":     transport_plan["total_ambulances"],
-        "rescue_units_allocated":   transport_plan["rescue_units_needed"],
-        "allocation_confirmed":     True,
-        "allocated_at":             datetime.utcnow().isoformat(),
+        "ambulances_allocated":   transport_plan["total_ambulances"],
+        "rescue_units_allocated": transport_plan["rescue_units_needed"],
+        "allocation_confirmed":   True,
+        "allocated_at":           datetime.utcnow().isoformat(),
     }
 
 
@@ -276,8 +256,7 @@ def straight_line_fallback(
 ) -> Optional[Dict]:
     """Minimal route estimate when TomTom is unavailable."""
     try:
-        dist = math.sqrt((origin_lat - shelter["lat"]) ** 2
-                         + (origin_lon - shelter["lon"]) ** 2) * 111
+        dist  = math.sqrt((origin_lat - shelter["lat"]) ** 2 + (origin_lon - shelter["lon"]) ** 2) * 111
         t_min = round(dist / 30 * 60, 1)
         return {
             "route_id":               str(uuid.uuid4()),
@@ -307,15 +286,11 @@ def straight_line_fallback(
         return None
 
 
-def _route_cache_key(
-    disaster_id: str, shelter_id: str, blocked_roads_hash: str
-) -> str:
-    """Stable Redis key for an evacuation route."""
+def _route_cache_key(disaster_id: str, shelter_id: str, blocked_roads_hash: str) -> str:
     return f"evac:route:{disaster_id}:{shelter_id}:{blocked_roads_hash}"
 
 
 def _hash_blocked_roads(blocked_roads: List[Dict]) -> str:
-    """Short hash of blocked road names for cache keying."""
     names = sorted(s.get("road_name", "") for s in blocked_roads)
     return hashlib.md5("|".join(names).encode()).hexdigest()[:8]
 
@@ -325,12 +300,7 @@ def _hash_blocked_roads(blocked_roads: List[Dict]) -> str:
 # ═════════════════════════════════════════════════════════════════════════════
 
 class EvacuationService:
-    """
-    Orchestrator for the full evacuation pipeline.
-
-    All dependencies injected via constructor — fully testable with mocks.
-    Mirrors RerouteService.__init__ exactly.
-    """
+    """Orchestrator for the full evacuation pipeline."""
 
     def __init__(
         self,
@@ -355,21 +325,21 @@ class EvacuationService:
         Phase 1: gather data, compute routes, save plan.
 
         Steps:
-          1. getDisaster + buildImpactArea  → evaluation metadata
-          2. getPopulationProfile           → from impact area (real data)
-          3. getBlockedRoads                → self.db (UC7's road_segments table)
-          4. getTrafficConditions           → self.external (IntegrationService)
-          5. getNearestShelters             → nearest N shelters to disaster
-          6. getAvailableTransportUnits     → self.db (emergency_units table)
-          7. computeRoutes                  → self.external.get_directions() per shelter
-                                              with Redis caching (300s TTL)
+          1. getDisaster + buildImpactArea  → evaluation metadata from UC5
+          2. getPopulationProfile           → derived from impact area
+          3. getBlockedRoads                → UC7's road_segments table
+          4. getTrafficConditions           → IntegrationService
+          5. getNearestShelters             → 3 closest shelters to disaster centre
+          6. getOnSceneUnits                → deployments ON_SCENE (priority)
+             getAvailableUnits              → AVAILABLE pool (top-up)
+          7. computeRoutes                  → TomTom per shelter, Redis cached 300s
           8. computeTransportNeeds +
-             allocateResources              → uses real unit counts from DB
+             allocateResources              → real unit counts, on-scene first
           9. saveEvacuationPlan             → self.db
         """
         logger.info(f"[UC8-Phase1] Planning evacuation for disaster {disaster_id}")
 
-        # 1. Impact area from evaluation metadata
+        # 1. Disaster + impact area
         disaster = await self.db.get_disaster(disaster_id)
         if not disaster:
             raise HTTPException(status_code=404, detail="Disaster not found.")
@@ -384,29 +354,52 @@ class EvacuationService:
         # 2. Population profile
         population_stats = get_population_profile(impact_area)
 
-        # 3. Blocked roads (UC7's table)
+        # 3. Blocked roads
         blocked_roads = await self.db.get_blocked_roads(disaster_id)
 
-        # 4. Traffic (via IntegrationService — circuit breaker + retry included)
-        traffic_snapshot = await self.fetch_traffic_data(
-            lat = disaster["lat"],
-            lon = disaster["lon"]
+        # 4. Traffic
+        traffic_snapshot = await self.fetch_traffic_data()
+
+        # 5. Nearest shelters
+        shelters = get_nearest_shelters(
+            impact_area["center_lat"], impact_area["center_lon"]
         )
 
-        # 5. Nearest shelters (not all 8 — just the closest ones)
-        shelters = get_nearest_shelters(
-            impact_area["center_lat"], impact_area["center_lon"])
+        # 6. Transport units — on-scene first, available pool as top-up
+        on_scene_rows  = await self.db.get_on_scene_transport_units(disaster_id)
+        available_rows = await self.db.get_available_transport_units()
 
-        # 6. Available transport units from DB
-        available_units = await self.db.get_available_transport_units()
+        on_scene_types: set = {str(r["unit_type"]).lower() for r in on_scene_rows}
+        on_scene_summary: Dict[str, Dict] = {}
+        for r in on_scene_rows:
+            utype = str(r["unit_type"]).lower()
+            on_scene_summary.setdefault(
+                utype,
+                {"unit_type": utype, "available_count": 0, "capacity": r["capacity"]},
+            )
+            on_scene_summary[utype]["available_count"] += 1
 
-        # 7. Route computation with Redis caching
+        available_top_up = [
+            r for r in available_rows
+            if str(r["unit_type"]).lower() not in on_scene_types
+        ]
+        all_units = list(on_scene_summary.values()) + available_top_up
+
+        logger.info(
+            f"[UC8-Phase1] Units: {len(on_scene_rows)} on-scene "
+            f"({list(on_scene_summary.keys())}), "
+            f"{len(available_top_up)} available top-up"
+        )
+
+        # 7. Routes
         best_routes = await self._compute_routes(
-            impact_area, shelters, blocked_roads, traffic_snapshot)
+            impact_area, shelters, blocked_roads, traffic_snapshot
+        )
 
-        # 8. Transport + allocation using real unit counts
+        # 8. Transport needs + allocation
         transport_plan = compute_transport_needs(
-            population_stats, impact_area, best_routes, available_units)
+            population_stats, impact_area, best_routes, all_units
+        )
         allocations = allocate_resources(transport_plan)
 
         # 9. Persist
@@ -414,40 +407,56 @@ class EvacuationService:
         plan_id  = await self.db.save_plan(
             disaster_id=disaster_id,
             plan_ref=plan_ref,
-            impact_zones=[impact_area],           # wrap single area in list
+            impact_zones=[impact_area],
             population_stats=population_stats,
             blocked_roads=blocked_roads,
             traffic_snapshot=traffic_snapshot,
             shelters_with_capacity=shelters,
-            best_routes_per_zone=best_routes,     # rename to match repo
+            best_routes_per_zone=best_routes,
             transport_plan=transport_plan,
             allocations=allocations,
             auto_approved=auto_approve,
         )
 
-        logger.info(f"[UC8-Phase1] Plan {plan_ref} saved (pop={impact_area['population']}, "
-                     f"shelters={len(shelters)}, routes={len(best_routes)})")
+        ambulances_on_scene = len([
+            r for r in on_scene_rows if str(r["unit_type"]).lower() == "ambulance"
+        ])
+
+        logger.info(
+            f"[UC8-Phase1] Plan {plan_ref} saved — "
+            f"pop={impact_area['population']}, "
+            f"vulnerable={population_stats['vulnerable']}, "
+            f"ambulances={transport_plan['total_ambulances']} "
+            f"({ambulances_on_scene} on-scene + {len(available_top_up)} available), "
+            f"shelters={len(shelters)}, routes={len(best_routes)}"
+        )
+
         return {
-            "plan_id": plan_id, "plan_ref": plan_ref, "disaster_id": disaster_id,
+            "plan_id":    plan_id,
+            "plan_ref":   plan_ref,
+            "disaster_id": disaster_id,
             "plan_status": "APPROVED" if auto_approve else "PENDING",
             "impact_area": {
-                "center": f"{impact_area['center_lat']}, {impact_area['center_lon']}",
-                "radius_km": impact_area["radius_km"],
-                "affected_roads": impact_area["affected_roads"],
+                "center":                    f"{impact_area['center_lat']}, {impact_area['center_lon']}",
+                "radius_km":                 impact_area["radius_km"],
+                "affected_roads":            impact_area["affected_roads"],
                 "affected_facilities_count": len(impact_area["affected_facilities"]),
             },
-            "shelters_count": len(shelters),
+            "shelters_count":            len(shelters),
             "total_population_affected": population_stats["total"],
-            "total_vulnerable": population_stats["vulnerable"],
+            "total_vulnerable":          population_stats["vulnerable"],
             "transport_plan_summary": {
                 "total_ambulances":       transport_plan["total_ambulances"],
+                "ambulances_on_scene":    ambulances_on_scene,
                 "ambulances_available":   transport_plan["ambulances_available"],
                 "rescue_units_needed":    transport_plan["rescue_units_needed"],
+                "rescue_units_available": transport_plan["rescue_units_available"],
             },
             "auto_approved": auto_approve,
             "message": (
                 "Plan created and auto-approved. Call /activate to start evacuation."
-                if auto_approve else "Plan created. Awaiting approval via /approve."
+                if auto_approve else
+                "Plan created. Awaiting approval via /approve."
             ),
         }
 
@@ -478,8 +487,10 @@ class EvacuationService:
         )
         logger.info(f"[UC8-Phase2] Plan {plan['plan_ref']} approved by {approved_by}")
         return {
-            "plan_id": plan_id, "plan_ref": plan["plan_ref"],
-            "plan_status": "APPROVED", "approved_by": approved_by,
+            "plan_id":    plan_id,
+            "plan_ref":   plan["plan_ref"],
+            "plan_status": "APPROVED",
+            "approved_by": approved_by,
             "approved_at": now.isoformat(),
             "message": "Plan approved. Call /activate to start the evacuation.",
         }
@@ -489,16 +500,6 @@ class EvacuationService:
     # ═════════════════════════════════════════════════════════════════════════
 
     async def activate_evacuation(self, plan_id: str) -> Dict[str, Any]:
-        """
-        Phase 3 — Activate an approved plan.
-
-        Steps:
-          1. getUsersInImpactArea  → self.db
-          2. broadcastAlerts       → self.publisher (RabbitMQ evacuation.triggered)
-                                     + Twilio fallback
-          3. displayEvacuation     → self.mapping (Socket.IO reroute_alert)
-          4. dispatchResources     → allocation count
-        """
         plan = await self._get_plan_or_404(plan_id)
         if plan["plan_status"] != "APPROVED":
             raise HTTPException(
@@ -506,26 +507,29 @@ class EvacuationService:
                 detail=f"Only APPROVED plans can be activated. Current: {plan['plan_status']}",
             )
 
-        impact_zones = plan["impact_zones"]  # now contains [impact_area] as a list
+        impact_zones = plan["impact_zones"]
         impact_area  = impact_zones[0] if impact_zones else {}
         users        = await self.db.get_users_in_impact_area(impact_area)
 
-        alerts_sent  = await self.broadcast_alerts(
+        alerts_sent = await self.broadcast_alerts(
             users, plan["disaster_id"], plan_id,
             plan["best_routes_per_zone"], plan["shelters_with_capacity"],
         )
-        map_updated  = await self.display_evacuation_on_map(
+        map_updated = await self.display_evacuation_on_map(
             plan_id, impact_zones,
             plan["best_routes_per_zone"], plan["shelters_with_capacity"],
         )
-        units_en_route = (plan["allocations"].get("ambulances_allocated", 0)
-                          + plan["allocations"].get("rescue_units_allocated", 0))
+        units_en_route = (
+            plan["allocations"].get("ambulances_allocated", 0)
+            + plan["allocations"].get("rescue_units_allocated", 0)
+        )
 
         initial_metrics = {
             "impact_area": {
-                "percentage": 0, "evacuated": 0,
-                "remaining": impact_area.get("population", 0),
-                "status": "in_progress",
+                "percentage": 0,
+                "evacuated":  0,
+                "remaining":  impact_area.get("population", 0),
+                "status":     "in_progress",
             }
         }
         now = datetime.utcnow()
@@ -538,9 +542,12 @@ class EvacuationService:
 
         logger.info(f"[UC8-Phase3] Plan {plan['plan_ref']} ACTIVE — alerts={alerts_sent}")
         return {
-            "plan_id": plan_id, "plan_ref": plan["plan_ref"],
-            "plan_status": "ACTIVE", "activated_at": now.isoformat(),
-            "alerts_sent": alerts_sent, "map_updated": map_updated,
+            "plan_id":       plan_id,
+            "plan_ref":      plan["plan_ref"],
+            "plan_status":   "ACTIVE",
+            "activated_at":  now.isoformat(),
+            "alerts_sent":   alerts_sent,
+            "map_updated":   map_updated,
             "units_en_route": units_en_route,
             "message": f"Evacuation is live. {alerts_sent} residents notified.",
         }
@@ -556,22 +563,19 @@ class EvacuationService:
 
         traffic_update = await self.fetch_traffic_data()
         metrics        = plan.get("completion_metrics") or {}
-        impact_area    = (plan.get("impact_zones") or [{}])[0] if plan.get("impact_zones") else {}
+        impact_area    = (plan.get("impact_zones") or [{}])[0]
         total_pop      = impact_area.get("population", 0)
-
-        # Sum evacuated from metrics (may have "impact_area" key or legacy zone keys)
-        total_ev = sum(
-            m.get("evacuated", 0) for m in metrics.values()
-            if isinstance(m, dict)
-        )
-        overall = round(total_ev / total_pop * 100, 1) if total_pop else 0.0
+        total_ev       = sum(m.get("evacuated", 0) for m in metrics.values() if isinstance(m, dict))
+        overall        = round(total_ev / total_pop * 100, 1) if total_pop else 0.0
 
         return {
-            "plan_id": plan_id, "plan_ref": plan["plan_ref"],
-            "plan_status": plan["plan_status"],
-            "completion_metrics": metrics, "overall_completion": overall,
-            "traffic_update": traffic_update,
-            "last_updated": plan.get("updated_at", datetime.utcnow().isoformat()),
+            "plan_id":            plan_id,
+            "plan_ref":           plan["plan_ref"],
+            "plan_status":        plan["plan_status"],
+            "completion_metrics": metrics,
+            "overall_completion": overall,
+            "traffic_update":     traffic_update,
+            "last_updated":       plan.get("updated_at", datetime.utcnow().isoformat()),
         }
 
     async def update_progress(
@@ -581,10 +585,10 @@ class EvacuationService:
         if plan["plan_status"] not in ("ACTIVE", "MONITORING"):
             raise HTTPException(status_code=400, detail="Plan is not active.")
 
-        current = dict(plan.get("completion_metrics") or {})
+        current    = dict(plan.get("completion_metrics") or {})
         current.update(completion_metrics)
-        all_done = all(isinstance(m, dict) and m.get("percentage", 0) >= 100
-                       for m in current.values())
+        all_done   = all(isinstance(m, dict) and m.get("percentage", 0) >= 100
+                         for m in current.values())
         new_status = "COMPLETED" if all_done else plan["plan_status"]
 
         update_fields: Dict[str, Any] = {
@@ -596,24 +600,28 @@ class EvacuationService:
 
         await self.db.update_plan(plan_id, **update_fields)
 
-        impact_area = (plan.get("impact_zones") or [{}])[0] if plan.get("impact_zones") else {}
-        total_pop = impact_area.get("population", 0)
-        total_ev  = sum(m.get("evacuated", 0) for m in current.values()
-                        if isinstance(m, dict))
-        overall   = round(total_ev / total_pop * 100, 1) if total_pop else 0.0
+        impact_area = (plan.get("impact_zones") or [{}])[0]
+        total_pop   = impact_area.get("population", 0)
+        total_ev    = sum(m.get("evacuated", 0) for m in current.values() if isinstance(m, dict))
+        overall     = round(total_ev / total_pop * 100, 1) if total_pop else 0.0
 
         logger.info(f"[UC8-Phase4] Progress {overall}% — status={new_status}")
         return {
-            "plan_id": plan_id, "plan_ref": plan["plan_ref"],
-            "plan_status": new_status, "completion_metrics": current,
+            "plan_id":            plan_id,
+            "plan_ref":           plan["plan_ref"],
+            "plan_status":        new_status,
+            "completion_metrics": current,
             "overall_completion": overall,
             "message": "Evacuation complete!" if all_done else f"{overall}% evacuated.",
         }
 
+    # ═════════════════════════════════════════════════════════════════════════
+    # PHASE 4 ALT — ROUTE BLOCKAGE
+    # ═════════════════════════════════════════════════════════════════════════
+
     async def handle_route_blockage(
         self, plan_id: str, blocked_roads: List[str],
     ) -> Dict[str, Any]:
-        """Re-compute routes when roads are newly blocked during an active evacuation."""
         plan = await self._get_plan_or_404(plan_id)
         if plan["plan_status"] not in ("ACTIVE", "MONITORING"):
             raise HTTPException(status_code=400, detail="Plan is not active.")
@@ -622,11 +630,10 @@ class EvacuationService:
         uc7_names      = [s["road_name"] for s in uc7_segments if s.get("road_name")]
         all_road_names = list(set(list(plan.get("blocked_roads") or []) + blocked_roads + uc7_names))
 
-        impact_area = (plan.get("impact_zones") or [{}])[0] if plan.get("impact_zones") else {}
+        impact_area      = (plan.get("impact_zones") or [{}])[0]
         traffic_snapshot = await self.fetch_traffic_data()
 
-        # Recompute routes — cache key changes because blocked_roads_hash changes
-        new_routes    = await self._compute_routes(
+        new_routes     = await self._compute_routes(
             impact_area, plan["shelters_with_capacity"], uc7_segments, traffic_snapshot)
         updated_routes = {**dict(plan["best_routes_per_zone"] or {}), **new_routes}
 
@@ -644,71 +651,70 @@ class EvacuationService:
 
         logger.info(f"[UC8-Phase4-Blockage] updates={updates_sent}")
         return {
-            "plan_id": plan_id, "plan_ref": plan["plan_ref"],
-            "new_routes": new_routes, "total_blocked_roads": len(all_road_names),
+            "plan_id":            plan_id,
+            "plan_ref":           plan["plan_ref"],
+            "new_routes":         new_routes,
+            "total_blocked_roads": len(all_road_names),
             "route_updates_sent": updates_sent,
-            "message": (
-                f"Routes recomputed for impact area. "
-                f"{updates_sent} residents notified."
-            ),
+            "message": f"Routes recomputed for impact area. {updates_sent} residents notified.",
         }
 
+    # ═════════════════════════════════════════════════════════════════════════
+    # PHASE 4 ALT — ESCALATION
+    # ═════════════════════════════════════════════════════════════════════════
+
     async def handle_disaster_escalation(
-        self, plan_id: str, increased_radius_km: Optional[float] = None,
-        additional_roads: Optional[List[str]] = None, reason: str = "",
+        self,
+        plan_id: str,
+        increased_radius_km: Optional[float] = None,
+        additional_roads: Optional[List[str]] = None,
+        reason: str = "",
     ) -> Dict[str, Any]:
-        """
-        Escalation: increase the impact radius or add newly affected roads.
-        Replaces the old zone-based escalation.
-        """
         plan = await self._get_plan_or_404(plan_id)
         if plan["plan_status"] not in ("ACTIVE", "MONITORING"):
             raise HTTPException(status_code=400, detail="Plan is not active.")
 
-        impact_area = (plan.get("impact_zones") or [{}])[0] if plan.get("impact_zones") else {}
+        impact_area = (plan.get("impact_zones") or [{}])[0]
 
-        # Apply escalation
         if increased_radius_km and increased_radius_km > impact_area.get("radius_km", 0):
             impact_area["radius_km"] = increased_radius_km
         if additional_roads:
             existing_roads = set(impact_area.get("affected_roads", []))
             impact_area["affected_roads"] = list(existing_roads | set(additional_roads))
 
-        # Re-fetch disaster to get updated population estimate for new radius
+        # Scale population for new radius
         disaster = await self.db.get_disaster(plan["disaster_id"])
         if disaster:
-            meta = (disaster.get("disaster_metadata") or {}).get("evaluation", {})
-            # If radius increased, scale population proportionally
+            meta            = (disaster.get("disaster_metadata") or {}).get("evaluation", {})
             original_radius = meta.get("impact_radius_km") or 3.0
-            new_radius = impact_area.get("radius_km", original_radius)
+            new_radius      = impact_area.get("radius_km", original_radius)
             if new_radius > original_radius:
-                scale = (new_radius / original_radius) ** 2  # area scales with r²
-                original_pop = meta.get("estimated_population") or impact_area.get("population", 0)
-                impact_area["population"] = int(original_pop * scale)
+                scale                        = (new_radius / original_radius) ** 2
+                original_pop                 = meta.get("estimated_population") or impact_area.get("population", 0)
+                impact_area["population"]    = int(original_pop * scale)
                 impact_area["vulnerable_count"] = max(
                     1, int(impact_area["population"] * DEFAULT_VULNERABLE_RATIO))
 
-        # Recompute
         uc7_segments     = await self.db.get_blocked_roads(plan["disaster_id"])
         traffic_snapshot = await self.fetch_traffic_data()
-        shelters = get_nearest_shelters(
+        shelters         = get_nearest_shelters(
             impact_area["center_lat"], impact_area["center_lon"],
-            max_count=MAX_SHELTERS_TO_ROUTE + 1)  # +1 for escalation
-        new_routes = await self._compute_routes(
-            impact_area, shelters, uc7_segments, traffic_snapshot)
+            max_count=MAX_SHELTERS_TO_ROUTE + 1,
+        )
+        new_routes     = await self._compute_routes(impact_area, shelters, uc7_segments, traffic_snapshot)
         updated_routes = {**dict(plan["best_routes_per_zone"] or {}), **new_routes}
 
         available_units = await self.db.get_available_transport_units()
-        new_pop = get_population_profile(impact_area)
-        new_transport = compute_transport_needs(new_pop, impact_area, updated_routes, available_units)
-        new_alloc = allocate_resources(new_transport)
+        new_pop         = get_population_profile(impact_area)
+        new_transport   = compute_transport_needs(new_pop, impact_area, updated_routes, available_units)
+        new_alloc       = allocate_resources(new_transport)
 
         existing_metrics = dict(plan.get("completion_metrics") or {})
         existing_metrics["impact_area"] = {
             "percentage": existing_metrics.get("impact_area", {}).get("percentage", 0),
-            "evacuated": existing_metrics.get("impact_area", {}).get("evacuated", 0),
-            "remaining": impact_area["population"],
-            "status": "in_progress",
+            "evacuated":  existing_metrics.get("impact_area", {}).get("evacuated", 0),
+            "remaining":  impact_area["population"],
+            "status":     "in_progress",
         }
 
         now  = datetime.utcnow()
@@ -731,13 +737,17 @@ class EvacuationService:
         await self.display_evacuation_on_map(
             plan_id, [impact_area], updated_routes, plan["shelters_with_capacity"])
 
-        logger.info(f"[UC8-Escalation] radius={impact_area.get('radius_km')}km, "
-                     f"pop={impact_area['population']}, alerts={alerts_sent}")
+        logger.info(
+            f"[UC8-Escalation] radius={impact_area.get('radius_km')}km, "
+            f"pop={impact_area['population']}, alerts={alerts_sent}"
+        )
         return {
-            "plan_id": plan_id, "plan_ref": plan["plan_ref"],
+            "plan_id":           plan_id,
+            "plan_ref":          plan["plan_ref"],
             "updated_radius_km": impact_area.get("radius_km"),
             "updated_population": impact_area["population"],
-            "alerts_sent": alerts_sent, "reason": reason,
+            "alerts_sent":       alerts_sent,
+            "reason":            reason,
             "message": f"Evacuation escalated. {alerts_sent} residents notified.",
         }
 
@@ -755,85 +765,62 @@ class EvacuationService:
     # HELPERS
     # ═════════════════════════════════════════════════════════════════════════
 
-    async def fetch_traffic_data(self, lat: float = 53.3498, lon: float = -6.2603) -> Dict[str, Any]:
-        """Step 4: traffic via self.external (same path as UC7)."""
+    async def fetch_traffic_data(self) -> Dict[str, Any]:
+        """Fetch traffic via IntegrationService with fallback."""
         try:
-            return await self.external.fetch_traffic_data(lat = lat, lon = lon)
+            return await self.external.fetch_traffic_data(EVACUATION_REGION)
         except Exception as exc:
             logger.warning(f"[UC8] Traffic fetch degraded: {exc}")
             return {"source": "fallback", "available": False, "segments": []}
 
-    async def broadcast_alerts(
-        self,
-        users: List[Dict],
-        disaster_id: str,
-        plan_id: str,
-        best_routes: Dict,
-        shelters: List[Dict],
-    ) -> int:
-        """
-        Publish via self.publisher (evacuation.triggered).
-        Falls back to direct Twilio if MQ disconnected.
-        """
+    async def broadcast_alerts(self, users, disaster_id, plan_id, best_routes, shelters) -> int:
+        if not users:
+            return 0
+
+        # RabbitMQ — mobile push (fire and forget, non-fatal)
         try:
             if self.publisher.is_connected:
-                all_routes = [r for zr in best_routes_per_zone.values() for r in (zr or [])]
-                users_serializable = [
-                    {**u, "user_id" : str(u["user_id"])} if "user_id" in u else u for u in users
+                all_routes = [
+                    r for zr in best_routes.values()
+                    for r in (zr if isinstance(zr, list) else [zr])
                 ]
-                await self.publisher.publish_reroute_triggered(
+                await self.publisher.publish_evacuation_triggered(
                     disaster_id=disaster_id,
                     plan_id=plan_id,
-                    vehicles=users_serializable,
+                    vehicles=users,
                     routes=all_routes,
-                    route_assignments={},
+                    total_users=len(users),
                 )
-                return len(users)
         except Exception as exc:
-            logger.warning(f"[UC8] RabbitMQ publish failed, falling back to Twilio: {exc}")
+            logger.warning(f"[UC8] RabbitMQ publish failed: {exc}")
 
-        # Twilio fallback
+        # Twilio SMS — always sent regardless of RabbitMQ status
         from app.services.twilio_service import send_sms
         sent = 0
-        shelter_map = {s["shelter_id"]: s["name"] for s in shelters}
         for u in users:
             try:
-                msg = (
+                if await send_sms(
+                    u["phone_number"],
                     "EVACUATION ALERT: Please evacuate immediately. "
                     "Proceed to the nearest shelter. Call 999 for help."
-                )
-                if await send_sms(u["phone_number"], msg):
+                ):
                     sent += 1
             except Exception:
                 pass
         return sent
 
-    async def display_evacuation_on_map(
-        self,
-        plan_id: str,
-        impact_areas: List[Dict],
-        routes: Dict,
-        shelters: List[Dict],
-    ) -> bool:
-        """Push overlay via self.mapping (Socket.IO reroute_alert). Same channel as UC7."""
-        try:
-            all_routes = [r for zone_routes in routes.values()
-                          for r in (zone_routes if isinstance(zone_routes, list) else [zone_routes])]
-            await self.mapping.highlight_alternative_routes(
-                routes=all_routes)
-            logger.info(f"[UC8] Socket.IO reroute_alert emitted ({len(all_routes)} routes)")
-        except Exception as exc:
-            logger.warning(f"[UC8] MappingService failed (non-fatal): {exc}")
-        return True
-
     async def send_route_updates(
         self, users: List[Dict], new_routes: Dict, disaster_id: str
     ) -> int:
-        """Phase 4 blockage: notify affected users via publisher (route.updated)."""
+        """Phase 4 blockage: notify affected users of new routes."""
+        if not users:
+            return 0
         try:
             if self.publisher.is_connected:
-                all_routes = [r for zr in new_routes.values()
-                              for r in (zr if isinstance(zr, list) else [zr])]
+                all_routes = [
+                    r for zr in new_routes.values()
+                    for r in (zr if isinstance(zr, list) else [zr])
+                ]
                 await self.publisher.publish_route_updated(
                     disaster_id=disaster_id,
                     reason="route_blockage",
@@ -847,15 +834,37 @@ class EvacuationService:
 
         from app.services.twilio_service import send_sms
         sent = 0
-        for user in users:
+        for u in users:
             try:
-                if await send_sms(user["phone_number"],
-                                  "ROUTE UPDATE: Your evacuation route has changed. "
-                                  "Proceed to the nearest shelter. Call 999 for help."):
+                if await send_sms(
+                    u["phone_number"],
+                    "ROUTE UPDATE: Your evacuation route has changed. "
+                    "Proceed to the nearest shelter. Call 999 for help.",
+                ):
                     sent += 1
             except Exception:
                 pass
         return sent
+
+    async def display_evacuation_on_map(
+        self,
+        plan_id: str,
+        impact_areas: List[Dict],
+        routes: Dict,
+        shelters: List[Dict],
+    ) -> bool:
+        """Push overlay via self.mapping (Socket.IO reroute_alert)."""
+        try:
+            all_routes = [
+                r for zone_routes in routes.values()
+                for r in (zone_routes if isinstance(zone_routes, list) else [zone_routes])
+            ]
+            await self.mapping.highlight_alternative_routes(
+                routes=all_routes, region_id=EVACUATION_REGION)
+            logger.info(f"[UC8] Socket.IO reroute_alert emitted ({len(all_routes)} routes)")
+        except Exception as exc:
+            logger.warning(f"[UC8] MappingService failed (non-fatal): {exc}")
+        return True
 
     async def _compute_routes(
         self,
@@ -864,99 +873,74 @@ class EvacuationService:
         blocked_roads: List[Dict],
         traffic_snapshot: Dict,
     ) -> Dict[str, Any]:
-        """PAR block: concurrent route computation for all zones."""
-        # semaphore = asyncio.Semaphore(3)
-
-        results = await asyncio.gather(
-            *[self._compute_zone_routes(z, shelters, blocked_roads, traffic_snapshot)
-              for z in impact_zones],
-            return_exceptions=True,
-        )
-        return {
-            zone["zone_id"]: ([] if isinstance(r, Exception) else r)
-            for zone, r in zip(impact_zones, results)
-        }
-
-    async def _compute_zone_routes(
-        self,
-        zone: Dict,
-        shelters: List[Dict],
-        blocked_roads: List[Dict],
-        traffic_snapshot: Dict,
-    ) -> List[Dict]:
         """
-        Compute routes from disaster centre to each shelter.
+        Compute routes from disaster centre → each shelter.
 
-        Redis cache key: evac:route:{disaster_id}:{shelter_id}:{blocked_roads_hash}
-        TTL: 300s (5 min).
-
-        With MAX_SHELTERS_TO_ROUTE=3, this makes at most 3 TomTom calls
-        per invocation (down from 64 in the old zone×shelter model).
+        - Redis cached per (disaster_id, shelter_id, blocked_roads_hash), TTL 300s
+        - Max 3 concurrent TomTom calls via semaphore
+        - Straight-line fallback when TomTom unavailable
         """
         disaster_id = impact_area.get("disaster_id", "unknown")
         roads_hash  = _hash_blocked_roads(blocked_roads)
         origin_lat  = impact_area["center_lat"]
         origin_lon  = impact_area["center_lon"]
+        semaphore   = asyncio.Semaphore(3)
 
         candidates = []
         for shelter in shelters:
             cache_key = _route_cache_key(disaster_id, shelter["shelter_id"], roads_hash)
 
-            # Try Redis cache first
             cached = await self._cache_get(cache_key)
             if cached:
                 candidates.extend(cached if isinstance(cached, list) else [cached])
                 continue
 
-            # Cache miss → call TomTom
-            try:
-
-                result = await self.external.get_directions(
-                    origin={"lat": origin_lat, "lng": origin_lon},
-                    destination={"lat": shelter["lat"], "lng": shelter["lon"]},
-                    avoid=blocked_roads,
-                    alternatives=False,
-                )
-                routes = result.get("routes", [])
-                if routes:
-                    r = routes[0]
-                    route_data = {
-                        "route_id":               str(uuid.uuid4()),
-                        "origin_label":           impact_area.get("area_name", "impact_area"),
-                        "origin_lat":             origin_lat,
-                        "origin_lon":             origin_lon,
-                        "destination_shelter_id": shelter["shelter_id"],
-                        "shelter_name":           shelter["name"],
-                        "shelter_capacity":       shelter["capacity"],
-                        "distance_km":            round(r.get("length_meters", 0) / 1000, 2),
-                        "estimated_time_min":     round(r.get("travel_time_seconds", 0) / 60, 1),
-                        "travel_time_seconds":    r.get("travel_time_seconds", 0),
-                        "length_meters":          r.get("length_meters", 0),
-                        "traffic_delay_seconds":  r.get("traffic_delay_seconds", 0),
-                        "points":                 r.get("points", []),
-                        "geojson":                r.get("geojson"),
-                        "waypoints":              r.get("waypoints", []),
-                        "fallback":               False,
-                    }
-                    candidates.append(route_data)
-                    # Cache the successful route
-                    await self._cache_set(cache_key, route_data, ROUTE_CACHE_TTL)
-                else:
+            async with semaphore:
+                try:
+                    result = await self.external.get_directions(
+                        origin={"lat": origin_lat, "lng": origin_lon},
+                        destination={"lat": shelter["lat"], "lng": shelter["lon"]},
+                        avoid=blocked_roads,
+                        alternatives=False,
+                    )
+                    routes = result.get("routes", [])
+                    if routes:
+                        r          = routes[0]
+                        route_data = {
+                            "route_id":               str(uuid.uuid4()),
+                            "origin_label":           impact_area.get("area_name", "impact_area"),
+                            "origin_lat":             origin_lat,
+                            "origin_lon":             origin_lon,
+                            "destination_shelter_id": shelter["shelter_id"],
+                            "shelter_name":           shelter["name"],
+                            "shelter_capacity":       shelter["capacity"],
+                            "distance_km":            round(r.get("length_meters", 0) / 1000, 2),
+                            "estimated_time_min":     round(r.get("travel_time_seconds", 0) / 60, 1),
+                            "travel_time_seconds":    r.get("travel_time_seconds", 0),
+                            "length_meters":          r.get("length_meters", 0),
+                            "traffic_delay_seconds":  r.get("traffic_delay_seconds", 0),
+                            "points":                 r.get("points", []),
+                            "geojson":                r.get("geojson"),
+                            "waypoints":              r.get("waypoints", []),
+                            "fallback":               False,
+                        }
+                        candidates.append(route_data)
+                        await self._cache_set(cache_key, route_data, ROUTE_CACHE_TTL)
+                    else:
+                        fb = straight_line_fallback(origin_lat, origin_lon, shelter)
+                        if fb:
+                            candidates.append(fb)
+                except Exception:
                     fb = straight_line_fallback(origin_lat, origin_lon, shelter)
                     if fb:
                         candidates.append(fb)
-            except Exception:
-                fb = straight_line_fallback(origin_lat, origin_lon, shelter)
-                if fb:
-                    candidates.append(fb)
 
         scored = score_and_select_routes(candidates, traffic_snapshot)
         return {disaster_id: scored}
 
-    # ── Redis helpers (reuse IntegrationService's pattern) ────────────────────
+    # ── Redis helpers ─────────────────────────────────────────────────────────
 
     async def _cache_get(self, key: str) -> Optional[Any]:
-        """Read from Redis. Returns None on miss or error."""
         try:
             redis = await self._get_redis()
             if redis is None:
@@ -970,7 +954,6 @@ class EvacuationService:
         return None
 
     async def _cache_set(self, key: str, value: Any, ttl: int) -> None:
-        """Write to Redis. Silently ignores errors."""
         try:
             redis = await self._get_redis()
             if redis is None:
@@ -981,7 +964,6 @@ class EvacuationService:
             logger.warning(f"[UC8] Cache SET failed for {key}: {e}")
 
     async def _get_redis(self):
-        """Lazily initialise Redis — same pattern as IntegrationService."""
         if not hasattr(self, "_redis"):
             self._redis = None
         if self._redis is not None:
