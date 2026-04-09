@@ -244,6 +244,8 @@ Auth rules:
   - Admin endpoints → get_current_team_member (emergency team only)
 """
 
+import asyncio
+
 from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException, status, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List, Dict, Any
@@ -260,6 +262,7 @@ from app.schemas.disaster_report import (
     AdminReviewRequest,
     AdminReviewResponse,
 )
+from app.api.v1.disaster_evaluation import evaluate_report_background
 
 import logging
 logger = logging.getLogger(__name__)
@@ -323,6 +326,7 @@ async def submit_disaster_report(
         road_blocked=road_blocked,
         uploaded_files=uploaded_files,
     )
+    asyncio.create_task(evaluate_report_background(report["id"]))
     return DisasterReportResponse(**report)
 
 
@@ -355,6 +359,7 @@ async def create_disaster_report(
     """Create report with photo URLs. Requires Bearer token."""
     service = DisasterReportService(db)
     report = await service.create_report(data)
+    asyncio.create_task(evaluate_report_background(report["id"]))
     return DisasterReportResponse(**report)
 
 
