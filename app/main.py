@@ -322,9 +322,9 @@ async def readiness_check():
 
     # ── PostgreSQL — reuse pool, don't open a new session ─────────
     try:
-        from app.db.session import async_engine
-        async with async_engine.connect() as conn:
-            await asyncio.wait_for(conn.execute(text("SELECT 1")), timeout=3.0)
+        from app.db.session import async_session_factory
+        async with async_session_factory() as session:
+            await asyncio.wait_for(session.scalar(text("SELECT 1")), timeout=3.0)
         health["services"]["postgresql"] = {"status": "ok"}
     except asyncio.TimeoutError:
         health["services"]["postgresql"] = {"status": "error", "detail": "timeout"}
