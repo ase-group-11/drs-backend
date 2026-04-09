@@ -632,64 +632,45 @@ class TrafficProvider:
         if self.session and not self.session.closed:
             await self.session.close()
 
+    # Fixed monitoring points for Dublin's major highways.
+    # Used by get_traffic() for the live map display — the reroute service
+    # does its own targeted fetching when a disaster is active.
+    # Covers: M50 (N/E/S/W), M1/N1, M4, N7, N11, Port Tunnel, City Centre.
+    DUBLIN_HIGHWAY_POINTS = [
+        (53.424, -6.244),   # M50 North — M1 interchange
+        (53.392, -6.402),   # M50 West — M4 interchange
+        (53.299, -6.371),   # M50 South — N7 interchange
+        (53.302, -6.196),   # M50 East — N11 interchange
+        (53.434, -6.243),   # M1 / N1 — Airport approach
+        (53.357, -6.430),   # M4 — Lucan
+        (53.310, -6.385),   # N7 — Naas Road
+        (53.268, -6.175),   # N11 — Stillorgan
+        (53.361, -6.226),   # Port Tunnel / East Wall
+        (53.344, -6.267),   # City Centre — O'Connell St area
+    ]
+
     async def get_traffic(self, bounds: str, style: Optional[str] = None) -> Dict[str, Any]:
         """
+        Get real-time traffic flow data for Dublin's major highways.
 
-        Get real-time traffic flow data for the specified bounds.
-        
-        TomTom's API works by requesting traffic for specific road segments.
-        For a bounding box, we sample key points and aggregate the data.
-        
+        Fetches a fixed set of key arterial road points (M50, M1, M4, N7,
+        N11, Port Tunnel) rather than sampling a dynamic grid. The live map
+        only needs major-road congestion; the reroute service handles targeted
+        fetching when a disaster is active.
+
         Args:
-            bounds: Bounding box string "south,west,north,east"
-            
-        Returns:
-            Dict containing:
-                - source: "tomtom"
-                - flow: List of traffic flow segments
-                - timestamp: When data was fetched
-                - incidents: List of traffic incidents (if enabled)
-                
-        Raises:
-            TimeoutError: If API request times out
-            aiohttp.ClientError: If API request fails
-            
-        Example response:
-            {
-                "source": "tomtom",
-                "flow": [
-                    {
-                        "segment_id": "seg_001",
-                        "current_speed": 22,
-                        "free_flow_speed": 50,
-                        "confidence": 0.85,
-                        "congestion_level": "moderate",
-                        "coordinates": [[53.35, -6.25], [53.36, -6.24]],
-                        "road_name": "O'Connell Street"
-                    }
-                ],
-                "incidents": [...],  # if include_incidents=True
-                "timestamp": "2026-02-05T14:30:00Z"
-            }
-        
+            bounds: Accepted for API compatibility but not used for sampling.
 
+        Returns:
+            Dict with source, flow segments, timestamp, bounds, style.
         """
 
         logger.info(f"Fetching TomTom traffic data for bounds: {bounds}")
 
         active_style = style or self.style
 
-        try: 
-            # Parse bounds
-
-            south, west, north, east = map(float, bounds.split(','))
-
-            # sample points within the bounding box
-            # For better coverage, sample a grid of points
-
-            flow_data = await self._fetch_flow_data_for_bounds(
-                south, west, north, east
-            )
+        try:
+            flow_data = await self._fetch_flow_data_for_bounds(None, None, None, None)
 
             # Fetch Incidents
             incidents = []
@@ -723,36 +704,21 @@ class TrafficProvider:
             raise
                        
     async def _fetch_flow_data_for_bounds(
-            
         self,
-        south: float,
-        west: float, 
-        north: float, 
-        east: float,
-        # style: str = "relative"
-            
+        south: Optional[float],
+        west: Optional[float],
+        north: Optional[float],
+        east: Optional[float],
     ) -> List[Dict[str, Any]]:
         """
+        Fetch traffic flow for Dublin's fixed highway monitoring points.
 
-        Fetch traffic flow data for a bounding box.
-        
-        Strategy: Sample a grid of points within the bounds and fetch traffic
-        for roads near each point. This gives good coverage of the area.
-
+        Ignores bounds — always queries DUBLIN_HIGHWAY_POINTS so the live
+        map shows major arterial congestion without burning API quota on a
+        dynamic grid. The reroute service does its own targeted fetching
+        via fetch_traffic_data() when a disaster is active.
         """
-
-        # Calculate grid of sample points (5x5 grid)
-
-        lat_step = (north - south) / 5
-        lon_step = (east - west) / 5
-
-        sample_points = []
-
-        for i in range(5):
-            for j in range(5):
-                lat = south + (i + 0.5) * lat_step
-                lon = west + (j + 0.5) * lon_step
-                sample_points.append((lat, lon))
+        sample_points = self.DUBLIN_HIGHWAY_POINTS
         
         # Fetch traffic for all sample points (in parallel)
         session = await self.get_session()

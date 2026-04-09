@@ -53,8 +53,9 @@ class LiveMapService:
     """
     
     # Cache TTLs in seconds
-    DISASTER_CACHE_TTL = 1800  # 30 minutes
-    TRAFFIC_CACHE_TTL = 300   # 5 minutes
+    DISASTER_CACHE_TTL = 1800   # 30 minutes
+    TRAFFIC_CACHE_TTL = 900     # 15 minutes — highway congestion changes slowly;
+                                # reroute service fetches its own live data when active
     
     def __init__(
         self,
@@ -179,11 +180,10 @@ class LiveMapService:
             Returns None if provider is down and no cached data exists.
         """
 
-        def _normalize_bounds(bounds: str) -> str:
-            parts = [round(float(x), 2) for x in bounds.split(",")]
-            return ",".join(str(p) for p in parts)
-        
-        cache_key = f"live_map:traffic:{_normalize_bounds(bounds)}:{style}"
+        # Single shared cache key — TrafficProvider always fetches the same
+        # fixed Dublin highway points regardless of viewport bounds.
+        # All tile requests share one warm cache entry refreshed every 15 min.
+        cache_key = f"live_map:traffic:dublin_highways:{style}"
         
         try:
             # Try to get live traffic data
