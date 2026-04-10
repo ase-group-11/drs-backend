@@ -635,18 +635,44 @@ class TrafficProvider:
     # Fixed monitoring points for Dublin's major highways.
     # Used by get_traffic() for the live map display — the reroute service
     # does its own targeted fetching when a disaster is active.
-    # Covers: M50 (N/E/S/W), M1/N1, M4, N7, N11, Port Tunnel, City Centre.
+    # 20 points, cached 15 min = ~96 calls/hour max, well within 2,500/day free tier.
+    #
+    # M50 ring road — 8 points for full loop coverage
+    # Radial routes — M1, M4, N7, N11, N3, N2 + city centre connectors
     DUBLIN_HIGHWAY_POINTS = [
-        (53.424, -6.244),   # M50 North — M1 interchange
-        (53.392, -6.402),   # M50 West — M4 interchange
-        (53.299, -6.371),   # M50 South — N7 interchange
-        (53.302, -6.196),   # M50 East — N11 interchange
-        (53.434, -6.243),   # M1 / N1 — Airport approach
+        # M50 ring road (clockwise from north)
+        (53.424, -6.244),   # M50 North — M1 interchange (J2)
+        (53.410, -6.320),   # M50 Northwest — Finglas area (J4)
+        (53.392, -6.402),   # M50 West — M4 interchange (J7)
+        (53.360, -6.405),   # M50 Southwest — Ballymount (J9)
+        (53.299, -6.371),   # M50 South — N7 interchange (J11)
+        (53.285, -6.290),   # M50 Southeast — Dundrum (J13)
+        (53.302, -6.196),   # M50 East — N11 interchange (J15)
+        (53.348, -6.192),   # M50 Northeast — East Link approach (J1)
+
+        # M1 / N1 — Airport & north corridor
+        (53.434, -6.243),   # M1 — Dublin Airport approach
+        (53.460, -6.220),   # M1 — Swords bypass
+
+        # M4 / N4 — West corridor
         (53.357, -6.430),   # M4 — Lucan
-        (53.310, -6.385),   # N7 — Naas Road
+        (53.348, -6.490),   # M4 — Leixlip
+
+        # N7 — Southwest corridor (Naas Road)
+        (53.310, -6.385),   # N7 — Naas Road, Red Cow
+        (53.290, -6.440),   # N7 — Citywest
+
+        # N11 — Southeast corridor
         (53.268, -6.175),   # N11 — Stillorgan
+        (53.240, -6.135),   # N11 — Cabinteely
+
+        # N3 — Northwest corridor
+        (53.395, -6.340),   # N3 — Blanchardstown
+
+        # Port Tunnel & city connectors
         (53.361, -6.226),   # Port Tunnel / East Wall
-        (53.344, -6.267),   # City Centre — O'Connell St area
+        (53.350, -6.260),   # City quays — Custom House
+        (53.344, -6.267),   # City Centre — O'Connell St
     ]
 
     async def get_traffic(self, bounds: str, style: Optional[str] = None) -> Dict[str, Any]:
