@@ -241,7 +241,14 @@ async def redis_listener() -> None:
                     pass
             return
         except Exception as exc:
-            logger.error(f"Redis listener error: {exc} — retrying in 3s")
+            # Socket timeouts are expected keepalive reconnects — not real errors.
+            # Kubernetes kills idle TCP connections after ~60s; socket_timeout=30
+            # detects this and reconnects rather than hanging forever.
+            is_timeout = "Timeout" in type(exc).__name__ or "timeout" in str(exc).lower()
+            if is_timeout:
+                logger.debug(f"Redis listener timeout (keepalive reconnect) — retrying in 3s")
+            else:
+                logger.error(f"Redis listener error: {exc} — retrying in 3s")
             await asyncio.sleep(3)
         finally:
             if client:
