@@ -506,12 +506,22 @@ async def _flush_buffer(disaster_id: str) -> None:
                     },
                 )
                 await session.commit()
+                # Clear Redis buffer key and counters after successful DB flush
+                try:
+                    r = await _get_redis()
+                    await r.delete(
+                        _buffer_key(disaster_id),
+                        _seq_key(disaster_id),
+                        _chunk_key(disaster_id),
+                    )
+                    await r.aclose()
+                except Exception as redis_exc:
+                    logger.warning(f"[Chat] Redis cleanup failed after flush: {redis_exc}")
                 logger.info(
                     f"[Chat] Flushed chunk {chunk_number} for disaster {disaster_id} "
                     f"— {len(messages)} messages (seq {from_seq}-{to_seq})"
                 )
                 return  # success
-
             except Exception as exc:
                 await session.rollback()
                 logger.error(
@@ -807,6 +817,22 @@ async def chat_websocket(disaster_id: str, websocket: WebSocket) -> None:
             f"Room size: {len(_chat_rooms.get(disaster_id, {}))}"
         )
 
+
+async def _clear_redis_chat_data(disaster_id: str) -> None:
+    """Clear all Redis data for a disaster chat."""
+    try:
+        r = await _get_redis()
+        try:
+            await r.delete(
+                _buffer_key(disaster_id),   # chat_buffer:{id}
+                _seq_key(disaster_id),       # chat_seq:{id}
+                _chunk_key(disaster_id),     # chat_chunk:{id}
+            )
+            logger.info(f"[Chat] Redis data cleared for disaster {disaster_id}")
+        finally:
+            await r.aclose()
+    except Exception as exc:
+        logger.error(f"[Chat] Failed to clear Redis for {disaster_id}: {exc}")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # REST — Chat history
