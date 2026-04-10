@@ -782,9 +782,10 @@ class TrafficProvider:
                 timeout = aiohttp.ClientTimeout(total = self.timeout)
             ) as response:
                 if response.status != 200:
+                    body = await response.text()
                     logger.warning(
                         f"TomTom API returned status {response.status}"
-                        f" for point {lat}, {lon}"
+                        f" for point {lat}, {lon} — response: {body[:200]}"
                     )
 
                     return []
