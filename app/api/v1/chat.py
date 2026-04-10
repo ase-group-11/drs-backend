@@ -3,24 +3,62 @@
 Disaster Group Chat — WebSocket + REST History
 
 ─────────────────────────────────────────────────────────────
-BULK INSERT STRATEGY (chunk-based)
+ARCHITECTURE (Redis-based)
 ─────────────────────────────────────────────────────────────
-Messages are buffered in memory per disaster and flushed as one
-bulk INSERT into disaster_chat_sessions.
 
-Flush triggers:
-  1. Buffer hits CHUNK_SIZE (50)  → flush immediately
-  2. Every FLUSH_INTERVAL (90s)   → flush whatever is in buffer
-  3. Last user disconnects        → flush remaining messages
+Redis serves two purposes:
+
+1. BUFFER (Redis List) — replaces in-memory _message_buffer
+   Key: chat_buffer:{disaster_id}
+   Each entry: JSON string of one message dict
+   - All processes/pods share the same buffer
+   - New joiners get buffered + DB messages = complete history
+   - Survives server restart (Redis is persistent)
+
+2. PUB/SUB (Redis Channel) — cross-device/cross-process broadcast
+   Channel: chat:{disaster_id}
+   - When a message is sent, it is published to Redis
+   - A background listener subscribes and re-broadcasts
+     to all locally connected WebSocket clients
+   - Works across different devices, networks, pods
+
+Flow:
+  User sends message
+        ↓
+  1. RPUSH to Redis List (buffer)
+  2. PUBLISH to Redis channel (triggers delivery to all devices)
+        ↓
+  Redis listener receives published message
+        ↓
+  Broadcasts to all WebSocket clients connected to this process
+        ↓
+  All devices receive the message instantly ✅
+
+New user joins:
+        ↓
+  1. Fetch DB chunks (already flushed messages)
+  2. Fetch Redis List (recent unflushed messages)
+  3. Combine and send as history ✅
+
+Flush (every 90s / 50 messages / last disconnect):
+        ↓
+  Read all messages from Redis List
+  → ONE bulk INSERT to PostgreSQL
+  → Delete Redis List
+  → 50 messages = 1 DB write ✅
 
 ─────────────────────────────────────────────────────────────
-FIXES APPLIED
+ACCESS RULES
 ─────────────────────────────────────────────────────────────
-  Fix 1: MAX_BUFFER_SIZE cap        → stop accepting if buffer > 500
-  Fix 2: Periodic task guard        → only one task per disaster ever
-  Fix 3: Seq counter safety         → restore from DB with +10 buffer
-  Fix 4: CAST(:messages AS jsonb)   → correct asyncpg JSONB syntax
-  Fix 5: _get_latest_seq/chunk use  → accepts db param, no new session
+  ADMIN / MANAGER  → any ACTIVE or MONITORING disaster
+  STAFF            → only if deployed to that disaster
+  RESOLVED         → WebSocket sends error, history via REST
+
+─────────────────────────────────────────────────────────────
+ENDPOINTS
+─────────────────────────────────────────────────────────────
+  WS  /api/v1/ws/chat/{disaster_id}?token=JWT
+  GET /api/v1/chat/{disaster_id}/history
 """
 
 import asyncio
@@ -30,6 +68,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set
 
+import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -37,6 +76,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.jwt_handler import decode_token
 from app.auth.dependencies import get_current_team_member
 from app.db.session import get_db, async_session_factory
+from app.core.config import settings
 
 logger = logging.getLogger("chat")
 
@@ -46,22 +86,47 @@ router = APIRouter(tags=["Disaster Chat"])
 # Constants
 # ─────────────────────────────────────────────────────────────────────────────
 
-CHUNK_SIZE       = 50    # flush when buffer reaches this many messages
-FLUSH_INTERVAL   = 120    # flush every N seconds (1 min 30 sec)
-MAX_RETRIES      = 3     # retry DB write this many times before giving up
-MAX_BUFFER_SIZE  = 500   # hard cap — stop accepting messages if buffer exceeds this
-WS_TIMEOUT       = 180   # websocket receive timeout (must be > FLUSH_INTERVAL)
+CHUNK_SIZE      = 50    # flush when Redis buffer reaches this many messages
+FLUSH_INTERVAL  = 90    # flush every N seconds (1 min 30 sec)
+MAX_RETRIES     = 3     # retry DB write this many times before giving up
+MAX_BUFFER_SIZE = 500   # hard cap on Redis buffer
+WS_TIMEOUT      = 180   # websocket receive timeout (must be > FLUSH_INTERVAL)
+
+REDIS_URL = settings.REDIS_URL
+
+# Redis key patterns
+def _buffer_key(disaster_id: str) -> str:
+    """Redis List key for buffered messages."""
+    return f"chat_buffer:{disaster_id}"
+
+def _pubsub_channel(disaster_id: str) -> str:
+    """Redis Pub/Sub channel for real-time delivery."""
+    return f"chat:{disaster_id}"
+
+def _seq_key(disaster_id: str) -> str:
+    """Redis key for sequence counter."""
+    return f"chat_seq:{disaster_id}"
+
+def _chunk_key(disaster_id: str) -> str:
+    """Redis key for chunk counter."""
+    return f"chat_chunk:{disaster_id}"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# In-memory state
+# In-memory state (per process — WebSocket connections only)
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Connected WebSocket clients on THIS process
+# { disaster_id → { conn_id → { ws, user_id, sender_name, sender_type } } }
 _chat_rooms:        Dict[str, Dict[str, Dict[str, Any]]] = {}
-_message_buffer:    Dict[str, List[Dict[str, Any]]]      = {}
-_seq_counters:      Dict[str, int]                        = {}
-_chunk_counters:    Dict[str, int]                        = {}
+
+# Flush locks — one per disaster per process
 _flush_locks:       Dict[str, asyncio.Lock]               = {}
-_periodic_running:  Dict[str, bool]                       = {}  # FIX 2: task guard
+
+# Periodic flush task guard — prevents duplicate tasks per process
+_periodic_running:  Dict[str, bool]                       = {}
+
+# Redis pub/sub listeners — one per disaster
+_chat_listeners:    Dict[str, asyncio.Task]               = {}
 
 
 def _get_room(disaster_id: str) -> Dict[str, Dict[str, Any]]:
@@ -76,18 +141,225 @@ def _get_lock(disaster_id: str) -> asyncio.Lock:
     return _flush_locks[disaster_id]
 
 
-def _next_seq(disaster_id: str) -> int:
-    _seq_counters[disaster_id] = _seq_counters.get(disaster_id, 0) + 1
-    return _seq_counters[disaster_id]
-
-
-def _next_chunk(disaster_id: str) -> int:
-    _chunk_counters[disaster_id] = _chunk_counters.get(disaster_id, 0) + 1
-    return _chunk_counters[disaster_id]
-
-
 def get_room_members(disaster_id: str) -> int:
     return len(_chat_rooms.get(disaster_id, {}))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Redis helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _get_redis() -> aioredis.Redis:
+    """Get a fresh Redis client. Each caller manages its own lifecycle."""
+    return aioredis.from_url(
+        REDIS_URL,
+        decode_responses=True,
+        socket_keepalive=True,
+        socket_connect_timeout=5,
+    )
+
+
+async def _redis_push_message(disaster_id: str, msg: Dict[str, Any]) -> int:
+    """
+    Push one message to the Redis buffer List.
+    Returns the new length of the list.
+    Falls back to 0 if Redis is unavailable.
+    """
+    try:
+        r = await _get_redis()
+        try:
+            length = await r.rpush(_buffer_key(disaster_id), json.dumps(msg, default=str))
+            return length
+        finally:
+            await r.aclose()
+    except Exception as exc:
+        logger.error(f"[Chat] Redis push failed for {disaster_id}: {exc}")
+        return 0
+
+
+async def _redis_get_buffer(disaster_id: str) -> List[Dict[str, Any]]:
+    """
+    Read ALL messages from the Redis buffer List (without deleting).
+    Returns [] if Redis unavailable.
+    """
+    try:
+        r = await _get_redis()
+        try:
+            raw_list = await r.lrange(_buffer_key(disaster_id), 0, -1)
+            return [json.loads(raw) for raw in raw_list]
+        finally:
+            await r.aclose()
+    except Exception as exc:
+        logger.error(f"[Chat] Redis get buffer failed for {disaster_id}: {exc}")
+        return []
+
+
+async def _redis_pop_buffer(disaster_id: str) -> List[Dict[str, Any]]:
+    """
+    Atomically read and delete the Redis buffer List (for flush).
+    Uses GETDEL pattern: LRANGE then DELETE in a pipeline.
+    """
+    try:
+        r = await _get_redis()
+        try:
+            pipe = r.pipeline()
+            pipe.lrange(_buffer_key(disaster_id), 0, -1)
+            pipe.delete(_buffer_key(disaster_id))
+            results = await pipe.execute()
+            raw_list = results[0]
+            return [json.loads(raw) for raw in raw_list]
+        finally:
+            await r.aclose()
+    except Exception as exc:
+        logger.error(f"[Chat] Redis pop buffer failed for {disaster_id}: {exc}")
+        return []
+
+
+async def _redis_buffer_len(disaster_id: str) -> int:
+    """Return current buffer length from Redis."""
+    try:
+        r = await _get_redis()
+        try:
+            return await r.llen(_buffer_key(disaster_id))
+        finally:
+            await r.aclose()
+    except Exception:
+        return 0
+
+
+async def _redis_next_seq(disaster_id: str) -> int:
+    """Atomically increment and return sequence counter from Redis."""
+    try:
+        r = await _get_redis()
+        try:
+            return await r.incr(_seq_key(disaster_id))
+        finally:
+            await r.aclose()
+    except Exception as exc:
+        logger.error(f"[Chat] Redis seq counter failed: {exc}")
+        # Fallback to timestamp-based seq (not perfect but won't crash)
+        import time
+        return int(time.time() * 1000) % 1000000
+
+
+async def _redis_next_chunk(disaster_id: str) -> int:
+    """Atomically increment and return chunk counter from Redis."""
+    try:
+        r = await _get_redis()
+        try:
+            return await r.incr(_chunk_key(disaster_id))
+        finally:
+            await r.aclose()
+    except Exception as exc:
+        logger.error(f"[Chat] Redis chunk counter failed: {exc}")
+        return 1
+
+
+async def _redis_publish(disaster_id: str, payload: Dict[str, Any]) -> None:
+    """Publish a message to the Redis Pub/Sub channel for this disaster."""
+    try:
+        r = await _get_redis()
+        try:
+            await r.publish(
+                _pubsub_channel(disaster_id),
+                json.dumps(payload, default=str)
+            )
+        finally:
+            await r.aclose()
+    except Exception as exc:
+        logger.error(f"[Chat] Redis publish failed for {disaster_id}: {exc}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Redis Pub/Sub listener — one per disaster room
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _chat_redis_listener(disaster_id: str) -> None:
+    """
+    Background task: subscribes to the Redis Pub/Sub channel for a disaster
+    and broadcasts received messages to all locally connected WebSocket clients.
+
+    This is what makes cross-device / cross-process messaging work:
+      - Device A on Pod 1 publishes to Redis channel
+      - This listener on Pod 2 receives it and sends to Device B
+    """
+    logger.info(f"[Chat] Redis listener starting for disaster {disaster_id}")
+    channel = _pubsub_channel(disaster_id)
+
+    while True:
+        client = None
+        try:
+            client = aioredis.from_url(
+                REDIS_URL,
+                decode_responses=True,
+                socket_keepalive=True,
+                socket_connect_timeout=5,
+                health_check_interval=30,
+            )
+            pubsub = client.pubsub()
+            await pubsub.subscribe(channel)
+            logger.info(f"[Chat] Subscribed to Redis channel: {channel}")
+
+            async for raw in pubsub.listen():
+                # Stop if room is empty
+                if not _chat_rooms.get(disaster_id):
+                    logger.info(f"[Chat] Room {disaster_id} empty — stopping Redis listener")
+                    break
+
+                if raw is None or raw.get("type") != "message":
+                    continue
+
+                try:
+                    payload = json.loads(raw["data"])
+                except (json.JSONDecodeError, TypeError):
+                    continue
+
+                # Broadcast to all locally connected WebSocket clients
+                await _local_broadcast(disaster_id, payload)
+
+        except asyncio.CancelledError:
+            logger.info(f"[Chat] Redis listener cancelled for {disaster_id}")
+            if client:
+                try:
+                    await asyncio.wait_for(client.aclose(), timeout=2.0)
+                except Exception:
+                    pass
+            return
+        except Exception as exc:
+            logger.error(f"[Chat] Redis listener error for {disaster_id}: {exc} — retrying in 3s")
+            await asyncio.sleep(3)
+        finally:
+            if client:
+                try:
+                    await asyncio.wait_for(client.aclose(), timeout=2.0)
+                except Exception:
+                    pass
+
+        # Room is empty — clean up and stop
+        if not _chat_rooms.get(disaster_id):
+            break
+
+    _chat_listeners.pop(disaster_id, None)
+    logger.info(f"[Chat] Redis listener stopped for disaster {disaster_id}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Local broadcast (to WebSocket clients connected to THIS process)
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _local_broadcast(disaster_id: str, payload: Dict[str, Any]) -> None:
+    """Send payload to every WebSocket client connected to this process."""
+    room = _chat_rooms.get(disaster_id, {})
+    dead: Set[str] = set()
+
+    for conn_id, client in room.items():
+        try:
+            await client["ws"].send_text(json.dumps(payload, default=str))
+        except Exception:
+            dead.add(conn_id)
+
+    for conn_id in dead:
+        room.pop(conn_id, None)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -137,69 +409,79 @@ async def _is_assigned_to_disaster(
     return result.first() is not None
 
 
-async def _get_latest_chunk_number(db: AsyncSession, disaster_id: str) -> int:
+async def _fetch_history(
+    db: AsyncSession, disaster_id: str, limit: int = 50
+) -> List[Dict[str, Any]]:
     """
-    FIX 5: accepts db param — no new session created.
-    Query DB for the latest chunk number for this disaster.
+    Fetch complete history:
+    1. DB chunks (already flushed — persistent)
+    2. Redis buffer (recent unflushed — shared across all processes)
+    Combines both and returns last N messages.
     """
+    # 1. From DB chunks
     result = await db.execute(
         text("""
-            SELECT COALESCE(MAX(chunk_number), 0) as max_chunk
+            SELECT messages, chunk_number
             FROM disaster_chat_sessions
             WHERE disaster_id = :disaster_id
+            ORDER BY chunk_number ASC
         """),
         {"disaster_id": disaster_id},
     )
-    row = result.mappings().first()
-    return int(row["max_chunk"]) if row else 0
+    rows = result.mappings().all()
 
+    all_messages = []
+    for row in rows:
+        chunk_messages = row["messages"]
+        if isinstance(chunk_messages, str):
+            chunk_messages = json.loads(chunk_messages)
+        for msg in chunk_messages:
+            msg["type"] = "message"
+            msg["disaster_id"] = disaster_id
+            all_messages.append(msg)
 
-async def _get_latest_seq(db: AsyncSession, disaster_id: str) -> int:
-    """
-    FIX 5: accepts db param — no new session created.
-    FIX 3: adds +10 safety buffer to avoid duplicate seq on restart.
-    """
-    result = await db.execute(
-        text("""
-            SELECT COALESCE(MAX(to_seq), 0) as max_seq
-            FROM disaster_chat_sessions
-            WHERE disaster_id = :disaster_id
-        """),
-        {"disaster_id": disaster_id},
-    )
-    row = result.mappings().first()
-    db_seq = int(row["max_seq"]) if row else 0
-    # FIX 3: +10 buffer — if server crashed with buffered unsaved messages,
-    # those messages had seq numbers after db_seq. Adding a buffer ensures
-    # new messages get higher seq numbers and never conflict.
-    return db_seq 
+    # 2. From Redis buffer (unflushed messages — visible to ALL devices)
+    buffered = await _redis_get_buffer(disaster_id)
+    for msg in buffered:
+        m = dict(msg)
+        m["type"] = "message"
+        m["disaster_id"] = disaster_id
+        all_messages.append(m)
+
+    return all_messages[-limit:]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Bulk flush
+# Bulk flush — Redis buffer → PostgreSQL
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def _flush_buffer(disaster_id: str) -> None:
     """
-    Flush the message buffer for a disaster to DB as one new chunk.
-    Uses asyncio.Lock so only one flush runs at a time per disaster.
-    Retries up to MAX_RETRIES times on DB failure.
-    If all retries fail, messages are returned to buffer (not lost).
+    Flush the Redis buffer to DB as one new chunk.
+    Uses asyncio.Lock per disaster to prevent concurrent flushes.
+    Retries up to MAX_RETRIES on DB failure.
+    If all retries fail, pushes messages back to Redis (not lost).
     """
     async with _get_lock(disaster_id):
-        messages = _message_buffer.pop(disaster_id, [])
+        messages = await _redis_pop_buffer(disaster_id)
         if not messages:
             return
 
-        # FIX 1: enforce buffer cap — if somehow buffer exceeded MAX_BUFFER_SIZE,
-        # only flush first CHUNK_SIZE messages and put the rest back
+        # Hard cap — only flush CHUNK_SIZE at a time
         if len(messages) > CHUNK_SIZE:
             overflow = messages[CHUNK_SIZE:]
             messages = messages[:CHUNK_SIZE]
-            existing = _message_buffer.get(disaster_id, [])
-            _message_buffer[disaster_id] = overflow + existing
+            # Push overflow back to Redis
+            r = await _get_redis()
+            try:
+                pipe = r.pipeline()
+                for msg in overflow:
+                    pipe.lpush(_buffer_key(disaster_id), json.dumps(msg, default=str))
+                await pipe.execute()
+            finally:
+                await r.aclose()
 
-        chunk_number = _next_chunk(disaster_id)
+        chunk_number = await _redis_next_chunk(disaster_id)
         from_seq     = messages[0]["seq"]
         to_seq       = messages[-1]["seq"]
 
@@ -237,46 +519,32 @@ async def _flush_buffer(disaster_id: str) -> None:
                     f"for disaster {disaster_id}: {exc}"
                 )
                 if attempt < MAX_RETRIES - 1:
-                    await asyncio.sleep(2 ** attempt)  # 1s, 2s
+                    await asyncio.sleep(2 ** attempt)
                 else:
-                    # All retries failed — return messages to buffer
+                    # All retries failed — push messages back to Redis
                     logger.error(
-                        f"[Chat] All retries failed for disaster {disaster_id}. "
-                        f"Returning {len(messages)} messages to buffer."
+                        f"[Chat] All retries failed for {disaster_id}. "
+                        f"Returning {len(messages)} messages to Redis buffer."
                     )
-                    existing = _message_buffer.get(disaster_id, [])
-                    _message_buffer[disaster_id] = messages + existing
-                    # Rollback chunk counter since insert failed
-                    _chunk_counters[disaster_id] -= 1
+                    r = await _get_redis()
+                    try:
+                        pipe = r.pipeline()
+                        for msg in reversed(messages):  # preserve order
+                            pipe.lpush(_buffer_key(disaster_id), json.dumps(msg, default=str))
+                        await pipe.execute()
+                    except Exception as re:
+                        logger.error(f"[Chat] Failed to restore messages to Redis: {re}")
+                    finally:
+                        await r.aclose()
+                    # Rollback chunk counter
+                    try:
+                        r2 = await _get_redis()
+                        await r2.decr(_chunk_key(disaster_id))
+                        await r2.aclose()
+                    except Exception:
+                        pass
             finally:
                 await session.close()
-
-
-async def _add_to_buffer(disaster_id: str, msg: Dict[str, Any]) -> bool:
-    """
-    Add a message to the buffer.
-    FIX 1: Returns False if buffer is at MAX_BUFFER_SIZE (message rejected).
-    Triggers flush automatically when buffer hits CHUNK_SIZE.
-    """
-    if disaster_id not in _message_buffer:
-        _message_buffer[disaster_id] = []
-
-    # FIX 1: hard cap — reject message if buffer is full
-    if len(_message_buffer[disaster_id]) >= MAX_BUFFER_SIZE:
-        logger.error(
-            f"[Chat] Buffer full for disaster {disaster_id} "
-            f"({MAX_BUFFER_SIZE} messages) — message rejected"
-        )
-        return False
-
-    _message_buffer[disaster_id].append(msg)
-
-    # Flush immediately when chunk is full
-    if len(_message_buffer[disaster_id]) >= CHUNK_SIZE:
-        logger.info(f"[Chat] Buffer full for disaster {disaster_id} — flushing chunk")
-        asyncio.create_task(_flush_buffer(disaster_id))
-
-    return True
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -285,87 +553,23 @@ async def _add_to_buffer(disaster_id: str, msg: Dict[str, Any]) -> bool:
 
 async def _periodic_flush_task(disaster_id: str) -> None:
     """
-    FIX 2: Only one task ever runs per disaster.
-    Tracked via _periodic_running dict.
-    Stops when room is empty and cleans up the guard flag.
+    Flush buffer every FLUSH_INTERVAL seconds while room has users.
+    Guard prevents duplicate tasks per disaster per process.
     """
     try:
         while True:
             await asyncio.sleep(FLUSH_INTERVAL)
 
-            # Stop if no one is connected anymore
             if not _chat_rooms.get(disaster_id):
                 logger.info(f"[Chat] Periodic flush stopping — room {disaster_id} empty")
                 break
 
-            buffer_size = len(_message_buffer.get(disaster_id, []))
-            if buffer_size >= 5:  # only flush if at least 10 messages
-                logger.info(f"[Chat] Periodic flush for disaster {disaster_id} ({buffer_size} messages)")
+            buffer_len = await _redis_buffer_len(disaster_id)
+            if buffer_len > 0:
+                logger.info(f"[Chat] Periodic flush for disaster {disaster_id} ({buffer_len} messages)")
                 await _flush_buffer(disaster_id)
-            elif buffer_size > 0:
-                logger.info(f"[Chat] Periodic flush skipped — only {buffer_size} messages, waiting for more")
     finally:
-        # FIX 2: always clear guard so next connect can start a new task
         _periodic_running.pop(disaster_id, None)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# History fetch
-# ─────────────────────────────────────────────────────────────────────────────
-
-async def _fetch_history(
-    db: AsyncSession, disaster_id: str, limit: int = 50
-) -> List[Dict[str, Any]]:
-    """Fetch message history combining all DB chunks + in-memory buffer."""
-    result = await db.execute(
-        text("""
-            SELECT messages, chunk_number
-            FROM disaster_chat_sessions
-            WHERE disaster_id = :disaster_id
-            ORDER BY chunk_number ASC
-        """),
-        {"disaster_id": disaster_id},
-    )
-    rows = result.mappings().all()
-
-    all_messages = []
-    for row in rows:
-        chunk_messages = row["messages"]
-        if isinstance(chunk_messages, str):
-            chunk_messages = json.loads(chunk_messages)
-        for msg in chunk_messages:
-            msg["type"] = "message"
-            msg["disaster_id"] = disaster_id
-            all_messages.append(msg)
-
-    # Include messages still in buffer (not yet flushed to DB)
-    buffered = _message_buffer.get(disaster_id, [])
-    for msg in buffered:
-        m = dict(msg)
-        m["type"] = "message"
-        m["disaster_id"] = disaster_id
-        all_messages.append(m)
-
-    return all_messages[-limit:]
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Broadcast
-# ─────────────────────────────────────────────────────────────────────────────
-
-async def _broadcast(disaster_id: str, payload: Dict[str, Any]) -> None:
-    """Send payload to every connected client in the disaster's chat room."""
-    room = _chat_rooms.get(disaster_id, {})
-    dead: Set[str] = set()
-
-    for conn_id, client in room.items():
-        try:
-            await client["ws"].send_text(json.dumps(payload, default=str))
-        except Exception:
-            dead.add(conn_id)
-
-    for conn_id in dead:
-        room.pop(conn_id, None)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -375,7 +579,7 @@ async def _broadcast(disaster_id: str, payload: Dict[str, Any]) -> None:
 @router.websocket("/ws/chat/{disaster_id}")
 async def chat_websocket(disaster_id: str, websocket: WebSocket) -> None:
     """
-    Group chat WebSocket for a specific disaster.
+    Group chat WebSocket. Works across devices and networks via Redis.
 
     Connect:
       ws://host/api/v1/ws/chat/{disaster_id}?token=<JWT>
@@ -384,12 +588,12 @@ async def chat_websocket(disaster_id: str, websocket: WebSocket) -> None:
       { "type": "history", "messages": [...last 50...], "count": N }
 
     Send:
-      { "message": "Fire is spreading to east wing" }
+      { "message": "Fire contained on north side" }
 
     Receive:
-      { "type": "message", "seq": 47, "sender_name": "...", ... }
+      { "type": "message", "seq": 1, "sender_name": "...", ... }
       { "type": "system",  "message": "John joined the chat" }
-      { "type": "error",   "message": "Chat is closed" }
+      { "type": "error",   "message": "..." }
       { "type": "ping" }
     """
 
@@ -420,10 +624,13 @@ async def chat_websocket(disaster_id: str, websocket: WebSocket) -> None:
             return
 
         if disaster_status not in ("ACTIVE", "MONITORING"):
-            await websocket.close(
-                code=4009,
-                reason=f"Chat is closed — disaster is {disaster_status}. Use history endpoint.",
-            )
+            await websocket.accept()
+            await websocket.send_text(json.dumps({
+                "type":    "error",
+                "code":    4009,
+                "message": f"Chat is closed — disaster is {disaster_status}. Use history endpoint.",
+            }))
+            await websocket.close(code=4009)
             return
 
         sender_info = await _get_sender_info(db, user_id)
@@ -444,22 +651,13 @@ async def chat_websocket(disaster_id: str, websocket: WebSocket) -> None:
                 return
 
         sender_type = "admin" if is_admin else "unit"
-
-        # FIX 3+5: Restore counters from DB if not in memory
-        # (handles server restart — uses same db session, no new connection)
-        if disaster_id not in _seq_counters:
-            _seq_counters[disaster_id] = await _get_latest_seq(db, disaster_id)
-        if disaster_id not in _chunk_counters:
-            _chunk_counters[disaster_id] = await _get_latest_chunk_number(db, disaster_id)
-
-        history = await _fetch_history(db, disaster_id, limit=50)
+        history     = await _fetch_history(db, disaster_id, limit=50)
 
     # ── 3. Accept and register ────────────────────────────────────────────────
     await websocket.accept()
 
     conn_id = str(uuid.uuid4())
     room    = _get_room(disaster_id)
-
     room[conn_id] = {
         "ws":          websocket,
         "user_id":     user_id,
@@ -472,11 +670,16 @@ async def chat_websocket(disaster_id: str, websocket: WebSocket) -> None:
         f"Room size: {len(room)}"
     )
 
-    # FIX 2: Only start periodic task if NOT already running for this disaster
+    # Start Redis listener for this disaster (once per process)
+    if disaster_id not in _chat_listeners or _chat_listeners[disaster_id].done():
+        task = asyncio.create_task(_chat_redis_listener(disaster_id))
+        _chat_listeners[disaster_id] = task
+        logger.info(f"[Chat] Started Redis listener for disaster {disaster_id}")
+
+    # Start periodic flush task (once per process per disaster)
     if not _periodic_running.get(disaster_id):
         _periodic_running[disaster_id] = True
         asyncio.create_task(_periodic_flush_task(disaster_id))
-        logger.info(f"[Chat] Started periodic flush task for disaster {disaster_id}")
 
     try:
         # ── 4. Send history on connect ────────────────────────────────────────
@@ -487,13 +690,14 @@ async def chat_websocket(disaster_id: str, websocket: WebSocket) -> None:
             "messages":    history,
         }, default=str))
 
-        # Notify others
-        await _broadcast(disaster_id, {
+        # Notify others via Redis Pub/Sub (reaches all devices)
+        join_msg = {
             "type":        "system",
             "disaster_id": disaster_id,
             "message":     f"{sender_name} joined the chat",
             "sent_at":     datetime.utcnow().isoformat(),
-        })
+        }
+        await _redis_publish(disaster_id, join_msg)
 
         # ── 5. Message loop ───────────────────────────────────────────────────
         while True:
@@ -532,8 +736,18 @@ async def chat_websocket(disaster_id: str, websocket: WebSocket) -> None:
                 }))
                 continue
 
+            # Check buffer size
+            buf_len = await _redis_buffer_len(disaster_id)
+            if buf_len >= MAX_BUFFER_SIZE:
+                await websocket.send_text(json.dumps({
+                    "type":    "error",
+                    "message": "Server buffer is full. Please wait.",
+                }))
+                continue
+
+            # Build message with Redis sequence number
             msg_id  = str(uuid.uuid4())
-            seq     = _next_seq(disaster_id)
+            seq     = await _redis_next_seq(disaster_id)
             sent_at = datetime.utcnow().isoformat()
 
             msg = {
@@ -546,17 +760,17 @@ async def chat_websocket(disaster_id: str, websocket: WebSocket) -> None:
                 "sent_at":     sent_at,
             }
 
-            # FIX 1: check if buffer accepted the message
-            accepted = await _add_to_buffer(disaster_id, msg)
-            if not accepted:
-                await websocket.send_text(json.dumps({
-                    "type":    "error",
-                    "message": "Server buffer is full. Message not saved. Please wait.",
-                }))
-                continue
+            # Push to Redis buffer (shared across all processes)
+            await _redis_push_message(disaster_id, msg)
 
-            # Broadcast immediately (before DB flush)
-            await _broadcast(disaster_id, {
+            # Check if buffer should be flushed
+            new_buf_len = await _redis_buffer_len(disaster_id)
+            if new_buf_len >= CHUNK_SIZE:
+                logger.info(f"[Chat] Buffer full ({new_buf_len}) for disaster {disaster_id} — flushing")
+                asyncio.create_task(_flush_buffer(disaster_id))
+
+            # Publish to Redis Pub/Sub — delivers to ALL devices
+            await _redis_publish(disaster_id, {
                 **msg,
                 "type":        "message",
                 "disaster_id": disaster_id,
@@ -569,17 +783,19 @@ async def chat_websocket(disaster_id: str, websocket: WebSocket) -> None:
     finally:
         room.pop(conn_id, None)
 
-        # Last user left → flush remaining buffer immediately
+        # Last user left → flush remaining buffer
         if not _chat_rooms.get(disaster_id):
             _chat_rooms.pop(disaster_id, None)
-            if _message_buffer.get(disaster_id):
+            buf_len = await _redis_buffer_len(disaster_id)
+            if buf_len > 0:
                 logger.info(
-                    f"[Chat] Last user left disaster {disaster_id} — flushing remaining buffer"
+                    f"[Chat] Last user left disaster {disaster_id} — "
+                    f"flushing {buf_len} buffered messages"
                 )
                 await _flush_buffer(disaster_id)
 
-        # Notify others
-        await _broadcast(disaster_id, {
+        # Publish leave notification
+        await _redis_publish(disaster_id, {
             "type":        "system",
             "disaster_id": disaster_id,
             "message":     f"{sender_name} left the chat",
@@ -607,9 +823,9 @@ async def get_chat_history(
     current_user: Dict[str, Any] = Depends(get_current_team_member),
 ):
     """
-    Fetch chat history for a disaster.
+    Fetch chat history (DB chunks + Redis buffer).
     Works for ALL disaster statuses including RESOLVED.
-    ADMIN/MANAGER → any disaster. STAFF → only assigned disasters.
+    ADMIN/MANAGER → any disaster. STAFF → only assigned.
     """
     user_id = current_user["user_id"]
 
@@ -641,4 +857,3 @@ async def get_chat_history(
         "total_messages":  len(messages),
         "messages":        messages,
     }
-    
