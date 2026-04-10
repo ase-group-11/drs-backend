@@ -257,6 +257,11 @@ app.include_router(user_management_router,     prefix="/api/v1")  # /users/*
 # ── Real-time notifications ───────────────────────────────────────────────────
 app.include_router(notifications_router,       prefix="/api/v1")  # /ws/notifications
 
+# ── Dev-only seed endpoint (never registered in production) ──────────────────
+if settings.ENVIRONMENT != "production":
+    from app.api.v1 import dev_seed
+    app.include_router(dev_seed.router, prefix="/api/v1")  # /dev/seed
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Utility endpoints
