@@ -4,7 +4,7 @@ metadata:
   name: drs-api
   namespace: drs
 spec:
-  replicas: 3
+  replicas: 2  # reduced from 3 — 2 vCPU VM, HPA scales up to 6 under load
   revisionHistoryLimit: 2
   strategy:
     type: RollingUpdate
@@ -60,7 +60,7 @@ metadata:
   name: drs-consumer
   namespace: drs
 spec:
-  replicas: 2
+  replicas: 1  # reduced from 2 — single consumer is sufficient, HPA handles load
   revisionHistoryLimit: 2
   strategy:
     type: RollingUpdate
@@ -116,7 +116,7 @@ metadata:
   name: drs-celery-worker
   namespace: drs
 spec:
-  replicas: 2
+  replicas: 1  # reduced from 2 — single worker handles evaluation tasks fine on 2 vCPU
   revisionHistoryLimit: 2
   strategy:
     type: RollingUpdate
@@ -205,7 +205,7 @@ spec:
     apiVersion: apps/v1
     kind: Deployment
     name: drs-api
-  minReplicas: 3
+  minReplicas: 2
   maxReplicas: 6
   metrics:
   - type: Resource
@@ -232,7 +232,7 @@ spec:
     apiVersion: apps/v1
     kind: Deployment
     name: drs-consumer
-  minReplicas: 2
+  minReplicas: 1
   maxReplicas: 4
   metrics:
   - type: Resource

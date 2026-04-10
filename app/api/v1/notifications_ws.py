@@ -47,6 +47,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Optional, Set
 
@@ -249,7 +250,9 @@ async def redis_listener() -> None:
                 logger.debug(f"Redis listener timeout (keepalive reconnect) — retrying in 3s")
             else:
                 logger.error(f"Redis listener error: {exc} — retrying in 3s")
-            await asyncio.sleep(3)
+            # Jitter prevents all pods reconnecting simultaneously after a
+            # rolling deploy, which would cause a Redis connection storm.
+            await asyncio.sleep(3 + random.uniform(0, 5))
         finally:
             if client:
                 try:
