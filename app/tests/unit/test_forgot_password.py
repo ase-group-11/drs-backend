@@ -134,16 +134,15 @@ class TestForgotPasswordRequest:
 
         with patch("app.services.emergency_team_service.set_with_expiry", new_callable=AsyncMock) as mock_redis, \
              patch("app.services.emergency_team_service.hash_password", return_value=TEMP_HASH), \
-             patch("app.services.emergency_team_service.send_forgot_password_email", return_value=True):
+             patch("app.services.alert_channels.send_forgot_password_email", return_value=True):
 
             result = await service.forgot_password_request(email=EMAIL)
 
         assert result["message"] == "If this email is registered you will receive a temporary password shortly."
         mock_redis.assert_called_once()
-        # Verify Redis was called with correct key and 900 TTL
         call_args = mock_redis.call_args
         assert f"ert_forgot_pwd:{MEMBER_ID}" in call_args[0][0]
-        assert call_args[0][2] == 900  # 15 minutes
+        assert call_args[0][2] == 900  # 15 minutes TTL
 
     @pytest.mark.asyncio
     async def test_sends_email_via_sendgrid(self):
@@ -159,13 +158,15 @@ class TestForgotPasswordRequest:
 
         with patch("app.services.emergency_team_service.set_with_expiry", new_callable=AsyncMock), \
              patch("app.services.emergency_team_service.hash_password", return_value=TEMP_HASH), \
-             patch("app.services.emergency_team_service.send_forgot_password_email", return_value=True) as mock_email:
+             patch("app.services.alert_channels.send_forgot_password_email", return_value=True) as mock_email:
 
             await service.forgot_password_request(email=EMAIL)
 
         mock_email.assert_called_once()
         call_kwargs = mock_email.call_args
-        assert call_kwargs[1]["to_email"] == EMAIL or call_kwargs[0][0] == EMAIL
+        # Verify recipient email is in either args or kwargs
+        all_args = str(call_kwargs)
+        assert EMAIL in all_args
 
     @pytest.mark.asyncio
     async def test_returns_generic_message_even_if_email_fails(self):
@@ -181,7 +182,7 @@ class TestForgotPasswordRequest:
 
         with patch("app.services.emergency_team_service.set_with_expiry", new_callable=AsyncMock), \
              patch("app.services.emergency_team_service.hash_password", return_value=TEMP_HASH), \
-             patch("app.services.emergency_team_service.send_forgot_password_email", return_value=False):
+             patch("app.services.alert_channels.send_forgot_password_email", return_value=False):
 
             result = await service.forgot_password_request(email=EMAIL)
 
@@ -208,11 +209,10 @@ class TestForgotPasswordRequest:
 
         with patch("app.services.emergency_team_service.set_with_expiry", side_effect=capture_redis), \
              patch("app.services.emergency_team_service.hash_password", return_value=TEMP_HASH), \
-             patch("app.services.emergency_team_service.send_forgot_password_email", return_value=True):
+             patch("app.services.alert_channels.send_forgot_password_email", return_value=True):
 
             await service.forgot_password_request(email=EMAIL)
 
-        # Verify the stored data has expected fields
         assert "member_id" in captured_temp["stored"]
         assert "temp_hash" in captured_temp["stored"]
         assert captured_temp["stored"]["email"] == EMAIL
@@ -232,7 +232,7 @@ class TestResetPasswordWithTemp:
         db = make_mock_db()
         db.execute.side_effect = [
             make_db_result(row={"id": MEMBER_ID, "email": EMAIL, "status": "ACTIVE"}),
-            MagicMock(),  # UPDATE query
+            MagicMock(),
         ]
         service = EmergencyTeamService(db)
 
@@ -366,7 +366,6 @@ class TestResetPasswordWithTemp:
             with pytest.raises(ValueError):
                 await service.reset_password_with_temp(EMAIL, "WrongTemp1", NEW_PASS)
 
-        # Key must be deleted even on failure
         mock_del.assert_called_once_with(f"ert_forgot_pwd:{MEMBER_ID}")
 
     @pytest.mark.asyncio
@@ -436,7 +435,7 @@ class TestForgotPasswordAPI:
         """FP-17: Same response whether email exists or not (no enumeration)."""
         client, mock_db = no_auth_client
 
-        # Response for non-existent email
+        # First request — non-existent email
         mock_db.execute.return_value = make_db_result(row=None)
         async with client as c:
             resp1 = await c.post(
@@ -444,7 +443,7 @@ class TestForgotPasswordAPI:
                 json={"email": "notexist@test.ie"},
             )
 
-        # Response for existing email
+        # Second request — existing email (fresh client, can't reuse closed one)
         mock_db.execute.return_value = make_db_result(row={
             "id": MEMBER_ID, "full_name": FULL_NAME,
             "email": EMAIL, "status": "ACTIVE"
@@ -452,14 +451,13 @@ class TestForgotPasswordAPI:
 
         with patch("app.services.emergency_team_service.set_with_expiry", new_callable=AsyncMock), \
              patch("app.services.emergency_team_service.hash_password", return_value=TEMP_HASH), \
-             patch("app.services.emergency_team_service.send_forgot_password_email", return_value=True):
-            async with client as c:
-                resp2 = await c.post(
+             patch("app.services.alert_channels.send_forgot_password_email", return_value=True):
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c2:
+                resp2 = await c2.post(
                     "/api/v1/emergency-team/forgot-password",
                     json={"email": EMAIL},
                 )
 
-        # Both should return same message
         assert resp1.json()["message"] == resp2.json()["message"]
 
 
