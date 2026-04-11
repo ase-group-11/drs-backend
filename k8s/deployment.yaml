@@ -244,3 +244,89 @@ spec:
   behavior:
     scaleDown:
       stabilizationWindowSeconds: 120
+
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: drs-frontend
+  namespace: drs
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: drs-frontend
+  template:
+    metadata:
+      labels:
+        app: drs-frontend
+    spec:
+      imagePullSecrets:
+        - name: ghcr-secret
+      containers:
+        - name: drs-frontend
+          image: ghcr.io/ase-group-11/drs-frontend:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            failureThreshold: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: drs-frontend
+  namespace: drs
+spec:
+  selector:
+    app: drs-frontend
+  ports:
+    - port: 80
+      targetPort: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: drs-ingress
+  namespace: drs
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+spec:
+  rules:
+    - host: drs-ie.duckdns.org
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: drs-api
+                port:
+                  number: 8000
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: drs-frontend
+                port:
+                  number: 80
