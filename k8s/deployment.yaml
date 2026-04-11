@@ -312,6 +312,10 @@ metadata:
     traefik.ingress.kubernetes.io/router.entrypoints: websecure
     traefik.ingress.kubernetes.io/router.tls: "true"
 spec:
+  tls:
+    - hosts:
+        - drs-ie.duckdns.org
+      secretName: drs-tls
   rules:
     - host: drs-ie.duckdns.org
       http:
@@ -330,3 +334,4 @@ spec:
                 name: drs-frontend
                 port:
                   number: 80
+
