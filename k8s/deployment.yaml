@@ -54,6 +54,20 @@ spec:
           failureThreshold: 3
           timeoutSeconds: 10
 ---
+apiVersion: v1
+kind: Service
+metadata:
+  name: drs-api
+  namespace: drs
+spec:
+  type: NodePort
+  selector:
+    app: drs-api
+  ports:
+    - port: 8000
+      targetPort: 8000
+      nodePort: 30333
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -108,7 +122,6 @@ spec:
           periodSeconds: 30
           failureThreshold: 3
           timeoutSeconds: 10
----
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -244,8 +257,6 @@ spec:
   behavior:
     scaleDown:
       stabilizationWindowSeconds: 120
-
-
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -309,7 +320,7 @@ metadata:
   name: drs-ingress
   namespace: drs
   annotations:
-    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.entrypoints: web,websecure
     traefik.ingress.kubernetes.io/router.tls: "true"
 spec:
   tls:
@@ -327,6 +338,27 @@ spec:
                 name: drs-api
                 port:
                   number: 8000
+          - path: /health
+            pathType: Prefix
+            backend:
+              service:
+                name: drs-api
+                port:
+                  number: 8000
+          - path: /docs
+            pathType: Prefix
+            backend:
+              service:
+                name: drs-api
+                port:
+                  number: 8000
+          - path: /openapi.json
+            pathType: Prefix
+            backend:
+              service:
+                name: drs-api
+                port:
+                  number: 8000
           - path: /
             pathType: Prefix
             backend:
@@ -334,4 +366,3 @@ spec:
                 name: drs-frontend
                 port:
                   number: 80
-
