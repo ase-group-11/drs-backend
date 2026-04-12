@@ -79,10 +79,14 @@ jobs:
               --dry-run=client -o yaml | \
             KUBECONFIG=/home/azureuser/.kube/config kubectl apply -f -
           "
-          
+
       - name: Rolling deploy to K3s
         run: |
           ssh -o StrictHostKeyChecking=no ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} "
+            # Apply full deployment config (deployments + HPA)
+            KUBECONFIG=/home/azureuser/.kube/config kubectl apply -f ~/drs-app/backend/k8s/deployment.yaml
+
+            # Update image to new SHA
             KUBECONFIG=/home/azureuser/.kube/config kubectl set image deployment/drs-api \
               drs-api=ghcr.io/${{ github.repository_owner }}/drs-backend:${{ github.sha }} \
               -n drs
@@ -91,7 +95,15 @@ jobs:
               drs-consumer=ghcr.io/${{ github.repository_owner }}/drs-backend:${{ github.sha }} \
               -n drs
 
-            echo 'Deploy triggered successfully. Pods updating in background.'
+            KUBECONFIG=/home/azureuser/.kube/config kubectl set image deployment/drs-celery-worker \
+              drs-celery-worker=ghcr.io/${{ github.repository_owner }}/drs-backend:${{ github.sha }} \
+              -n drs
+
+            KUBECONFIG=/home/azureuser/.kube/config kubectl set image deployment/drs-celery-beat \
+              drs-celery-beat=ghcr.io/${{ github.repository_owner }}/drs-backend:${{ github.sha }} \
+              -n drs
+
+            echo 'Deploy triggered successfully. Pods updating in background'
           "
 
       - name: Verify K3s pods

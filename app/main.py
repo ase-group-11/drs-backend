@@ -257,8 +257,13 @@ app.include_router(user_management_router,     prefix="/api/v1")  # /users/*
 
 # ── Real-time notifications ───────────────────────────────────────────────────
 app.include_router(notifications_router,       prefix="/api/v1")  # /ws/notifications
-
 app.include_router(chat.router,                prefix="/api/v1")  # /ws/chat/{disaster_id}, /chat/{disaster_id}/history
+
+# ── Dev-only seed endpoint (never registered in production) ──────────────────
+if settings.ENVIRONMENT != "production":
+    from app.api.v1 import dev_seed
+    app.include_router(dev_seed.router, prefix="/api/v1")  # /dev/seed
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Utility endpoints
@@ -283,18 +288,97 @@ async def root():
     }
 
 
-@app.get(
-    "/health",
-    tags=["Root"],
-    summary="Health Check",
-    description="Check status of all major subsystems"
-)
-async def health_check():
-    """
-    Returns health status.
-    """
+# @app.get(
+#     "/health",
+#     tags=["Root"],
+#     summary="Health Check",
+#     description="Check status of all major subsystems"
+# )
+# async def health_check():
+#     """
+#     Returns health status.
+#     """
+#     return {"status": "ok"}
+
+
+@app.get("/health/live", tags=["Health"], include_in_schema=False)
+async def liveness():
+    """Kubernetes liveness probe — just proves the process is alive."""
     return {"status": "ok"}
 
+@app.get(
+    "/health/ready",
+    tags=["Health"],
+    summary="Readiness Check",
+    description="Check status of all major subsystems"
+)
+async def readiness_check():
+    """
+    Kubernetes readiness probe — proves the app can serve traffic.
+    Uses the existing connection pool (no new connections opened).
+    Returns 503 if any critical dependency is unhealthy.
+    """
+    import time
+    from sqlalchemy import text
 
+    health = {
+        "status": "ok",
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "services": {}
+    }
+
+    # ── PostgreSQL — reuse pool, don't open a new session ─────────
+    try:
+        from app.db.session import async_session_factory
+        async with async_session_factory() as session:
+            await asyncio.wait_for(session.scalar(text("SELECT 1")), timeout=3.0)
+        health["services"]["postgresql"] = {"status": "ok"}
+    except asyncio.TimeoutError:
+        health["services"]["postgresql"] = {"status": "error", "detail": "timeout"}
+        health["status"] = "degraded"
+    except Exception as e:
+        health["services"]["postgresql"] = {"status": "error", "detail": str(e)}
+        health["status"] = "degraded"
+
+    # ── Redis ─────────────────────────────────────────────────────
+    try:
+        from cache.redis_client import check_redis_health
+        redis_health = await check_redis_health()
+        health["services"]["redis"] = redis_health
+        if redis_health.get("status") != "healthy":
+            health["status"] = "degraded"
+    except Exception as e:
+        health["services"]["redis"] = {"status": "error", "detail": str(e)}
+        health["status"] = "degraded"
+
+    # ── RabbitMQ — connection state check only, no new connection ─
+    try:
+        publisher = get_publisher()
+        if publisher.is_connected:
+            health["services"]["rabbitmq"] = {"status": "ok"}
+        else:
+            # Degraded but not critical — app still functions without it
+            health["services"]["rabbitmq"] = {"status": "degraded", "detail": "not connected"}
+    except Exception as e:
+        health["services"]["rabbitmq"] = {"status": "error", "detail": str(e)}
+
+    # ── TomTom ────────────────────────────────────────────────────
+    try:
+        from app.providers.integration_service import get_integration_service
+        integration = get_integration_service()
+        circuit_state = str(integration.circuit_breaker.current_state)
+        health["services"]["tomtom"] = {
+            "status": "ok" if circuit_state == "closed" else "degraded",
+            "circuit_breaker": circuit_state
+        }
+    except Exception as e:
+        health["services"]["tomtom"] = {"status": "error", "detail": str(e)}
+
+    # Only PostgreSQL is truly critical for readiness
+    if health["services"].get("postgresql", {}).get("status") != "ok":
+        from fastapi import Response
+        return JSONResponse(status_code=503, content=health)
+
+    return health
 
 socket_app = socketio.ASGIApp(sio, other_asgi_app = app)

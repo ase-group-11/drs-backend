@@ -4,7 +4,13 @@ metadata:
   name: drs-api
   namespace: drs
 spec:
-  replicas: 3
+  replicas: 2  # reduced from 3 — 2 vCPU VM, HPA scales up to 6 under load
+  revisionHistoryLimit: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   selector:
     matchLabels:
       app: drs-api
@@ -13,9 +19,11 @@ spec:
       labels:
         app: drs-api
     spec:
+      imagePullSecrets:
+        - name: ghcr-secret
       containers:
       - name: drs-api
-        image: drs-backend:latest
+        image: ghcr.io/ase-group-11/drs-backend:latest
         imagePullPolicy: Always
         ports:
         - containerPort: 8000
@@ -31,16 +39,34 @@ spec:
             memory: 512Mi
         livenessProbe:
           httpGet:
-            path: /health
+            path: /health/live   # instant, no I/O
             port: 8000
           initialDelaySeconds: 30
-          periodSeconds: 10
+          periodSeconds: 20
+          failureThreshold: 3
+          timeoutSeconds: 5
         readinessProbe:
           httpGet:
-            path: /health
+            path: /health/ready  # DB check, but much less frequent
             port: 8000
-          initialDelaySeconds: 15
-          periodSeconds: 5
+          initialDelaySeconds: 30
+          periodSeconds: 600       # was 10 — less DB load
+          failureThreshold: 3
+          timeoutSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: drs-api
+  namespace: drs
+spec:
+  type: NodePort
+  selector:
+    app: drs-api
+  ports:
+    - port: 8000
+      targetPort: 8000
+      nodePort: 30333
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -48,7 +74,13 @@ metadata:
   name: drs-consumer
   namespace: drs
 spec:
-  replicas: 1
+  replicas: 1  # reduced from 2 — single consumer is sufficient, HPA handles load
+  revisionHistoryLimit: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   selector:
     matchLabels:
       app: drs-consumer
@@ -57,9 +89,11 @@ spec:
       labels:
         app: drs-consumer
     spec:
+      imagePullSecrets:
+        - name: ghcr-secret
       containers:
       - name: drs-consumer
-        image: drs-backend:latest
+        image: ghcr.io/ase-group-11/drs-backend:latest
         imagePullPolicy: Always
         command: ["python", "-m", "app.consumers.notification_consumer"]
         envFrom:
@@ -72,3 +106,264 @@ spec:
           limits:
             cpu: 300m
             memory: 256Mi
+        livenessProbe:
+          exec:
+            command:
+            - python
+            - -c
+            # Read the RabbitMQ URL from the env var that already exists in the pod
+            # instead of hardcoding amqp://localhost (which was always failing)
+            - |
+              import os, pika
+              url = os.environ.get('RABBITMQ_URL', os.environ.get('AMQP_URL', 'amqp://localhost'))
+              conn = pika.BlockingConnection(pika.URLParameters(url))
+              conn.close()
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          failureThreshold: 3
+          timeoutSeconds: 10
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: drs-celery-worker
+  namespace: drs
+spec:
+  replicas: 1  # reduced from 2 — single worker handles evaluation tasks fine on 2 vCPU
+  revisionHistoryLimit: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: drs-celery-worker
+  template:
+    metadata:
+      labels:
+        app: drs-celery-worker
+    spec:
+      imagePullSecrets:
+        - name: ghcr-secret
+      containers:
+      - name: drs-celery-worker
+        image: ghcr.io/ase-group-11/drs-backend:latest
+        imagePullPolicy: Always
+        command: ["celery", "-A", "app.workers.celery_app", "worker", "--loglevel=info", "--concurrency=2"]
+        envFrom:
+        - secretRef:
+            name: drs-secrets
+        resources:
+          requests:
+            cpu: 200m
+            memory: 256Mi
+          limits:
+            cpu: 600m
+            memory: 512Mi
+        livenessProbe:
+          exec:
+            command: ["celery", "-A", "app.workers.celery_app", "inspect", "ping", "--timeout", "5"]
+          initialDelaySeconds: 30
+          periodSeconds: 60
+          failureThreshold: 3
+          timeoutSeconds: 10
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: drs-celery-beat
+  namespace: drs
+spec:
+  # MUST be 1 — running multiple Beat instances causes duplicate task scheduling
+  replicas: 1
+  revisionHistoryLimit: 2
+  strategy:
+    # Recreate: ensures the old Beat pod is fully stopped before the new one starts.
+    # RollingUpdate would briefly run two Beat instances and fire duplicate tasks.
+    type: Recreate
+  selector:
+    matchLabels:
+      app: drs-celery-beat
+  template:
+    metadata:
+      labels:
+        app: drs-celery-beat
+    spec:
+      imagePullSecrets:
+        - name: ghcr-secret
+      containers:
+      - name: drs-celery-beat
+        image: ghcr.io/ase-group-11/drs-backend:latest
+        imagePullPolicy: Always
+        command: ["celery", "-A", "app.workers.celery_app", "beat", "--loglevel=info"]
+        envFrom:
+        - secretRef:
+            name: drs-secrets
+        resources:
+          requests:
+            cpu: 50m
+            memory: 128Mi
+          limits:
+            cpu: 200m
+            memory: 256Mi
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: drs-api
+  namespace: drs
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: drs-api
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 120  # default 300 — faster recovery after fix
+      policies:
+      - type: Percent
+        value: 50
+        periodSeconds: 60
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: drs-consumer
+  namespace: drs
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: drs-consumer
+  minReplicas: 1
+  maxReplicas: 4
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 120
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: drs-frontend
+  namespace: drs
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: drs-frontend
+  template:
+    metadata:
+      labels:
+        app: drs-frontend
+    spec:
+      imagePullSecrets:
+        - name: ghcr-secret
+      containers:
+        - name: drs-frontend
+          image: ghcr.io/ase-group-11/drs-frontend:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            failureThreshold: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: drs-frontend
+  namespace: drs
+spec:
+  selector:
+    app: drs-frontend
+  ports:
+    - port: 80
+      targetPort: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: drs-ingress
+  namespace: drs
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+
+spec:
+  tls:
+    - hosts:
+        - drs-ie.duckdns.org
+      secretName: drs-tls
+  rules:
+    - host: drs-ie.duckdns.org
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: drs-api
+                port:
+                  number: 8000
+          - path: /health
+            pathType: Prefix
+            backend:
+              service:
+                name: drs-api
+                port:
+                  number: 8000
+          - path: /docs
+            pathType: Prefix
+            backend:
+              service:
+                name: drs-api
+                port:
+                  number: 8000
+          - path: /openapi.json
+            pathType: Prefix
+            backend:
+              service:
+                name: drs-api
+                port:
+                  number: 8000
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: drs-frontend
+                port:
+                  number: 80

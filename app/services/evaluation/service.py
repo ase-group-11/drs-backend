@@ -285,6 +285,13 @@ class DisasterEvaluationService:
                     ],
                     "affected_facilities": affected_facilities or [],
                     "response_scale": response_scale,
+                    # Location fields for notification consumer geo-targeting and display.
+                    # _on_disaster_evaluated uses _latlon(data) for CRITICAL SMS targeting
+                    # and data.get("type")/data.get("location_address") for alert text.
+                    "lat": lat,
+                    "lon": lon,
+                    "location_address": report.get("location_address", ""),
+                    "type": report.get("disaster_type", ""),
                 })
             except Exception:
                 logger.exception(

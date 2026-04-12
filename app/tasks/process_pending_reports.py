@@ -37,7 +37,12 @@ from app.providers.traffic import TrafficProvider
 from app.repositories.disaster_repository import DisasterRepository
 from app.repositories.disaster_report_repository import DisasterReportRepository
 from app.repositories.user_repository import UserRepository
-from app.services.evaluation.downstream import NoopCoordinationClient, NoopRerouteClient, HttpRerouteClient
+from app.services.evaluation.downstream import (
+    DirectCoordinationClient,
+    HttpRerouteClient,
+    NoopCoordinationClient,
+    NoopRerouteClient,
+)
 from app.services.evaluation.enrichment import EnrichmentPipeline, OpenWeatherMapProvider
 from app.services.evaluation.service import DisasterEvaluationService
 from app.services.live_map_service import LiveMapService
@@ -120,8 +125,14 @@ async def process_pending_reports(
                         tomtom_api_key=settings.TRAFFIC_API_KEY,
                     ),
                     user_repo=UserRepository(db),
-                    coordination_client=NoopCoordinationClient(),
-                    reroute_client=NoopRerouteClient(),  # reroute triggered manually by operator
+                    # DirectCoordinationClient: auto-dispatches nearest units and triggers
+                    # evacuation for CRITICAL events. Uses the same DB session so it can
+                    # read the committed disaster record (service.evaluate() commits before
+                    # calling _dispatch_downstream).
+                    coordination_client=DirectCoordinationClient(db),
+                    # HttpRerouteClient: calls POST /api/v1/reroute/trigger for events
+                    # where road_blocked=True or severity >= HIGH. Fire-and-forget.
+                    reroute_client=HttpRerouteClient(base_url=settings.REROUTE_SERVICE_URL),
                 )
 
                 result = await service.evaluate(report_id)

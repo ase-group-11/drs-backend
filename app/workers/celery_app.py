@@ -22,12 +22,17 @@ celery_app.conf.update(
     beat_schedule={
         "monitor-traffic-conditions": {
             "task": "app.workers.tasks.monitor_traffic_conditions",
-            "schedule": 30.0,
+            # Was 30s (2,880 calls/day per active region — exceeds TomTom free tier
+            # of 2,500 non-tile requests). 300s = ~288 calls/day, fits 2 concurrent
+            # active disasters within the free tier limit.
+            "schedule": 300.0,
             "args": [],
         },
         "warm-traffic-cache": {
             "task": "app.workers.tasks.warm_traffic_cache",
-            "schedule": 25.0,
+            # Runs 2s ahead of monitor so the cache is always warm when monitor fires.
+            # Was 25s — reduced in step with monitor to conserve TomTom API quota.
+            "schedule": 298.0,
             "args": [],
         },
         "auto-evaluate-pending-reports": {

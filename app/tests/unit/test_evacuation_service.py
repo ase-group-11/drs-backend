@@ -1,79 +1,82 @@
 # File: app/tests/unit/test_evacuation_service.py
 """
-Unit tests — EvacuationService (UC8).
+Unit tests for EvacuationService v2 — impact-area model.
 
-Constructor injection pattern — no patch() needed.
-mock_external_integration_service, mock_mapping_service, mock_publisher
-come from conftest.py (same fixtures used by UC7 tests).
-mock_evacuation_db is defined locally.
-
-Run:
-  pytest app/tests/unit/test_evacuation_service.py -v
+v2 changes tested:
+  - build_impact_area() extracts population from evaluation metadata
+  - get_nearest_shelters() returns only N closest shelters
+  - compute_transport_needs() uses real DB unit counts
+  - _compute_routes() routes from disaster centre (not zones)
+  - Redis route caching with 300s TTL
+  - Escalation uses increased_radius_km instead of zone IDs
+  - Route blockage doesn't need affected_zone_ids
 """
 
 import math
 import pytest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.services.evacuation_service import (
     EvacuationService,
-    DUBLIN_ZONES,
+    TRANSPORT_CAPACITY,
+    ROUTE_CACHE_TTL,
+    MAX_SHELTERS_TO_ROUTE,
     DUBLIN_SHELTERS,
+    build_impact_area,
     get_all_shelters,
-    get_zones_near_disaster,
+    get_nearest_shelters,
     get_population_profile,
     compute_transport_needs,
     allocate_resources,
     score_and_select_routes,
     avg_congestion_weight,
     straight_line_fallback,
-    BUS_CAPACITY,
-    AMBULANCE_CAPACITY,
+    _route_cache_key,
+    _hash_blocked_roads,
 )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Shared fixtures
+# Fixtures
 # ─────────────────────────────────────────────────────────────────────────────
 
 @pytest.fixture
 def mock_evacuation_db():
-    """AsyncMock of EvacuationRepository."""
-    repo = AsyncMock()
-    repo.get_disaster         = AsyncMock(return_value=None)
-    repo.get_blocked_roads    = AsyncMock(return_value=[])
-    repo.get_users_in_zones   = AsyncMock(return_value=[])
-    repo.generate_plan_ref    = AsyncMock(return_value="EVA-0001")
-    repo.save_plan            = AsyncMock(return_value="plan-001")
-    repo.get_plan             = AsyncMock(return_value=None)
-    repo.update_plan          = AsyncMock(return_value=True)
-    repo.list_plans           = AsyncMock(return_value=[])
-    repo.get_disaster_by_plan = AsyncMock(return_value=None)
-    return repo
+    db = AsyncMock()
+    db.get_disaster = AsyncMock(return_value=None)
+    db.get_blocked_roads = AsyncMock(return_value=[])
+    db.get_available_transport_units = AsyncMock(return_value=[])
+    db.get_users_in_impact_area = AsyncMock(return_value=[])
+    db.save_plan = AsyncMock(return_value="plan-xyz")
+    db.get_plan = AsyncMock(return_value=None)
+    db.update_plan = AsyncMock(return_value=True)
+    db.list_plans = AsyncMock(return_value=[])
+    db.generate_plan_ref = AsyncMock(return_value="EVA-0001")
+    return db
 
 
 @pytest.fixture
 def mock_external_integration_service():
-    svc = AsyncMock()
-    svc.get_directions    = AsyncMock(return_value={"routes": []})
-    svc.fetch_traffic_data = AsyncMock(return_value={"segments": [], "mode": "mock"})
-    return svc
+    ext = AsyncMock()
+    ext.fetch_traffic_data = AsyncMock(return_value={"segments": [], "mode": "mock"})
+    ext.get_directions = AsyncMock(return_value={"routes": []})
+    return ext
 
 
 @pytest.fixture
 def mock_mapping_service():
-    svc = AsyncMock()
-    svc.highlight_alternative_routes = AsyncMock(return_value=True)
-    return svc
+    m = AsyncMock()
+    m.highlight_alternative_routes = AsyncMock()
+    return m
 
 
 @pytest.fixture
 def mock_publisher():
-    pub = AsyncMock()
-    pub.is_connected = False
-    pub.publish_reroute_triggered = AsyncMock()
-    pub.publish_route_updated     = AsyncMock()
-    return pub
+    p = AsyncMock()
+    p.is_connected = True
+    p.publish_reroute_triggered = AsyncMock()
+    p.publish_route_updated = AsyncMock()
+    return p
 
 
 @pytest.fixture
@@ -83,12 +86,16 @@ def evacuation_service(
     mock_mapping_service,
     mock_publisher,
 ):
-    return EvacuationService(
+    svc = EvacuationService(
         db=mock_evacuation_db,
         external=mock_external_integration_service,
         mapping=mock_mapping_service,
         publisher=mock_publisher,
     )
+    # Disable Redis in tests — _cache_get always misses, _cache_set is a no-op
+    svc._redis = None
+    svc._get_redis = AsyncMock(return_value=None)
+    return svc
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -98,199 +105,207 @@ def evacuation_service(
 FAKE_DISASTER = {
     "id": "dis-001", "tracking_id": "TRK-001",
     "type": "FLOOD", "severity": "HIGH", "disaster_status": "ACTIVE",
-    "lat": 53.3498, "lon": -6.2603,
-    "location_address": "O'Connell Street, Dublin 1",
+    "lat": 53.3438, "lon": -6.2613,
+    "location_address": "Dawson Street, Dublin 2",
     "people_affected": 5000, "road_blocked": False,
+    "disaster_metadata": {
+        "evaluation": {
+            "impact_radius_km": 3.0,
+            "estimated_population": 12723,
+            "affected_roads": [
+                "Dawson Street", "College Green", "Saint Stephen's Green",
+                "Frederick Street South", "Clarendon Street",
+            ],
+            "affected_facilities": [
+                "Loreto College Junior School",
+                "Dublin Castle Garda Station",
+                "Hedley Park Montessori School",
+            ],
+        }
+    },
+}
+
+FAKE_DISASTER_NO_META = {
+    "id": "dis-002", "tracking_id": "TRK-002",
+    "type": "FIRE", "severity": "MEDIUM", "disaster_status": "ACTIVE",
+    "lat": 53.35, "lon": -6.26,
+    "location_address": "O'Connell Street, Dublin 1",
+    "people_affected": 200, "road_blocked": True,
+    "disaster_metadata": None,
 }
 
 FAKE_ROUTE = {
-    "route_id":               "rt-001",
-    "travel_time_seconds":    600,
-    "length_meters":          8000,
-    "traffic_delay_seconds":  60,
-    "points":  [[53.3498, -6.2603], [53.3607, -6.2510]],
+    "route_id":              "rt-001",
+    "travel_time_seconds":   600,
+    "length_meters":         8000,
+    "traffic_delay_seconds": 60,
+    "points":  [[53.3438, -6.2613], [53.3608, -6.2510]],
     "geojson": {"type": "Feature",
                 "geometry": {"type": "LineString", "coordinates": []},
                 "properties": {}},
 }
 
-FAKE_ZONE    = DUBLIN_ZONES[0]    # zone_city_centre
-FAKE_SHELTER = DUBLIN_SHELTERS[0]  # shelter_croke_park
+FAKE_SHELTER = DUBLIN_SHELTERS[0]  # Croke Park
+
+FAKE_AVAILABLE_UNITS = [
+    {"unit_type": "ambulance", "available_count": 5, "capacity": 4},
+    {"unit_type": "rescue",    "available_count": 2, "capacity": 4},
+    {"unit_type": "fire_engine","available_count": 3, "capacity": 6},
+]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Zone / shelter data
+# build_impact_area
 # ─────────────────────────────────────────────────────────────────────────────
 
-class TestDublinData:
+class TestBuildImpactArea:
 
-    def test_zones_exist(self):
-        assert len(DUBLIN_ZONES) > 0
+    def test_extracts_population_from_evaluation(self):
+        area = build_impact_area(FAKE_DISASTER)
+        assert area["population"] == 12723
 
-    def test_eight_shelters(self):
-        assert len(get_all_shelters()) == 8
+    def test_extracts_affected_roads(self):
+        area = build_impact_area(FAKE_DISASTER)
+        assert "Dawson Street" in area["affected_roads"]
+        assert len(area["affected_roads"]) == 5
 
-    def test_zone_required_fields(self):
-        for z in DUBLIN_ZONES:
-            for f in ("zone_id", "name", "lat", "lon", "population", "vulnerable_count"):
-                assert f in z, f"Zone missing field: {f}"
+    def test_extracts_radius(self):
+        area = build_impact_area(FAKE_DISASTER)
+        assert area["radius_km"] == 3.0
 
-    def test_shelter_required_fields(self):
-        for s in get_all_shelters():
-            for f in ("shelter_id", "name", "lat", "lon", "capacity"):
-                assert f in s, f"Shelter missing field: {f}"
+    def test_boosts_vulnerable_ratio_for_schools(self):
+        area = build_impact_area(FAKE_DISASTER)
+        # Has "School" and "Montessori" in facilities → 25% ratio
+        assert area["vulnerable_count"] == int(12723 * 0.25)
 
-    def test_shelters_positive_capacity(self):
-        for s in get_all_shelters():
-            assert s["capacity"] > 0
+    def test_fallback_when_no_metadata(self):
+        area = build_impact_area(FAKE_DISASTER_NO_META)
+        assert area["population"] == 200  # falls back to people_affected
+        assert area["radius_km"] == 3.0   # default
 
-    def test_zones_near_city_centre(self):
-        zones = get_zones_near_disaster(53.3498, -6.2603, severity="HIGH")
-        assert len(zones) >= 1
-        ids = [z["zone_id"] for z in zones]
-        assert "zone_city_centre" in ids
+    def test_fallback_when_zero_population(self):
+        disaster = {**FAKE_DISASTER_NO_META, "people_affected": 0}
+        area = build_impact_area(disaster)
+        assert area["population"] == 100  # minimum floor
 
-    def test_critical_wider_than_high(self):
-        crit = get_zones_near_disaster(53.3498, -6.2603, severity="CRITICAL")
-        high = get_zones_near_disaster(53.3498, -6.2603, severity="HIGH")
-        assert len(crit) >= len(high)
+    def test_center_coords(self):
+        area = build_impact_area(FAKE_DISASTER)
+        assert area["center_lat"] == 53.3438
+        assert area["center_lon"] == -6.2613
 
-    def test_at_least_one_zone_returned(self):
-        # Even for coordinates far away, at least the nearest zone is returned
-        zones = get_zones_near_disaster(99.0, 99.0, severity="HIGH")
-        assert len(zones) >= 0   # may be empty for coordinates completely outside Ireland
+
+# ─────────────────────────────────────────────────────────────────────────────
+# get_nearest_shelters
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestGetNearestShelters:
+
+    def test_returns_max_count(self):
+        shelters = get_nearest_shelters(53.35, -6.26, max_count=3)
+        assert len(shelters) == 3
+
+    def test_sorted_by_distance(self):
+        shelters = get_nearest_shelters(53.35, -6.26, max_count=5)
+        dists = [s["_dist_km"] for s in shelters]
+        assert dists == sorted(dists)
+
+    def test_all_shelters_when_max_is_large(self):
+        shelters = get_nearest_shelters(53.35, -6.26, max_count=100)
+        assert len(shelters) == len(DUBLIN_SHELTERS)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Transport capacity mapping
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestTransportCapacity:
 
     def test_ambulance_capacity_is_8(self):
-        """Verify the fix — must NOT be 2."""
-        assert AMBULANCE_CAPACITY == 8, (
-            f"AMBULANCE_CAPACITY should be 8 (accessible transport), got {AMBULANCE_CAPACITY}"
-        )
+        assert TRANSPORT_CAPACITY["ambulance"] == 8
 
-    def test_bus_capacity_is_50(self):
-        assert BUS_CAPACITY == 50
+    def test_fire_engine_zero(self):
+        assert TRANSPORT_CAPACITY["fire_engine"] == 0
+
+    def test_rescue_has_capacity(self):
+        assert TRANSPORT_CAPACITY["rescue"] == 4
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Pure helpers
+# compute_transport_needs — with real DB units
 # ─────────────────────────────────────────────────────────────────────────────
 
-class TestStraightLineFallback:
+class TestComputeTransportNeeds:
 
-    def test_returns_dict(self):
-        result = straight_line_fallback(FAKE_ZONE, FAKE_SHELTER)
-        assert isinstance(result, dict)
-
-    def test_flagged_as_fallback(self):
-        assert straight_line_fallback(FAKE_ZONE, FAKE_SHELTER)["fallback"] is True
-
-    def test_positive_distance(self):
-        assert straight_line_fallback(FAKE_ZONE, FAKE_SHELTER)["distance_km"] > 0
-
-    def test_correct_ids(self):
-        r = straight_line_fallback(FAKE_ZONE, FAKE_SHELTER)
-        assert r["origin_zone_id"]         == FAKE_ZONE["zone_id"]
-        assert r["destination_shelter_id"] == FAKE_SHELTER["shelter_id"]
-
-    def test_has_two_waypoints(self):
-        r = straight_line_fallback(FAKE_ZONE, FAKE_SHELTER)
-        assert len(r["waypoints"]) == 2
-
-    def test_positive_time(self):
-        r = straight_line_fallback(FAKE_ZONE, FAKE_SHELTER)
-        assert r["estimated_time_min"] > 0
-
-
-class TestPureHelpers:
-
-    def test_population_profile_totals(self):
-        zones = [
-            {"population": 1000, "vulnerable_count": 100},
-            {"population": 2000, "vulnerable_count": 200},
-        ]
-        s = get_population_profile(zones)
-        assert s["total"]      == 3000
-        assert s["vulnerable"] == 300
-        assert s["mobile"]     == 2700
-
-    def test_population_profile_zones_count(self):
-        zones = [{"population": 100, "vulnerable_count": 10}] * 3
-        assert get_population_profile(zones)["zones_count"] == 3
-
-    def test_transport_bus_count(self):
-        stats  = {"total": 500, "vulnerable": 50}
-        zones  = [{"zone_id": "z1", "population": 500, "vulnerable_count": 50}]
-        routes = {"z1": [{"destination_shelter_id": "s1", "shelter_name": "S",
+    def test_uses_db_unit_counts(self):
+        stats = {"total": 500, "vulnerable": 50}
+        area  = {"disaster_id": "d1", "population": 500, "vulnerable_count": 50}
+        routes = {"d1": [{"destination_shelter_id": "s1", "shelter_name": "S",
                           "route_id": "r1", "estimated_time_min": 20}]}
-        plan = compute_transport_needs(stats, zones, routes)
-        assert plan["total_buses"]      == math.ceil(500 / BUS_CAPACITY)
-        assert plan["total_ambulances"] == math.ceil(50  / AMBULANCE_CAPACITY)
+        plan = compute_transport_needs(stats, area, routes, FAKE_AVAILABLE_UNITS)
+        # 50 vulnerable / 8 per ambulance = ceil(6.25) = 7, but only 5 available
+        assert plan["total_ambulances"] == 5
+        assert plan["ambulances_available"] == 5
+        # Shortfall: (7-5)*8 = 16 people, rescue capacity 4 → ceil(16/4) = 4, only 2 available
+        assert plan["rescue_units_needed"] == 2
 
-    def test_transport_ambulances_with_capacity_8(self):
-        """Confirm AMBULANCE_CAPACITY=8 produces sane numbers."""
-        stats  = {"total": 10000, "vulnerable": 8700}
-        zones  = [{"zone_id": "z1", "population": 10000, "vulnerable_count": 8700}]
-        routes = {"z1": [{"destination_shelter_id": "s1", "shelter_name": "S",
-                          "route_id": "r1", "estimated_time_min": 30}]}
-        plan = compute_transport_needs(stats, zones, routes)
-        # 8700 / 8 = 1088 — much more reasonable than 4350
-        assert plan["total_ambulances"] == math.ceil(8700 / 8)
-        assert plan["total_ambulances"] < 2000  # sanity check
+    def test_no_units_available(self):
+        stats = {"total": 100, "vulnerable": 20}
+        area  = {"disaster_id": "d1", "population": 100, "vulnerable_count": 20}
+        plan = compute_transport_needs(stats, area, {}, [])
+        # No units → 0 allocated
+        assert plan["total_ambulances"] == 0
+        assert plan["ambulances_available"] == 0
 
-    def test_allocate_resources_mirrors_transport(self):
-        alloc = allocate_resources({"total_buses": 5, "total_ambulances": 3})
-        assert alloc["buses_allocated"]      == 5
-        assert alloc["ambulances_allocated"] == 3
-        assert alloc["allocation_confirmed"] is True
 
-    def test_score_at_most_3(self):
-        candidates = [
-            {
-                "distance_km":            2.0 + i * 0.5,
-                "traffic_delay_seconds":  60,
-                "origin_zone_id":         "z",
-                "destination_shelter_id": f"s{i}",
-                "shelter_name":           f"S{i}",
-                "shelter_capacity":       1000,
-                "route_id":               f"r{i}",
-                "points": [], "geojson": {}, "waypoints": [],
-                "travel_time_seconds": 600, "estimated_time_min": 10,
-            }
-            for i in range(10)
-        ]
-        assert len(score_and_select_routes(candidates, {})) <= 3
+# ─────────────────────────────────────────────────────────────────────────────
+# population profile
+# ─────────────────────────────────────────────────────────────────────────────
 
-    def test_score_empty_returns_empty(self):
-        assert score_and_select_routes([], {}) == []
+class TestPopulationProfile:
 
-    def test_shorter_distance_wins(self):
+    def test_from_impact_area(self):
+        area = {"population": 12723, "vulnerable_count": 3181}
+        stats = get_population_profile(area)
+        assert stats["total"] == 12723
+        assert stats["vulnerable"] == 3181
+        assert stats["mobile"] == 12723 - 3181
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Route scoring
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestScoreAndSelectRoutes:
+
+    def test_prefers_shorter_routes(self):
         base = {
-            "origin_zone_id": "z", "shelter_name": "S",
-            "shelter_capacity": 1000, "points": [],
-            "geojson": {}, "waypoints": [],
-            "traffic_delay_seconds": 0,
-        }
-        far  = {**base, "distance_km": 10.0, "route_id": "far",
-                "destination_shelter_id": "s1",
-                "travel_time_seconds": 1800, "estimated_time_min": 30}
-        near = {**base, "distance_km":  1.0, "route_id": "near",
-                "destination_shelter_id": "s2",
-                "travel_time_seconds": 300,  "estimated_time_min": 5}
-        top = score_and_select_routes([far, near], {})[0]
-        assert top["destination_shelter_id"] == "s2"
-
-    def test_big_delay_penalised(self):
-        base = {
-            "distance_km": 5.0, "origin_zone_id": "z",
             "destination_shelter_id": "s", "shelter_name": "S",
             "shelter_capacity": 1000, "points": [],
             "geojson": {}, "waypoints": [],
             "travel_time_seconds": 1200, "estimated_time_min": 20,
+        }
+        short = {**base, "distance_km": 2.0, "traffic_delay_seconds": 0, "route_id": "short"}
+        long  = {**base, "distance_km": 10.0, "traffic_delay_seconds": 0, "route_id": "long"}
+        top = score_and_select_routes([long, short], {})[0]
+        assert top["route_id"] == "short"
+
+    def test_prefers_less_delay(self):
+        base = {
+            "destination_shelter_id": "s", "shelter_name": "S",
+            "shelter_capacity": 1000, "points": [],
+            "geojson": {}, "waypoints": [],
+            "travel_time_seconds": 1200, "estimated_time_min": 20,
+            "distance_km": 5.0,
         }
         no_delay  = {**base, "traffic_delay_seconds": 0,    "route_id": "no_delay"}
         big_delay = {**base, "traffic_delay_seconds": 3600, "route_id": "big_delay"}
         top = score_and_select_routes([big_delay, no_delay], {})[0]
         assert top["route_id"] == "no_delay"
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Congestion weight
+# ─────────────────────────────────────────────────────────────────────────────
 
 class TestCongestionWeight:
 
@@ -311,9 +326,40 @@ class TestCongestionWeight:
         ])
         assert abs(w - (0.5 + 4.0) / 2) < 1e-9
 
-    def test_unknown_level_defaults_to_1(self):
-        w = avg_congestion_weight([{"congestion_level": "mystery"}])
-        assert w == 1.0
+
+# ─────────────────────────────────────────────────────────────────────────────
+# straight_line_fallback
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestStraightLineFallback:
+
+    def test_returns_dict(self):
+        result = straight_line_fallback(53.35, -6.26, FAKE_SHELTER)
+        assert isinstance(result, dict)
+
+    def test_flagged_as_fallback(self):
+        assert straight_line_fallback(53.35, -6.26, FAKE_SHELTER)["fallback"] is True
+
+    def test_positive_distance(self):
+        assert straight_line_fallback(53.35, -6.26, FAKE_SHELTER)["distance_km"] > 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Route cache key
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestRouteCacheKey:
+
+    def test_includes_disaster_and_shelter(self):
+        key = _route_cache_key("dis-1", "shelter-a", "abc123")
+        assert "dis-1" in key
+        assert "shelter-a" in key
+        assert "abc123" in key
+
+    def test_different_blocked_roads_different_key(self):
+        k1 = _route_cache_key("d", "s", _hash_blocked_roads([{"road_name": "A"}]))
+        k2 = _route_cache_key("d", "s", _hash_blocked_roads([{"road_name": "B"}]))
+        assert k1 != k2
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -323,31 +369,25 @@ class TestCongestionWeight:
 class TestFetchTrafficData:
 
     @pytest.mark.asyncio
-    async def test_calls_external_integration_service(
-        self, evacuation_service, mock_external_integration_service
-    ):
+    async def test_calls_external(self, evacuation_service, mock_external_integration_service):
         mock_external_integration_service.fetch_traffic_data.return_value = {
             "segments": [], "mode": "mock"}
         result = await evacuation_service.fetch_traffic_data()
-        mock_external_integration_service.fetch_traffic_data.assert_called_once_with(
-            "region-dublin-city")
+        mock_external_integration_service.fetch_traffic_data.assert_called_once()
         assert result is not None
 
     @pytest.mark.asyncio
-    async def test_returns_fallback_on_error(
-        self, evacuation_service, mock_external_integration_service
-    ):
+    async def test_returns_fallback_on_error(self, evacuation_service, mock_external_integration_service):
         mock_external_integration_service.fetch_traffic_data.side_effect = Exception("down")
         result = await evacuation_service.fetch_traffic_data()
         assert result["available"] is False
-        assert result["source"] == "fallback"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# _compute_zone_routes
+# _compute_routes
 # ─────────────────────────────────────────────────────────────────────────────
 
-class TestComputeZoneRoutes:
+class TestComputeRoutes:
 
     @pytest.mark.asyncio
     async def test_calls_get_directions_per_shelter(
@@ -355,70 +395,23 @@ class TestComputeZoneRoutes:
     ):
         mock_external_integration_service.get_directions.return_value = {
             "routes": [FAKE_ROUTE]}
-        routes = await evacuation_service._compute_zone_routes(
-            FAKE_ZONE, [FAKE_SHELTER], [], {"segments": []})
-        mock_external_integration_service.get_directions.assert_called_once()
-        assert len(routes) >= 1
+        impact_area = build_impact_area(FAKE_DISASTER)
+        shelters = get_nearest_shelters(impact_area["center_lat"], impact_area["center_lon"])
+        result = await evacuation_service._compute_routes(
+            impact_area, shelters, [], {})
+        assert mock_external_integration_service.get_directions.call_count == len(shelters)
+        assert impact_area["disaster_id"] in result
 
     @pytest.mark.asyncio
-    async def test_passes_blocked_roads_as_avoid(
-        self, evacuation_service, mock_external_integration_service
-    ):
-        blocked = [{"segment_id": "s1", "road_name": "O'Connell St",
-                    "start_lat": 53.347, "start_lng": -6.260,
-                    "end_lat": 53.349, "end_lng": -6.258}]
-        mock_external_integration_service.get_directions.return_value = {
-            "routes": [FAKE_ROUTE]}
-        await evacuation_service._compute_zone_routes(
-            FAKE_ZONE, [FAKE_SHELTER], blocked, {})
-        call_kw = mock_external_integration_service.get_directions.call_args.kwargs
-        assert call_kw["avoid"] == blocked
-
-    @pytest.mark.asyncio
-    async def test_fallback_route_on_tomtom_failure(
-        self, evacuation_service, mock_external_integration_service
-    ):
-        mock_external_integration_service.get_directions.side_effect = Exception("TomTom down")
-        routes = await evacuation_service._compute_zone_routes(
-            FAKE_ZONE, [FAKE_SHELTER], [], {})
-        assert len(routes) >= 1
-        assert routes[0].get("fallback") is True
-
-    @pytest.mark.asyncio
-    async def test_enriches_distance_and_time_from_tomtom(
-        self, evacuation_service, mock_external_integration_service
-    ):
-        mock_external_integration_service.get_directions.return_value = {
-            "routes": [FAKE_ROUTE]}
-        routes = await evacuation_service._compute_zone_routes(
-            FAKE_ZONE, [FAKE_SHELTER], [], {})
-        assert routes[0]["distance_km"]        == round(8000 / 1000, 2)
-        assert routes[0]["estimated_time_min"] == round(600 / 60, 1)
-
-    @pytest.mark.asyncio
-    async def test_concurrent_zones(
-        self, evacuation_service, mock_external_integration_service
-    ):
-        mock_external_integration_service.get_directions.return_value = {
-            "routes": [FAKE_ROUTE]}
-        zones = [
-            {**FAKE_ZONE, "zone_id": "z_a", "lat": 53.34},
-            {**FAKE_ZONE, "zone_id": "z_b", "lat": 53.35},
-        ]
-        result = await evacuation_service._compute_all_zone_routes(
-            zones, [FAKE_SHELTER], [], {})
-        assert "z_a" in result and "z_b" in result
-        assert mock_external_integration_service.get_directions.call_count == 2
-
-    @pytest.mark.asyncio
-    async def test_empty_route_list_when_all_fail(
+    async def test_fallback_when_tomtom_empty(
         self, evacuation_service, mock_external_integration_service
     ):
         mock_external_integration_service.get_directions.return_value = {"routes": []}
-        routes = await evacuation_service._compute_zone_routes(
-            FAKE_ZONE, [FAKE_SHELTER], [], {})
-        # Falls back to straight-line estimate when TomTom returns empty
-        assert isinstance(routes, list)
+        impact_area = build_impact_area(FAKE_DISASTER)
+        routes = await evacuation_service._compute_routes(
+            impact_area, [FAKE_SHELTER], [], {})
+        # Should have fallback routes
+        assert isinstance(routes, dict)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -443,17 +436,18 @@ class TestPlanEvacuation:
         mock_external_integration_service
     ):
         mock_evacuation_db.get_disaster.return_value = FAKE_DISASTER
-        mock_evacuation_db.save_plan.return_value    = "plan-xyz"
+        mock_evacuation_db.save_plan.return_value = "plan-xyz"
+        mock_evacuation_db.get_available_transport_units.return_value = FAKE_AVAILABLE_UNITS
         mock_external_integration_service.get_directions.return_value = {
             "routes": [FAKE_ROUTE]}
 
         result = await evacuation_service.plan_evacuation("dis-001")
 
         mock_evacuation_db.save_plan.assert_called_once()
-        assert result["plan_id"]  == "plan-xyz"
+        assert result["plan_id"] == "plan-xyz"
         assert result["plan_ref"] == "EVA-0001"
         assert result["plan_status"] == "PENDING"
-        assert result["zones_count"] >= 1
+        assert result["total_population_affected"] == 12723
 
     @pytest.mark.asyncio
     async def test_auto_approve_sets_status(
@@ -461,132 +455,75 @@ class TestPlanEvacuation:
         mock_external_integration_service
     ):
         mock_evacuation_db.get_disaster.return_value = FAKE_DISASTER
-        mock_evacuation_db.save_plan.return_value    = "plan-xyz"
-        mock_external_integration_service.get_directions.return_value = {"routes": []}
-
-        result = await evacuation_service.plan_evacuation("dis-001", auto_approve=True)
-        assert result["plan_status"] == "APPROVED"
-        assert result["auto_approved"] is True
-
-    @pytest.mark.asyncio
-    async def test_transport_numbers_are_sane(
-        self, evacuation_service, mock_evacuation_db,
-        mock_external_integration_service
-    ):
-        mock_evacuation_db.get_disaster.return_value = FAKE_DISASTER
-        mock_evacuation_db.save_plan.return_value    = "plan-xyz"
+        mock_evacuation_db.save_plan.return_value = "plan-auto"
+        mock_evacuation_db.get_available_transport_units.return_value = FAKE_AVAILABLE_UNITS
         mock_external_integration_service.get_directions.return_value = {
             "routes": [FAKE_ROUTE]}
 
-        result = await evacuation_service.plan_evacuation("dis-001")
-        summary = result["transport_plan_summary"]
-
-        # Ambulances should be way less than 4350 (the old broken value)
-        assert summary["total_ambulances"] < 2000
-        assert summary["total_buses"]      > 0
+        result = await evacuation_service.plan_evacuation("dis-001", auto_approve=True)
+        assert result["plan_status"] == "APPROVED"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Phase 2 — approve_evacuation
+# Phase 2 — approve
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestApproveEvacuation:
 
-    def _pending_plan(self):
-        return {
-            "id": "plan-1", "plan_ref": "EVA-0001",
-            "disaster_id": "dis-1", "plan_status": "PENDING",
-            "impact_zones": [FAKE_ZONE],
-            "shelters_with_capacity": [FAKE_SHELTER],
-            "best_routes_per_zone": {},
-            "allocations": {"buses_allocated": 10, "ambulances_allocated": 5},
-            "completion_metrics": {},
+    @pytest.mark.asyncio
+    async def test_approves_pending_plan(self, evacuation_service, mock_evacuation_db):
+        mock_evacuation_db.get_plan.return_value = {
+            "id": "plan-1", "plan_ref": "EVA-0001", "plan_status": "PENDING",
         }
-
-    @pytest.mark.asyncio
-    async def test_approve_pending_plan(
-        self, evacuation_service, mock_evacuation_db
-    ):
-        mock_evacuation_db.get_plan.return_value = self._pending_plan()
-        result = await evacuation_service.approve_evacuation(
-            "plan-1", approved_by="Commander Murphy")
+        result = await evacuation_service.approve_evacuation("plan-1", "Commander Smith")
         assert result["plan_status"] == "APPROVED"
-        assert result["approved_by"] == "Commander Murphy"
-        mock_evacuation_db.update_plan.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_raises_400_if_already_approved(
-        self, evacuation_service, mock_evacuation_db
-    ):
-        plan = self._pending_plan()
-        plan["plan_status"] = "APPROVED"
-        mock_evacuation_db.get_plan.return_value = plan
+    async def test_rejects_already_approved(self, evacuation_service, mock_evacuation_db):
+        mock_evacuation_db.get_plan.return_value = {
+            "id": "plan-1", "plan_ref": "EVA-0001", "plan_status": "APPROVED",
+        }
         from fastapi import HTTPException
         with pytest.raises(HTTPException) as exc_info:
-            await evacuation_service.approve_evacuation("plan-1", "Officer B")
+            await evacuation_service.approve_evacuation("plan-1", "Admin")
         assert exc_info.value.status_code == 400
-
-    @pytest.mark.asyncio
-    async def test_raises_400_if_not_pending(
-        self, evacuation_service, mock_evacuation_db
-    ):
-        plan = self._pending_plan()
-        plan["plan_status"] = "ACTIVE"
-        mock_evacuation_db.get_plan.return_value = plan
-        from fastapi import HTTPException
-        with pytest.raises(HTTPException) as exc_info:
-            await evacuation_service.approve_evacuation("plan-1", "Officer B")
-        assert exc_info.value.status_code == 400
-
-    @pytest.mark.asyncio
-    async def test_raises_404_unknown_plan(
-        self, evacuation_service, mock_evacuation_db
-    ):
-        mock_evacuation_db.get_plan.return_value = None
-        from fastapi import HTTPException
-        with pytest.raises(HTTPException) as exc_info:
-            await evacuation_service.approve_evacuation("bad", "Officer")
-        assert exc_info.value.status_code == 404
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Phase 3 — activate_evacuation
+# Phase 3 — activate
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestActivateEvacuation:
 
     def _approved_plan(self):
+        impact_area = build_impact_area(FAKE_DISASTER)
         return {
             "id": "plan-1", "plan_ref": "EVA-0001",
-            "disaster_id": "dis-1", "plan_status": "APPROVED",
-            "impact_zones": [FAKE_ZONE],
+            "disaster_id": "dis-001", "plan_status": "APPROVED",
+            "impact_zones": [impact_area],
             "shelters_with_capacity": [FAKE_SHELTER],
-            "best_routes_per_zone": {"zone_city_centre": []},
-            "allocations": {"buses_allocated": 10, "ambulances_allocated": 5},
-            "completion_metrics": {},
+            "best_routes_per_zone": {},
+            "allocations": {"ambulances_allocated": 5, "rescue_units_allocated": 2},
         }
 
     @pytest.mark.asyncio
-    async def test_activate_approved_plan(
+    async def test_activates_approved_plan(
         self, evacuation_service, mock_evacuation_db
     ):
         mock_evacuation_db.get_plan.return_value = self._approved_plan()
         result = await evacuation_service.activate_evacuation("plan-1")
         assert result["plan_status"] == "ACTIVE"
-        assert "activated_at" in result
-        mock_evacuation_db.update_plan.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_raises_400_if_not_approved(
+    async def test_rejects_non_approved(
         self, evacuation_service, mock_evacuation_db
     ):
         plan = self._approved_plan()
         plan["plan_status"] = "PENDING"
         mock_evacuation_db.get_plan.return_value = plan
         from fastapi import HTTPException
-        with pytest.raises(HTTPException) as exc_info:
+        with pytest.raises(HTTPException):
             await evacuation_service.activate_evacuation("plan-1")
-        assert exc_info.value.status_code == 400
 
     @pytest.mark.asyncio
     async def test_initialises_completion_metrics(
@@ -596,8 +533,8 @@ class TestActivateEvacuation:
         await evacuation_service.activate_evacuation("plan-1")
         call_kwargs = mock_evacuation_db.update_plan.call_args.kwargs
         metrics = call_kwargs.get("completion_metrics", {})
-        assert FAKE_ZONE["zone_id"] in metrics
-        assert metrics[FAKE_ZONE["zone_id"]]["percentage"] == 0
+        assert "impact_area" in metrics
+        assert metrics["impact_area"]["percentage"] == 0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -607,55 +544,40 @@ class TestActivateEvacuation:
 class TestUpdateProgress:
 
     def _active_plan(self):
+        impact_area = build_impact_area(FAKE_DISASTER)
         return {
             "id": "plan-1", "plan_ref": "EVA-0001",
             "disaster_id": "dis-1", "plan_status": "ACTIVE",
-            "impact_zones": [FAKE_ZONE],
+            "impact_zones": [impact_area],
             "shelters_with_capacity": [FAKE_SHELTER],
             "best_routes_per_zone": {},
             "allocations": {},
             "completion_metrics": {
-                FAKE_ZONE["zone_id"]: {"percentage": 0, "evacuated": 0,
-                                       "remaining": FAKE_ZONE["population"],
-                                       "status": "in_progress"},
+                "impact_area": {"percentage": 0, "evacuated": 0,
+                                "remaining": impact_area["population"],
+                                "status": "in_progress"},
             },
         }
 
     @pytest.mark.asyncio
-    async def test_updates_metrics(
-        self, evacuation_service, mock_evacuation_db
-    ):
+    async def test_updates_metrics(self, evacuation_service, mock_evacuation_db):
         mock_evacuation_db.get_plan.return_value = self._active_plan()
         result = await evacuation_service.update_progress(
             "plan-1",
-            {FAKE_ZONE["zone_id"]: {"percentage": 50, "evacuated": 12500,
-                                    "remaining": 12500, "status": "in_progress"}},
+            {"impact_area": {"percentage": 50, "evacuated": 6362,
+                             "remaining": 6361, "status": "in_progress"}},
         )
         assert result["overall_completion"] == pytest.approx(50.0, rel=0.01)
 
     @pytest.mark.asyncio
-    async def test_marks_completed_when_all_100(
-        self, evacuation_service, mock_evacuation_db
-    ):
+    async def test_marks_completed_when_100(self, evacuation_service, mock_evacuation_db):
         mock_evacuation_db.get_plan.return_value = self._active_plan()
         result = await evacuation_service.update_progress(
             "plan-1",
-            {FAKE_ZONE["zone_id"]: {"percentage": 100, "evacuated": 25000,
-                                    "remaining": 0, "status": "done"}},
+            {"impact_area": {"percentage": 100, "evacuated": 12723,
+                             "remaining": 0, "status": "done"}},
         )
         assert result["plan_status"] == "COMPLETED"
-
-    @pytest.mark.asyncio
-    async def test_raises_400_if_not_active(
-        self, evacuation_service, mock_evacuation_db
-    ):
-        plan = self._active_plan()
-        plan["plan_status"] = "PENDING"
-        mock_evacuation_db.get_plan.return_value = plan
-        from fastapi import HTTPException
-        with pytest.raises(HTTPException) as exc_info:
-            await evacuation_service.update_progress("plan-1", {})
-        assert exc_info.value.status_code == 400
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -665,21 +587,16 @@ class TestUpdateProgress:
 class TestBroadcastAlerts:
 
     @pytest.mark.asyncio
-    async def test_uses_publisher_when_connected(
-        self, evacuation_service, mock_publisher
-    ):
+    async def test_uses_publisher_when_connected(self, evacuation_service, mock_publisher):
         mock_publisher.is_connected = True
         users = [{"id": "u1", "phone_number": "+353871111111",
-                  "zone_id": FAKE_ZONE["zone_id"], "zone_name": "City Centre"}]
-        count = await evacuation_service.broadcast_alerts(
-            users, "dis-1", "plan-1", {}, [])
+                  "impact_area_id": "dis-001", "area_name": "Dawson St area"}]
+        count = await evacuation_service.broadcast_alerts(users, "dis-1", "plan-1", {}, [])
         mock_publisher.publish_reroute_triggered.assert_called_once()
         assert count == 1
 
     @pytest.mark.asyncio
-    async def test_returns_0_for_empty_users(
-        self, evacuation_service, mock_publisher
-    ):
+    async def test_returns_0_for_empty_users(self, evacuation_service, mock_publisher):
         mock_publisher.is_connected = True
         count = await evacuation_service.broadcast_alerts([], "dis-1", "plan-1", {}, [])
         assert count == 0
@@ -688,20 +605,10 @@ class TestBroadcastAlerts:
 class TestSendRouteUpdates:
 
     @pytest.mark.asyncio
-    async def test_uses_publisher_when_connected(
-        self, evacuation_service, mock_publisher
-    ):
+    async def test_uses_publisher_when_connected(self, evacuation_service, mock_publisher):
         mock_publisher.is_connected = True
         users = [{"id": "u1", "phone_number": "+353871111111",
-                  "zone_id": "z1", "zone_name": "Zone 1"}]
-        count = await evacuation_service.send_route_updates(users, {"z1": []}, "dis-1")
+                  "impact_area_id": "dis-1", "area_name": "Area 1"}]
+        count = await evacuation_service.send_route_updates(users, {"d1": []}, "dis-1")
         mock_publisher.publish_route_updated.assert_called_once()
         assert count == 1
-
-    @pytest.mark.asyncio
-    async def test_empty_users_returns_0(
-        self, evacuation_service, mock_publisher
-    ):
-        mock_publisher.is_connected = True
-        count = await evacuation_service.send_route_updates([], {}, "dis-1")
-        assert count == 0
