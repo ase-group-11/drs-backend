@@ -89,7 +89,7 @@ async def list_units(
     unit_status: Optional[str] = None,
     unit_type: Optional[str] = None,
     search: Optional[str] = None,
-    limit: int = 50,
+    limit: int = 500,
     db: AsyncSession = Depends(get_db),
     current_user: Dict[str, Any] = Depends(get_current_team_member),
 ):
