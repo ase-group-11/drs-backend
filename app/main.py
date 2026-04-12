@@ -42,6 +42,7 @@ from app.api.v1.disaster_evaluation import set_evaluation_providers
 
 # ── WebSocket / Redis listener ────────────────────────────────────────────────
 from app.api.v1.notifications_ws import redis_listener
+from app.api.v1 import chat                                               # Disaster group chat
 
 # ── Auth routers ──────────────────────────────────────────────────────────────
 from app.api.v1 import user_auth           # UC1: Citizen OTP auth
@@ -256,6 +257,7 @@ app.include_router(user_management_router,     prefix="/api/v1")  # /users/*
 
 # ── Real-time notifications ───────────────────────────────────────────────────
 app.include_router(notifications_router,       prefix="/api/v1")  # /ws/notifications
+app.include_router(chat.router,                prefix="/api/v1")  # /ws/chat/{disaster_id}, /chat/{disaster_id}/history
 
 # ── Dev-only seed endpoint (never registered in production) ──────────────────
 if settings.ENVIRONMENT != "production":
