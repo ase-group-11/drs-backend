@@ -46,9 +46,15 @@ def create_async_engine_instance() -> AsyncEngine:
     }
     
     # Only add pool configuration for AsyncAdaptedQueuePool
+    # Keep per-process limits low — Azure PostgreSQL Flexible Server Burstable
+    # tier caps at 50–100 connections total.  With HPA scaling up to 6 API pods
+    # + 4 consumer pods + celery worker + beat = 12 processes max,
+    # pool_size=1 / max_overflow=2 keeps total ≤ 36 (safe on all Burstable SKUs).
     if poolclass == AsyncAdaptedQueuePool:
-        engine_kwargs["pool_size"] = 5
-        engine_kwargs["max_overflow"] = 10
+        engine_kwargs["pool_size"] = 1
+        engine_kwargs["max_overflow"] = 2
+        engine_kwargs["pool_timeout"] = 30      # raise after 30 s instead of hanging
+        engine_kwargs["pool_recycle"] = 1800    # recycle idle connections every 30 min
     
     engine = create_async_engine(**engine_kwargs)
     
