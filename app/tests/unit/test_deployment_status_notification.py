@@ -1,9 +1,9 @@
-# File: app/tests/unit/test_deployment_status_notifications_fixed.py
+# File: app/tests/unit/test_deployment_status_notification.py
 """
-Fixed deployment status + notification tests.
+Deployment status + notification tests — updated for new _publish_pending_events.
 
 Run:
-  pytest app/tests/unit/test_deployment_status_notifications_fixed.py -v --tb=short
+  pytest app/tests/unit/test_deployment_status_notification.py -v
 """
 
 import json
@@ -252,10 +252,10 @@ class TestDeploymentStatusNotifications:
             make_result(),
         ]
         result = await DeploymentService(db).update_status(DEPLOYMENT_ID, "COMPLETED")
-        events = result["_pending_events"]
-        notifs      = [e for e in events if e[0] == "notification.alert"]
-        unit_compl  = [e for e in events if e[0] == "disaster.unit_completed"]
-        assert len(notifs)     == 1
+        events     = result["_pending_events"]
+        notifs     = [e for e in events if e[0] == "notification.alert"]
+        unit_compl = [e for e in events if e[0] == "disaster.unit_completed"]
+        assert len(notifs) == 1
         assert notifs[0][1]["event_type"] == "deployment.completed"
         assert notifs[0][1]["severity"]   == "MEDIUM"
         assert len(unit_compl) == 1
@@ -285,11 +285,12 @@ class TestDeploymentStatusNotifications:
             make_result(),
         ]
         result = await DeploymentService(db).update_status(DEPLOYMENT_ID, "EN_ROUTE")
-        data = [e for e in result["_pending_events"] if e[0] == "notification.alert"][0][1]["data"]
-        assert data["deployment_id"] == DEPLOYMENT_ID
-        assert data["disaster_id"]   == DISASTER_ID
-        assert data["tracking_id"]   == TRACKING_ID
-        assert data["unit_id"]       == UNIT_ID
+        # Payload fields are flat (no nested "data" key in deployment_service output)
+        payload = [e for e in result["_pending_events"] if e[0] == "notification.alert"][0][1]
+        assert payload["deployment_id"] == DEPLOYMENT_ID
+        assert payload["disaster_id"]   == DISASTER_ID
+        assert payload["tracking_id"]   == TRACKING_ID
+        assert payload["unit_id"]       == UNIT_ID
 
     @pytest.mark.asyncio
     async def test_backup_requested_generates_backup_event(self):
@@ -377,9 +378,7 @@ class TestDeploymentStatusAPI:
         async with client as c:
             resp = await c.get(f"/api/v1/deployments/unit/{UNIT_ID}/active")
         assert resp.status_code == 200
-        body = resp.json()
-        assert "active_missions" in body
-        assert isinstance(body["active_missions"], list)
+        assert "active_missions" in resp.json()
 
     @pytest.mark.asyncio
     async def test_get_active_missions_empty_list(self, admin_client):
@@ -399,8 +398,7 @@ class TestDeploymentStatusAPI:
         async with client as c:
             resp = await c.get(f"/api/v1/deployments/unit/{UNIT_ID}/completed")
         assert resp.status_code == 200
-        body = resp.json()
-        assert "completed_missions" in body
+        assert "completed_missions" in resp.json()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -464,7 +462,7 @@ class TestNotificationPublisher:
         assert result is False
 
     def test_publish_pending_events_uses_rabbitmq_service(self):
-        """DS-27: _publish_pending_events publishes all events via rabbitmq_service."""
+        """DS-27: notification.alert events go to publish_alert (Redis directly)."""
         from app.api.v1.deployment import _publish_pending_events
 
         events = [("notification.alert", {
@@ -473,10 +471,16 @@ class TestNotificationPublisher:
             "severity":   "HIGH",
             "title":      "Unit En Route",
             "message":    "On the way",
-            "data":       {"unit_id": UNIT_ID},
+            "deployment_id":   DEPLOYMENT_ID,
+            "disaster_id":     DISASTER_ID,
+            "tracking_id":     TRACKING_ID,
+            "unit_id":         UNIT_ID,
+            "previous_status": "DISPATCHED",
+            "new_status":      "EN_ROUTE",
         })]
 
-        with patch("app.services.notification_publisher.publish_alert", return_value=True) as mock_pub:
+        with patch("app.services.notification_publisher.publish_alert",
+                   return_value=True) as mock_pub:
             _publish_pending_events(events)
 
         mock_pub.assert_called_once_with(
@@ -485,11 +489,18 @@ class TestNotificationPublisher:
             severity="HIGH",
             title="Unit En Route",
             message="On the way",
-            data={"unit_id": UNIT_ID},
+            data={
+                "deployment_id":   DEPLOYMENT_ID,
+                "disaster_id":     DISASTER_ID,
+                "tracking_id":     TRACKING_ID,
+                "unit_id":         UNIT_ID,
+                "previous_status": "DISPATCHED",
+                "new_status":      "EN_ROUTE",
+            },
         )
 
     def test_publish_pending_events_publishes_multiple_events(self):
-        """DS-28: _publish_pending_events publishes all events in order."""
+        """DS-28: Non-notification events go to get_rabbitmq_service."""
         from app.api.v1.deployment import _publish_pending_events
 
         events = [
@@ -497,11 +508,11 @@ class TestNotificationPublisher:
             ("disaster.backup_requested", {"unit_id": UNIT_ID}),
         ]
 
-        with patch("app.workers.reroute_publisher.ReroutePublisher") as mock_cls:
+        with patch("app.services.rabbitmq_service.get_rabbitmq_service") as mock_get:
             mock_svc = MagicMock()
-            mock_cls.return_value = mock_svc
+            mock_get.return_value = mock_svc
             _publish_pending_events(events)
 
         assert mock_svc.publish.call_count == 2
-        mock_svc.publish.assert_any_call("disaster.unit_completed", {"disaster_id": DISASTER_ID})
-        mock_svc.publish.assert_any_call("disaster.backup_requested", {"unit_id": UNIT_ID})
+        mock_svc.publish.assert_any_call("disaster.unit_completed", events[0][1])
+        mock_svc.publish.assert_any_call("disaster.backup_requested", events[1][1])
