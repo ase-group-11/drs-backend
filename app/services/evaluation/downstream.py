@@ -587,10 +587,24 @@ class DirectRerouteClient(BaseRerouteClient):
                 publisher=publisher,
             )
 
-            # Convert affected_roads list to the format expected by the service
+            # Convert affected_roads list to the format expected by the service.
+            #
+            # IMPORTANT: identify_affected_roads_async() in the enrichment pipeline
+            # returns dicts with keys {road_name, start_lat, start_lng, end_lat,
+            # end_lng} — NO segment_id.  upsert_road_segments() does
+            # seg["segment_id"] unconditionally → KeyError without this guard.
             roads = []
             for i, road in enumerate(affected_roads or []):
                 if isinstance(road, dict):
+                    if "segment_id" not in road:
+                        # Synthesise a stable ID from disaster + position index
+                        road = {
+                            **road,
+                            "segment_id": f"eval-seg-{disaster_id[:8]}-{i}",
+                            "status":     road.get("status", "closed"),
+                            "reason":     road.get("reason", "disaster"),
+                            "capacity":   road.get("capacity", 300),
+                        }
                     roads.append(road)
                 elif isinstance(road, str):
                     roads.append({
