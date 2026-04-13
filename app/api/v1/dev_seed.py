@@ -28,16 +28,13 @@ import uuid
 import logging
 import random
 from datetime import datetime, timedelta
-from typing import List, Dict, Any
+from typing import List
 
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
 
 from app.db.session import get_db
-from app.db.models.emergency_team import EmergencyTeam
-from app.db.models.emergency_unit import EmergencyUnit
-from app.db.models.user import User
 from app.db.models.enums import (
     EmergencyTeamRole,
     Department,
@@ -50,8 +47,6 @@ from app.db.models.enums import (
 )
 from app.auth.password_handler import hash_password
 from app.auth.jwt_handler import create_access_token
-from geoalchemy2.elements import WKTElement
-
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Dev Seed"])
@@ -569,10 +564,6 @@ ERT_TEAM_DATA = [
 ]
 
 
-def _wkt(lon: float, lat: float) -> WKTElement:
-    """Return a PostGIS WKTElement for POINT(lon lat) in WGS84."""
-    return WKTElement(f"POINT({lon} {lat})", srid=4326)
-
 
 def _uid() -> str:
     return str(uuid.uuid4())
@@ -619,25 +610,37 @@ async def seed_full_database(db: AsyncSession = Depends(get_db)):
 
     await db.flush()
 
-    # ── STEP 2: Create ERT team members ──────────────────────────────────────
+    # ── STEP 2: Create ERT team members (raw SQL — avoids insertmanyvalues) ─────
     pw_hash = hash_password(TEAM_PASSWORD)
-    ert_members: List[EmergencyTeam] = []
+
+    # Simple dataclass-like objects so the rest of the code can read .id / .phone_number
+    class _Row:
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+
+    ert_members: List[_Row] = []
 
     for full_name, phone, email, role, dept in ERT_TEAM_DATA:
-        member = EmergencyTeam(
-            id=_uid(),
-            phone_number=phone,
-            password_hash=pw_hash,
-            full_name=full_name,
-            email=email,
-            role=role,
-            department=dept,
-            status=UserStatus.ACTIVE,
-        )
-        db.add(member)
-        ert_members.append(member)
+        mid = _uid()
+        await db.execute(text("""
+            INSERT INTO emergency_teams (
+                id, phone_number, password_hash, full_name, email,
+                role, department, status,
+                created_at, updated_at
+            ) VALUES (
+                :id, :phone, :pw, :name, :email,
+                CAST(:role AS emergency_team_role),
+                CAST(:dept AS department),
+                CAST(:status AS user_status),
+                :now, :now
+            )
+        """), {
+            "id": mid, "phone": phone, "pw": pw_hash, "name": full_name,
+            "email": email, "role": role.value, "dept": dept.value,
+            "status": UserStatus.ACTIVE.value, "now": now,
+        })
+        ert_members.append(_Row(id=mid, phone_number=phone, full_name=full_name))
 
-    await db.flush()
     logger.info(f"[dev/seed] created {len(ert_members)} ERT members")
 
     # Convenience refs (indices match ERT_TEAM_DATA order above)
@@ -645,22 +648,30 @@ async def seed_full_database(db: AsyncSession = Depends(get_db)):
     med_admin    = ert_members[8]   # Dr Fiona Ryan     — MEDICAL ADMIN
     police_admin = ert_members[16]  # Supt Claire O'Connor — POLICE ADMIN
 
-    # ── STEP 3: Create 100 citizen users ─────────────────────────────────────
-    citizens: List[User] = []
+    # ── STEP 3: Create 100 citizen users (raw SQL) ────────────────────────────
+    citizens: List[_Row] = []
 
     for full_name, phone in CITIZEN_DATA:
-        user = User(
-            id=_uid(),
-            phone_number=phone,
-            full_name=full_name,
-            email=f"{phone.replace('+', '').replace(' ', '')}@citizen.drs",
-            role=UserRole.RESIDENT,
-            status=UserStatus.ACTIVE,
-        )
-        db.add(user)
-        citizens.append(user)
+        cid = _uid()
+        email = f"{phone.replace('+', '').replace(' ', '')}@citizen.drs"
+        await db.execute(text("""
+            INSERT INTO users (
+                id, phone_number, full_name, email,
+                role, status,
+                created_at, updated_at
+            ) VALUES (
+                :id, :phone, :name, :email,
+                CAST(:role AS user_role),
+                CAST(:status AS user_status),
+                :now, :now
+            )
+        """), {
+            "id": cid, "phone": phone, "name": full_name, "email": email,
+            "role": UserRole.RESIDENT.value, "status": UserStatus.ACTIVE.value,
+            "now": now,
+        })
+        citizens.append(_Row(id=cid, phone_number=phone, full_name=full_name))
 
-    await db.flush()
     logger.info(f"[dev/seed] created {len(citizens)} citizens")
 
     # ── STEP 4: Create 60 emergency units across Ireland ─────────────────────
@@ -760,25 +771,38 @@ async def seed_full_database(db: AsyncSession = Depends(get_db)):
             "station": stn,
         })
 
-    emergency_units: List[EmergencyUnit] = []
+    # Raw SQL insert — avoids insertmanyvalues sentinel mismatch on UUID columns
+    emergency_units: List[_Row] = []
     for spec in unit_specs:
         stn = spec["station"]
-        unit = EmergencyUnit(
-            id=_uid(),
-            unit_code=spec["code"],
-            unit_name=spec["name"],
-            unit_type=spec["type"],
-            department=spec["dept"],
-            station_name=stn["name"],
-            station_location=_wkt(stn["lon"], stn["lat"]),
-            unit_status=UnitStatus.AVAILABLE,
-            capacity=4,
-            total_deployments=0,
-        )
-        db.add(unit)
-        emergency_units.append(unit)
+        uid = _uid()
+        await db.execute(text("""
+            INSERT INTO emergency_units (
+                id, unit_code, unit_name, unit_type, department,
+                station_name, station_location,
+                unit_status, capacity, total_deployments,
+                created_at, updated_at
+            ) VALUES (
+                :id, :code, :name,
+                CAST(:utype AS unit_type),
+                CAST(:dept AS department),
+                :station_name,
+                ST_SetSRID(ST_MakePoint(:lon, :lat), 4326)::geography,
+                CAST(:status AS unit_status),
+                :capacity, :total_deployments,
+                :now, :now
+            )
+        """), {
+            "id": uid, "code": spec["code"], "name": spec["name"],
+            "utype": spec["type"].value, "dept": spec["dept"].value,
+            "station_name": stn["name"],
+            "lon": stn["lon"], "lat": stn["lat"],
+            "status": UnitStatus.AVAILABLE.value,
+            "capacity": 4, "total_deployments": 0,
+            "now": now,
+        })
+        emergency_units.append(_Row(id=uid, unit_type=spec["type"], unit_code=spec["code"]))
 
-    await db.flush()
     logger.info(f"[dev/seed] created {len(emergency_units)} emergency units")
 
     # ── STEP 5: Create 400 PENDING disaster reports (8 per location cluster) ────
