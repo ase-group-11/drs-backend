@@ -522,12 +522,22 @@ class DisasterEvaluationService:
                     status=DisasterReportStatus.DUPLICATE,
                     disaster_id=original_id,
                 )
-            else:
-                await self._report_repo.update_report_status(
-                    report_id=report_id,
-                    status=DisasterReportStatus.DUPLICATE,
-                )
-            return None
+                return None
+
+            # No active disaster found to link this DUPLICATE to.
+            # This happens when two reports are submitted simultaneously: both
+            # see each other via get_recent_reports_near → both get flagged
+            # DUPLICATE → the first one processed finds no disaster (none created
+            # yet) → falls through here → creates the disaster as the "pioneer".
+            # The second report will then find this disaster via get_active_disaster_near
+            # and link to it correctly in the next session.
+            logger.info(
+                "Report %s flagged DUPLICATE but no active disaster found nearby "
+                "— falling through to create pioneer disaster record "
+                "(simultaneous-submission race condition).",
+                report_id,
+            )
+            # Fall through to disaster creation below.
 
         if flag in (EvaluationFlag.CORROBORATED.name, EvaluationFlag.ESCALATED.name):
             # Find the existing disaster this report corroborates/escalates
@@ -566,7 +576,7 @@ class DisasterEvaluationService:
             # No existing disaster found — fall through to create a new record
 
         # All other flags (NORMAL, LIMITED_DATA, PENDING_REVIEW) and
-        # CORROBORATED/ESCALATED with no existing nearby disaster → create new record
+        # CORROBORATED/ESCALATED/DUPLICATE with no existing nearby disaster → create new record
         if lat is None or lon is None:
             logger.warning(
                 "Report %s has no coordinates; verified without creating disaster record",
@@ -577,6 +587,46 @@ class DisasterEvaluationService:
                 status=DisasterReportStatus.VERIFIED,
             )
             return None
+
+        # ── Race-condition guard ─────────────────────────────────────────────
+        # Final check before creating a new disaster record.
+        # Handles two scenarios:
+        #
+        # Scenario A — "both NORMAL" (15-min window expired or same user_id):
+        #   Reports A and B arrive at the same location. Neither gets flagged
+        #   DUPLICATE (age > 15 min, or exclude_user_id hides the other report).
+        #   Session 1 creates disaster D_A and commits. Session 2 reaches this
+        #   point and would create D_B — this guard catches it and links B → D_A.
+        #
+        # Scenario B — DUPLICATE pioneer fall-through (see above):
+        #   A was flagged DUPLICATE, found no disaster, and fell through here.
+        #   Another session ran concurrently and already committed a disaster.
+        #   This guard catches the extremely rare double-pioneer case.
+        #
+        # Only applies when coordinates are available.
+        if lat is not None and lon is not None:
+            race_existing_id = await self._disaster_repo.get_active_disaster_near(
+                lat=lat,
+                lon=lon,
+                disaster_type=report["disaster_type"],
+            )
+            if race_existing_id:
+                await self._disaster_repo.update_confidence(
+                    disaster_id=race_existing_id,
+                    confidence_boost=0.05,
+                )
+                await self._report_repo.update_report_status(
+                    report_id=report_id,
+                    status=DisasterReportStatus.DUPLICATE,
+                    disaster_id=race_existing_id,
+                )
+                logger.info(
+                    "Report %s: race-condition guard — disaster %s already exists nearby; "
+                    "linked as DUPLICATE instead of creating a second disaster record.",
+                    report_id,
+                    race_existing_id,
+                )
+                return None
 
         tracking_id = _generate_tracking_id()
 
