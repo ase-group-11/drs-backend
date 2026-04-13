@@ -289,17 +289,6 @@ async def root():
     }
 
 
-# @app.get(
-#     "/health",
-#     tags=["Root"],
-#     summary="Health Check",
-#     description="Check status of all major subsystems"
-# )
-# async def health_check():
-#     """
-#     Returns health status.
-#     """
-#     return {"status": "ok"}
 
 
 @app.get("/health/live", tags=["Health"], include_in_schema=False)
