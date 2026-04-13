@@ -379,6 +379,29 @@ class DeploymentService:
             # Collect events — API layer publishes after DB commit
             pending_events = []
 
+            _status_notif = {
+                "EN_ROUTE":    ("deployment.en_route",    "HIGH",   "Unit En Route",           f"Unit is en route to {dep['location_address'] or 'the disaster site'}."),
+                "ON_SCENE":    ("deployment.on_scene",    "HIGH",   "Unit On Scene",            f"Unit has arrived at {dep['location_address'] or 'the disaster site'}."),
+                "IN_PROGRESS": ("deployment.in_progress", "HIGH",   "Unit In Progress",         f"Unit is actively responding at {dep['location_address'] or 'the disaster site'}."),
+                "COMPLETED":   ("deployment.completed",   "MEDIUM", "Unit Response Completed",  f"Unit has completed its response for disaster {dep['tracking_id']}."),
+                "CANCELLED":   ("deployment.cancelled",   "LOW",    "Deployment Cancelled",     f"Deployment for disaster {dep['tracking_id']} has been cancelled."),
+            }
+            if new_status in _status_notif:
+                _evt, _sev, _title, _msg = _status_notif[new_status]
+                pending_events.append(("notification.alert", {
+                    "service":         "deployment",
+                    "event_type":      _evt,
+                    "severity":        _sev,
+                    "title":           _title,
+                    "message":         _msg,
+                    "deployment_id":   deployment_id,
+                    "disaster_id":     disaster_id,
+                    "tracking_id":     str(dep["tracking_id"]),
+                    "unit_id":         unit_id,
+                    "previous_status": current,
+                    "new_status":      new_status,
+                }))
+
             if new_status == "ON_SCENE":
                 if is_false_alarm:
                     # Field team says evaluation was wrong — mark disaster as rejected

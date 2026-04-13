@@ -150,15 +150,37 @@ router = APIRouter(tags=["Deployments"])
 
 
 def _publish_pending_events(events: list):
-    """Publish RabbitMQ events. Called as a BackgroundTask AFTER get_db() commits."""
+    """Publish events after DB commit.
+    notification.alert  → direct Redis (no RabbitMQ needed)
+    everything else     → RabbitMQ as before
+    """
     try:
+        from app.services.notification_publisher import publish_alert
         from app.services.rabbitmq_service import get_rabbitmq_service
-        svc = get_rabbitmq_service()
+        svc = None
         for topic, payload in events:
-            svc.publish(topic, payload)
+            if topic == "notification.alert":
+                publish_alert(
+                    service=payload["service"],
+                    event_type=payload["event_type"],
+                    severity=payload["severity"],
+                    title=payload["title"],
+                    message=payload["message"],
+                    data={
+                        "deployment_id":   payload.get("deployment_id"),
+                        "disaster_id":     payload.get("disaster_id"),
+                        "tracking_id":     payload.get("tracking_id"),
+                        "unit_id":         payload.get("unit_id"),
+                        "previous_status": payload.get("previous_status"),
+                        "new_status":      payload.get("new_status"),
+                    },
+                )
+            else:
+                if svc is None:
+                    svc = get_rabbitmq_service()
+                svc.publish(topic, payload)
     except Exception as e:
         logger.error(f"Failed to publish post-commit events: {e}")
-
 
 # ── Request Models ──
 
