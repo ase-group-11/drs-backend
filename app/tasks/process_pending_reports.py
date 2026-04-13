@@ -39,6 +39,7 @@ from app.repositories.disaster_report_repository import DisasterReportRepository
 from app.repositories.user_repository import UserRepository
 from app.services.evaluation.downstream import (
     DirectCoordinationClient,
+    DirectRerouteClient,
     HttpRerouteClient,
     NoopCoordinationClient,
     NoopRerouteClient,
@@ -130,9 +131,10 @@ async def process_pending_reports(
                     # read the committed disaster record (service.evaluate() commits before
                     # calling _dispatch_downstream).
                     coordination_client=DirectCoordinationClient(db),
-                    # HttpRerouteClient: calls POST /api/v1/reroute/trigger for events
-                    # where road_blocked=True or severity >= HIGH. Fire-and-forget.
-                    reroute_client=HttpRerouteClient(base_url=settings.REROUTE_SERVICE_URL),
+                    # DirectRerouteClient: calls RerouteService directly — avoids the
+                    # localhost:8000 issue in Kubernetes where the Celery worker pod
+                    # cannot reach the FastAPI pod via localhost.
+                    reroute_client=DirectRerouteClient(db),
                 )
 
                 result = await service.evaluate(report_id)

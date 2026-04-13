@@ -294,7 +294,7 @@ from app.schemas.disaster_evaluation_schemas import EvaluationResponse, RankedDi
 from app.services.evaluation.base import BaseEvaluationStrategy
 from app.services.evaluation.downstream import (
     NoopCoordinationClient, NoopRerouteClient,
-    HttpRerouteClient, DirectCoordinationClient,
+    HttpRerouteClient, DirectCoordinationClient, DirectRerouteClient,
 )
 from app.providers.population_density import GeoNamesPopulationProvider, MockPopulationProvider
 from app.providers.infrastructure import InfrastructureProvider
@@ -408,9 +408,7 @@ async def get_evaluation_service_dependency(
         ),
         user_repo=UserRepository(db),
         coordination_client=DirectCoordinationClient(db=db),
-        reroute_client=HttpRerouteClient(
-            base_url=getattr(settings, "REROUTE_SERVICE_URL", "http://localhost:8000")
-        ),
+        reroute_client=DirectRerouteClient(db=db),
     )
  
  

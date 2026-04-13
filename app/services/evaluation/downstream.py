@@ -542,3 +542,83 @@ class DirectCoordinationClient(BaseCoordinationClient):
                 disaster_id,
             )
             # Never raise — downstream failures must not block evaluation response
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DirectRerouteClient
+# ─────────────────────────────────────────────────────────────────────────────
+
+class DirectRerouteClient(BaseRerouteClient):
+    """
+    Direct service-layer implementation — no HTTP round-trip.
+
+    Calls RerouteService.trigger_reroute_traffic() directly using the
+    same DB session as the evaluation pipeline. This avoids the
+    HttpRerouteClient's localhost:8000 issue in Kubernetes where the
+    Celery worker pod cannot reach the FastAPI pod via localhost.
+    """
+
+    def __init__(self, db) -> None:
+        self._db = db
+
+    async def trigger_reroute(
+        self,
+        disaster_id: str,
+        affected_roads: list,
+        lat: float = 0.0,
+        lon: float = 0.0,
+    ) -> None:
+        try:
+            from app.repositories.reroute_repository import RerouteRepository
+            from app.services.reroute_service import RerouteService
+            from app.services.instant_map_updates import MappingService
+            from app.socket.manager import sio
+            from app.workers.reroute_publisher import get_publisher
+            from app.providers.integration_service import get_integration_service
+
+            publisher   = get_publisher()
+            integration = get_integration_service()
+            mapping     = MappingService(sio=sio)
+
+            reroute_service = RerouteService(
+                db=RerouteRepository(self._db),
+                external=integration,
+                mapping=mapping,
+                publisher=publisher,
+            )
+
+            # Convert affected_roads list to the format expected by the service
+            roads = []
+            for i, road in enumerate(affected_roads or []):
+                if isinstance(road, dict):
+                    roads.append(road)
+                elif isinstance(road, str):
+                    roads.append({
+                        "segment_id": f"eval-seg-{disaster_id[:8]}-{i}",
+                        "road_name": road,
+                        "start_lat": lat,
+                        "start_lng": lon,
+                        "end_lat":   lat,
+                        "end_lng":   lon,
+                        "status": "closed",
+                        "reason": "disaster",
+                        "capacity": 300,
+                    })
+
+            result = await reroute_service.trigger_reroute_traffic(
+                disaster_id=disaster_id,
+                affected_roads=roads if roads else None,
+            )
+            # Commit reroute changes (road_segments status update, reroute_plan insert)
+            await self._db.commit()
+
+            logger.info(
+                "DirectRerouteClient: reroute triggered for disaster=%s result=%s",
+                disaster_id, result,
+            )
+        except Exception:
+            logger.exception(
+                "DirectRerouteClient.trigger_reroute failed for disaster=%s",
+                disaster_id,
+            )
+            # Never raise — downstream failures must not block evaluation

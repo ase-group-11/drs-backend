@@ -52,6 +52,16 @@ BUG 2 — Only 1-2 deployment entries despite many "units dispatched" WebSocket 
   Fix: reduced to 25 clusters so ~25 disasters compete for 52 units, giving adequate
   coverage across the Ireland-wide fleet without exhausting any single unit type.
 
+BUG 4 — 27 disasters in DB when only 10 reports were VERIFIED (25 expected)
+  Root cause: wipe loop used bare try/except around each DELETE. In PostgreSQL,
+  when any statement fails the transaction enters "error" state; every subsequent
+  statement also fails with InFailedSqlTransaction, silently swallowed by the
+  except clause. Result: if one DELETE was blocked by a concurrent Celery lock,
+  all subsequent DELETEs also silently failed — disasters from prior runs survived.
+  Fix: wrap each DELETE in begin_nested() (SAVEPOINT). A failure rolls back only
+  to that savepoint; the outer transaction stays valid for the remaining tables.
+  Also added disaster_chat_sessions to the wipe list (no FK, but stores disaster_id).
+
 BUG 3 — Some emergency unit map pins appeared on river / sea
   Root cause: Galway Fire Station at (53.2743, −9.0488) falls on River Corrib;
   Athlone Fire Station at (53.4228, −7.9408) is on the Shannon bridge midspan.
@@ -144,12 +154,13 @@ GARDA_STATIONS = [
 # ─────────────────────────────────────────────────────────────────────────────
 
 DISASTER_SCENARIOS = [
+    # ── Position 0: FULL-PIPELINE (CRITICAL — triggers deploy + reroute + evacuation) ──
     # Dublin inner city
     {
         "lat": 53.3441, "lon": -6.2675, "address": "O'Connell Street, Dublin 1",
-        "type": DisasterType.FIRE, "severity": DisasterSeverity.HIGH,
-        "description": "Large fire in a multi-storey commercial building. Smoke visible across city centre. Multiple floors involved, evacuation in progress.",
-        "people_affected": 320, "multiple_casualties": True, "structural_damage": True, "road_blocked": True,
+        "type": DisasterType.FIRE, "severity": DisasterSeverity.CRITICAL,
+        "description": "Catastrophic fire in a multi-storey commercial building. Entire building involved, roof collapse imminent. Mass evacuation of O'Connell Street corridor underway. Multiple casualties confirmed.",
+        "people_affected": 450, "multiple_casualties": True, "structural_damage": True, "road_blocked": True,
         "department": Department.FIRE,
     },
     {
@@ -187,11 +198,12 @@ DISASTER_SCENARIOS = [
         "people_affected": 1200, "multiple_casualties": True, "structural_damage": True, "road_blocked": True,
         "department": Department.FIRE,
     },
+    # ── Position 6: FULL-PIPELINE (CRITICAL — triggers deploy + reroute + evacuation) ──
     {
         "lat": 53.3943, "lon": -6.3985, "address": "Blanchardstown Retail Park, Dublin 15",
-        "type": DisasterType.FIRE, "severity": DisasterSeverity.HIGH,
-        "description": "Warehouse fire with hazardous chemicals involved. Toxic smoke plume visible. Exclusion zone established.",
-        "people_affected": 95, "multiple_casualties": False, "structural_damage": True, "road_blocked": True,
+        "type": DisasterType.FIRE, "severity": DisasterSeverity.CRITICAL,
+        "description": "Catastrophic warehouse fire with hazardous chemicals. Explosion risk. Toxic smoke plume drifting over residential areas. Mass evacuation of 500m radius. Multiple casualties from chemical exposure.",
+        "people_affected": 380, "multiple_casualties": True, "structural_damage": True, "road_blocked": True,
         "department": Department.FIRE,
     },
     {
@@ -216,11 +228,12 @@ DISASTER_SCENARIOS = [
         "people_affected": 32, "multiple_casualties": False, "structural_damage": True, "road_blocked": True,
         "department": Department.FIRE,
     },
+    # ── Position 10: FULL-PIPELINE (CRITICAL — triggers deploy + reroute + evacuation) ──
     {
         "lat": 51.9012, "lon": -8.4637, "address": "MacCurtain Street, Cork",
-        "type": DisasterType.STORM, "severity": DisasterSeverity.MEDIUM,
-        "description": "Storm damage to building facades. Falling masonry causing road closure. Several vehicles damaged.",
-        "people_affected": 60, "multiple_casualties": False, "structural_damage": True, "road_blocked": True,
+        "type": DisasterType.STORM, "severity": DisasterSeverity.CRITICAL,
+        "description": "Catastrophic storm causing multi-building structural collapse in Cork city centre. Masonry falling onto streets, multiple casualties confirmed. All routes into MacCurtain Street blocked. Emergency services overwhelmed.",
+        "people_affected": 520, "multiple_casualties": True, "structural_damage": True, "road_blocked": True,
         "department": Department.FIRE,
     },
     # Galway
@@ -253,11 +266,12 @@ DISASTER_SCENARIOS = [
         "people_affected": 780, "multiple_casualties": False, "structural_damage": True, "road_blocked": True,
         "department": Department.FIRE,
     },
+    # ── Position 15: FULL-PIPELINE (CRITICAL — triggers deploy + reroute + evacuation) ──
     {
         "lat": 52.6814, "lon": -8.5871, "address": "Castletroy, Limerick",
-        "type": DisasterType.FIRE, "severity": DisasterSeverity.MEDIUM,
-        "description": "Industrial unit fire in Castletroy business park. No casualties but significant structural damage.",
-        "people_affected": 45, "multiple_casualties": False, "structural_damage": True, "road_blocked": False,
+        "type": DisasterType.FIRE, "severity": DisasterSeverity.CRITICAL,
+        "description": "Catastrophic explosion and fire at Castletroy industrial complex. Multiple industrial units involved, secondary explosions occurring. Toxic fumes. Multiple casualties confirmed. N7 approach roads blocked.",
+        "people_affected": 310, "multiple_casualties": True, "structural_damage": True, "road_blocked": True,
         "department": Department.FIRE,
     },
     # Waterford
@@ -291,11 +305,12 @@ DISASTER_SCENARIOS = [
         "department": Department.FIRE,
     },
     # Donegal
+    # ── Position 20: FULL-PIPELINE (CRITICAL — triggers deploy + reroute + evacuation) ──
     {
         "lat": 54.9534, "lon": -7.7205, "address": "Letterkenny Town Centre, Co. Donegal",
-        "type": DisasterType.FLOOD, "severity": DisasterSeverity.MEDIUM,
-        "description": "Swilly flooding lower town. Several streets impassable. Residential basements flooded.",
-        "people_affected": 280, "multiple_casualties": False, "structural_damage": False, "road_blocked": True,
+        "type": DisasterType.FLOOD, "severity": DisasterSeverity.CRITICAL,
+        "description": "Catastrophic Swilly river flooding — worst in 50 years. Entire lower town inundated, water rising 2m above street level. Multiple casualties, people trapped on rooftops. Main N13/N14 routes completely blocked.",
+        "people_affected": 850, "multiple_casualties": True, "structural_damage": True, "road_blocked": True,
         "department": Department.FIRE,
     },
     {
@@ -454,7 +469,16 @@ async def seed_full_database(db: AsyncSession = Depends(get_db)):
     now = datetime.utcnow()
 
     # ── STEP 1: Wipe everything (FK-safe order) ───────────────────────────────
+    # BUG FIX: each DELETE is wrapped in its own SAVEPOINT via begin_nested().
+    # If a DELETE fails (e.g. asyncpg lock conflict with a concurrent Celery
+    # task) PostgreSQL marks the outer transaction "in error" and every
+    # subsequent statement fails with InFailedSqlTransaction — silently
+    # swallowed by the bare try/except.  That left old disasters from previous
+    # runs in the DB (hence the "27 disasters / 10 VERIFIED" mystery).
+    # begin_nested() creates a SAVEPOINT; a failure rolls back to that
+    # savepoint only, keeping the outer transaction valid for the next table.
     wipe_tables = [
+        "disaster_chat_sessions",  # no FK to disasters but stores disaster_id
         "audit_logs",
         "traffic_overrides",
         "reroute_plans",
@@ -472,9 +496,11 @@ async def seed_full_database(db: AsyncSession = Depends(get_db)):
     ]
     for tbl in wipe_tables:
         try:
-            await db.execute(text(f"DELETE FROM {tbl}"))
+            async with db.begin_nested():          # SAVEPOINT per table
+                await db.execute(text(f"DELETE FROM {tbl}"))
             logger.debug(f"[dev/seed] cleared {tbl}")
         except Exception as exc:
+            # Rolls back to savepoint — outer transaction stays healthy
             logger.warning(f"[dev/seed] could not clear {tbl}: {exc}")
 
     await db.flush()
@@ -588,14 +614,20 @@ async def seed_full_database(db: AsyncSession = Depends(get_db)):
             "station": stn,
         })
 
+    # Helper: apply small coordinate offset to avoid stacking map pins
+    def _station_offset(lat, lon, dlat, dlon):
+        return lat + dlat, lon + dlon
+
     # Rapid response — 6 units (mix of locations)
+    # Offset ~0.003° (~200–300 m) from co-located fire/garda stations so pins don't stack
+    _rr = _station_offset
     rapid_stations = [
-        {"name": "Dublin City Rapid Response",   "lat": 53.3488, "lon": -6.2607, "city": "Dublin"},
-        {"name": "Cork Rapid Response Unit",      "lat": 51.8985, "lon": -8.4714, "city": "Cork"},
-        {"name": "Galway Rapid Response Unit",    "lat": 53.2755, "lon": -9.0509, "city": "Galway"},
-        {"name": "Limerick Rapid Response Unit",  "lat": 52.6638, "lon": -8.6267, "city": "Limerick"},
-        {"name": "Waterford Rapid Response Unit", "lat": 52.2593, "lon": -7.1102, "city": "Waterford"},
-        {"name": "Sligo Rapid Response Unit",     "lat": 54.2766, "lon": -8.4761, "city": "Sligo"},
+        {"name": "Dublin City Rapid Response",   "lat": _rr(53.3488, -6.2607,  0.003,  0.002)[0], "lon": _rr(53.3488, -6.2607,  0.003,  0.002)[1], "city": "Dublin"},
+        {"name": "Cork Rapid Response Unit",      "lat": _rr(51.8985, -8.4714, -0.003,  0.003)[0], "lon": _rr(51.8985, -8.4714, -0.003,  0.003)[1], "city": "Cork"},
+        {"name": "Galway Rapid Response Unit",    "lat": _rr(53.2755, -9.0509,  0.003, -0.003)[0], "lon": _rr(53.2755, -9.0509,  0.003, -0.003)[1], "city": "Galway"},
+        {"name": "Limerick Rapid Response Unit",  "lat": _rr(52.6638, -8.6267, -0.003,  0.002)[0], "lon": _rr(52.6638, -8.6267, -0.003,  0.002)[1], "city": "Limerick"},
+        {"name": "Waterford Rapid Response Unit", "lat": _rr(52.2593, -7.1102,  0.003,  0.003)[0], "lon": _rr(52.2593, -7.1102,  0.003,  0.003)[1], "city": "Waterford"},
+        {"name": "Sligo Rapid Response Unit",     "lat": _rr(54.2766, -8.4761, -0.003, -0.002)[0], "lon": _rr(54.2766, -8.4761, -0.003, -0.002)[1], "city": "Sligo"},
     ]
     for i, stn in enumerate(rapid_stations):
         unit_specs.append({
@@ -625,11 +657,13 @@ async def seed_full_database(db: AsyncSession = Depends(get_db)):
         })
 
     # Command — 4 units (expanded)
+    # Offset ~0.005° (~400 m) from co-located fire/rapid stations so pins don't stack
+    _cmd = _station_offset
     command_stations = [
-        {"name": "Dublin Mobile Command",        "lat": 53.3488, "lon": -6.2607, "city": "Dublin"},
-        {"name": "Cork Regional Command",        "lat": 51.8985, "lon": -8.4714, "city": "Cork"},
-        {"name": "Limerick Regional Command",    "lat": 52.6638, "lon": -8.6267, "city": "Limerick"},
-        {"name": "National Command Support",     "lat": 53.2755, "lon": -9.0509, "city": "Galway"},
+        {"name": "Dublin Mobile Command",        "lat": _cmd(53.3488, -6.2607, -0.005,  0.005)[0], "lon": _cmd(53.3488, -6.2607, -0.005,  0.005)[1], "city": "Dublin"},
+        {"name": "Cork Regional Command",        "lat": _cmd(51.8985, -8.4714,  0.005, -0.004)[0], "lon": _cmd(51.8985, -8.4714,  0.005, -0.004)[1], "city": "Cork"},
+        {"name": "Limerick Regional Command",    "lat": _cmd(52.6638, -8.6267,  0.004,  0.005)[0], "lon": _cmd(52.6638, -8.6267,  0.004,  0.005)[1], "city": "Limerick"},
+        {"name": "National Command Support",     "lat": _cmd(53.2755, -9.0509, -0.004, -0.005)[0], "lon": _cmd(53.2755, -9.0509, -0.004, -0.005)[1], "city": "Galway"},
     ]
     for i, stn in enumerate(command_stations):
         unit_specs.append({
@@ -673,6 +707,61 @@ async def seed_full_database(db: AsyncSession = Depends(get_db)):
         emergency_units.append(_Row(id=uid, unit_type=spec["type"], unit_code=spec["code"]))
 
     logger.info(f"[dev/seed] created {len(emergency_units)} emergency units")
+
+    # ── STEP 4b: Assign crew members to units (unit_crew table) ──────────────────
+    # Maps unit types to the department of crew to assign.
+    # Indexes into ERT_TEAM_DATA (and ert_members) using the same order:
+    #   FIRE     → indices 0–6   (7 members)
+    #   MEDICAL  → indices 7–13  (7 members)
+    #   POLICE   → indices 14–20 (7 members)
+    #   IT       → index 21      (1 member — not assigned to units)
+    #   RESCUE   → indices 22–23 (2 members, dept=FIRE)
+    _FIRE_INDICES   = [i for i, (_, _, _, _, dept) in enumerate(ERT_TEAM_DATA) if dept == Department.FIRE]
+    _MED_INDICES    = [i for i, (_, _, _, _, dept) in enumerate(ERT_TEAM_DATA) if dept == Department.MEDICAL]
+    _POLICE_INDICES = [i for i, (_, _, _, _, dept) in enumerate(ERT_TEAM_DATA) if dept == Department.POLICE]
+
+    _UNIT_DEPT_MAP = {
+        UnitType.FIRE_ENGINE:     _FIRE_INDICES,
+        UnitType.RAPID_RESPONSE:  _FIRE_INDICES,
+        UnitType.RESCUE:          _FIRE_INDICES,
+        UnitType.COMMAND:         _FIRE_INDICES,
+        UnitType.AMBULANCE:       _MED_INDICES,
+        UnitType.PATROL_CAR:      _POLICE_INDICES,
+    }
+
+    crew_assignments = 0
+    _dept_counters = {
+        "fire":   0,
+        "med":    0,
+        "police": 0,
+    }
+    for eu in emergency_units:
+        member_indices = _UNIT_DEPT_MAP.get(eu.unit_type)
+        if not member_indices:
+            continue
+
+        # Determine which counter to use for cycling
+        if eu.unit_type in (UnitType.FIRE_ENGINE, UnitType.RAPID_RESPONSE, UnitType.RESCUE, UnitType.COMMAND):
+            ckey = "fire"
+        elif eu.unit_type == UnitType.AMBULANCE:
+            ckey = "med"
+        else:
+            ckey = "police"
+
+        # Assign 2 crew members per unit (capacity=4; 2 is sufficient for demo)
+        for _ in range(2):
+            idx = member_indices[_dept_counters[ckey] % len(member_indices)]
+            member = ert_members[idx]
+            _dept_counters[ckey] += 1
+            await db.execute(text("""
+                INSERT INTO unit_crew (unit_id, team_member_id)
+                VALUES (:uid, :mid)
+                ON CONFLICT DO NOTHING
+            """), {"uid": eu.id, "mid": member.id})
+            crew_assignments += 1
+
+    await db.flush()
+    logger.info(f"[dev/seed] created {crew_assignments} unit_crew assignments")
 
     # ── STEP 5: Create 100 PENDING disaster reports (4 per location cluster) ────
     #
@@ -925,4 +1014,49 @@ async def seed_full_database(db: AsyncSession = Depends(get_db)):
             "citizen_token for citizen endpoints. "
             "Re-call POST /dev/seed at any time for a fresh clean slate."
         ),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Reset endpoint — wipe only, no re-seed
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post("/dev/seed/reset", summary="[DEV] Wipe all tables without re-seeding")
+async def reset_database(db: AsyncSession = Depends(get_db)):
+    """
+    Wipes all tables in FK-safe order. Does NOT create any test data.
+    Use POST /dev/seed for a full wipe + seed cycle.
+    """
+    wipe_tables = [
+        "disaster_chat_sessions",
+        "audit_logs",
+        "traffic_overrides",
+        "reroute_plans",
+        "evacuation_plans",
+        "disaster_photos",
+        "deployments",
+        "disaster_reports",
+        "disasters",
+        "active_trips",
+        "unit_crew",
+        "emergency_units",
+        "emergency_teams",
+        "users",
+        "road_segments",
+    ]
+    cleared = []
+    skipped = []
+    for tbl in wipe_tables:
+        try:
+            async with db.begin_nested():
+                await db.execute(text(f"DELETE FROM {tbl}"))
+            cleared.append(tbl)
+        except Exception as exc:
+            skipped.append({"table": tbl, "error": str(exc)})
+
+    await db.commit()
+    return {
+        "message": "Database wiped",
+        "cleared": cleared,
+        "skipped": skipped,
     }
