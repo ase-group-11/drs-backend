@@ -27,6 +27,7 @@ and delivers SMS/push/Socket.IO independently.
 
 import asyncio
 import logging
+import math
 from typing import Dict, Any, List, Optional
 
 from app.providers.integration_service import IntegrationService
@@ -299,8 +300,6 @@ class RerouteService:
         get a small circle drawn around the disaster point instead of a
         TomTom call — gives the frontend something meaningful to render.
         """
-        import math
-
         async def _enrich_one(seg: Dict[str, Any]) -> Dict[str, Any]:
             # Skip if already enriched (re-trigger scenario)
             if seg.get("points"):
@@ -336,20 +335,67 @@ class RerouteService:
                     },
                 }
 
-            # Real segment — ask TomTom for road-following geometry
-            geometry = await self.external.fetch_segment_geometry(
-                start_lat=start_lat,
-                start_lng=start_lng,
-                end_lat=end_lat,
-                end_lng=end_lng,
-            )
-            return {**seg, **geometry}
+            # Real segment — ask TomTom for road-following geometry.
+            # If TomTom is unavailable (expired key, rate-limit, network error)
+            # fall back to the same small-circle pattern used for zero-length
+            # segments so the frontend always has something valid to render.
+            try:
+                geometry = await self.external.fetch_segment_geometry(
+                    start_lat=start_lat,
+                    start_lng=start_lng,
+                    end_lat=end_lat,
+                    end_lng=end_lng,
+                )
+                if geometry.get("points"):
+                    return {**seg, **geometry}
+            except Exception as exc:
+                logger.warning(
+                    f"fetch_segment_geometry failed for {seg.get('segment_id')}: {exc} "
+                    "— falling back to midpoint circle"
+                )
 
-        enriched = await asyncio.gather(
+            # Fallback: draw a small circle centred at the segment midpoint
+            mid_lat = (start_lat + end_lat) / 2
+            mid_lng = (start_lng + end_lng) / 2
+            radius_deg = 0.003  # ~300 m
+            fallback_points = [
+                [
+                    mid_lat + radius_deg * math.cos(math.radians(a)),
+                    mid_lng + radius_deg * math.sin(math.radians(a)),
+                ]
+                for a in range(0, 360, 45)
+            ]
+            fallback_points.append(fallback_points[0])
+            return {
+                **seg,
+                "points": fallback_points,
+                "geojson": {
+                    "type": "Feature",
+                    "geometry": {
+                        "type": "LineString",
+                        "coordinates": [[p[1], p[0]] for p in fallback_points],
+                    },
+                    "properties": {},
+                },
+            }
+
+        # return_exceptions=True so one TomTom failure doesn't kill all segments.
+        # Any Exception result is replaced with the original unenriched segment
+        # (the fallback inside _enrich_one should make raw exceptions rare).
+        raw_results = await asyncio.gather(
             *[_enrich_one(s) for s in segments],
-            return_exceptions=False,
+            return_exceptions=True,
         )
-        return list(enriched)
+        enriched = []
+        for i, res in enumerate(raw_results):
+            if isinstance(res, Exception):
+                logger.error(
+                    f"_enrich_one raised for segment {segments[i].get('segment_id')}: {res}"
+                )
+                enriched.append(segments[i])   # keep unenriched rather than drop
+            else:
+                enriched.append(res)
+        return enriched
 
     # -------------------------------------------------------------------------
     # Step 3 — Traffic data

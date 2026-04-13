@@ -358,18 +358,20 @@ class EnrichmentPipeline:
                     "start_lat": lat, "start_lng": lon,
                     "end_lat": lat, "end_lng": lon}]
         
-        nearby_flow = [
+        nearby_segments = [
             seg for seg in flow
             if seg.get("coordinates") and
             _dist_km(seg["coordinates"][0][0], seg["coordinates"][0][1], lat, lon) <= 2.0
         ]
 
-        # Collect unique sample coords from flow segments (max 5)
-        # Keep the full segment so we have start + end coords
+        # Collect unique sample coords from NEARBY flow segments only (max 5).
+        # Previously this loop iterated over `flow` (all segments) instead of
+        # the filtered `nearby_segments`, causing roads 3+ km from the disaster
+        # (e.g. the N81 in Crumlin) to be included as "blocked roads".
         sample_segments = []
         seen_coords: set = set()
-        for nearby_flow in flow:
-            coords = nearby_flow.get("coordinates", [])
+        for seg in nearby_segments:
+            coords = seg.get("coordinates", [])
             if not coords:
                 continue
             key = (round(coords[0][0], 3), round(coords[0][1], 3))
