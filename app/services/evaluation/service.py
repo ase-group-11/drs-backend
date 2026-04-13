@@ -428,7 +428,7 @@ class DisasterEvaluationService:
             sev_order = ["low", "medium", "high", "critical"]
             max_nearby_severity = max(
                 nearby_reports,
-                key=lambda r: sev_order.index(r["severity"])
+                key=lambda r: sev_order.index(r["severity"].lower())
             )["severity"]
 
         description = report.get("description") or ""
