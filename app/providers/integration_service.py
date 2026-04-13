@@ -493,6 +493,11 @@ class IntegrationService:
         origin = {"lat": start_lat, "lng": start_lng}
         destination = {"lat": end_lat, "lng": end_lng}
 
+        logger.info(
+            f"[TomTom] fetch_segment_geometry → "
+            f"({start_lat:.5f},{start_lng:.5f}) → ({end_lat:.5f},{end_lng:.5f})"
+        )
+
         try:
             result = await self.get_directions(
                 origin=origin,
@@ -503,13 +508,18 @@ class IntegrationService:
             )
             routes = result.get("routes", [])
             if routes:
+                pts = len(routes[0].get("points", []))
+                logger.info(
+                    f"[TomTom] fetch_segment_geometry ✓ — {pts} geometry points returned"
+                )
                 return {
                     "points": routes[0]["points"],
                     "geojson": routes[0]["geojson"],
                 }
+            logger.warning("[TomTom] fetch_segment_geometry — 0 routes returned, using straight line")
         except Exception as exc:
             logger.warning(
-                f"fetch_segment_geometry failed for "
+                f"[TomTom] fetch_segment_geometry FAILED "
                 f"({start_lat},{start_lng})→({end_lat},{end_lng}): "
                 f"{exc} — falling back to straight line"
             )
@@ -563,6 +573,12 @@ class IntegrationService:
                     a["avoidAreaRectangle"] for a in avoid_params
                 ]}
 
+            method = "POST" if payload else "GET"
+            logger.info(
+                f"[TomTom] Routing {method} {origin_str} → {dest_str} "
+                f"alts={alternatives} avoid={len(avoid_params)}"
+            )
+
             if payload:
                 async with session.post(
                     url,
@@ -570,6 +586,7 @@ class IntegrationService:
                     json=payload,
                     timeout=aiohttp.ClientTimeout(total=self.timeout),
                 ) as response:
+                    logger.info(f"[TomTom] Routing response HTTP {response.status}")
                     response.raise_for_status()
                     data = await response.json()
             else:
@@ -578,11 +595,12 @@ class IntegrationService:
                     params=params,
                     timeout=aiohttp.ClientTimeout(total=self.timeout),
                 ) as response:
+                    logger.info(f"[TomTom] Routing response HTTP {response.status}")
                     response.raise_for_status()
                     data = await response.json()
 
             routes = parse_routing_response(data)
-            logger.info(f"get_directions: {len(routes)} routes returned")
+            logger.info(f"[TomTom] get_directions: {len(routes)} route(s) parsed")
             return {"routes": routes}
 
     # -------------------------------------------------------------------------
