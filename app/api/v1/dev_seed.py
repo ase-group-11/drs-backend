@@ -637,7 +637,7 @@ async def seed_full_database(db: AsyncSession = Depends(get_db)):
         """), {
             "id": mid, "phone": phone, "pw": pw_hash, "name": full_name,
             "email": email, "role": role.value, "dept": dept.value,
-            "status": UserStatus.ACTIVE.value, "now": now,
+            "status": UserStatus.ACTIVE.name, "now": now,
         })
         ert_members.append(_Row(id=mid, phone_number=phone, full_name=full_name))
 
@@ -667,7 +667,7 @@ async def seed_full_database(db: AsyncSession = Depends(get_db)):
             )
         """), {
             "id": cid, "phone": phone, "name": full_name, "email": email,
-            "role": UserRole.RESIDENT.value, "status": UserStatus.ACTIVE.value,
+            "role": UserRole.RESIDENT.name, "status": UserStatus.ACTIVE.name,
             "now": now,
         })
         citizens.append(_Row(id=cid, phone_number=phone, full_name=full_name))
@@ -794,10 +794,10 @@ async def seed_full_database(db: AsyncSession = Depends(get_db)):
             )
         """), {
             "id": uid, "code": spec["code"], "name": spec["name"],
-            "utype": spec["type"].value, "dept": spec["dept"].value,
+            "utype": spec["type"].name, "dept": spec["dept"].value,
             "station_name": stn["name"],
             "lon": stn["lon"], "lat": stn["lat"],
-            "status": UnitStatus.AVAILABLE.value,
+            "status": UnitStatus.AVAILABLE.name,
             "capacity": 4, "total_deployments": 0,
             "now": now,
         })
@@ -857,7 +857,7 @@ async def seed_full_database(db: AsyncSession = Depends(get_db)):
                 ST_SetSRID(ST_MakePoint(:lon, :lat), 4326)::geography,
                 :address, :people_affected,
                 :multiple_casualties, :structural_damage, :road_blocked,
-                CAST('pending' AS disaster_report_status),
+                CAST('PENDING' AS disaster_report_status),
                 :created_at, :updated_at
             )
         """), {
@@ -906,7 +906,7 @@ async def seed_full_database(db: AsyncSession = Depends(get_db)):
                     ST_SetSRID(ST_MakePoint(:lon, :lat), 4326)::geography,
                     :address, :people_affected,
                     :multiple_casualties, :structural_damage, :road_blocked,
-                    CAST('pending' AS disaster_report_status),
+                    CAST('PENDING' AS disaster_report_status),
                     :created_at, :updated_at
                 )
             """), {
