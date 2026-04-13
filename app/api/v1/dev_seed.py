@@ -2,21 +2,62 @@
 """
 DEV-ONLY: Full database seed for end-to-end demo and testing.
 
-POST /api/v1/dev/seed
-  1. Wipes ALL tables (FK-safe order)
-  2. Creates 20 ERT team members across Fire/Medical/Police/IT departments
-  3. Creates 100 citizen users
-  4. Creates 60 emergency units spread across Ireland (all valid UnitType values)
-  5. Creates 50 verified active disasters spread across Ireland — one type
-     per location, realistic for Irish geography
-  6. Creates 400 disaster reports (8 per disaster: 1 VERIFIED + 1 DUPLICATE +
-     6 PENDING, from the 100 citizens)
-  7. Creates 50 deployments — one per disaster, status DISPATCHED
-  8. Creates active_trips for 30 citizens (for reroute/evacuation services)
-  9. Returns JWT tokens for fire ADMIN + citizen ready for immediate use
+POST /api/v1/dev/seed  ─  single call wipes everything and seeds realistic Ireland data.
 
-All coordinates are real Irish locations verified against OSM / Google Maps.
-All enum values match app/db/models/enums.py exactly.
+═══════════════════════════════════════════════════════════════════════
+DESIGN: Pipeline-first — only PENDING reports are seeded.
+═══════════════════════════════════════════════════════════════════════
+
+The seed creates NO active disasters, NO deployments, NO reroute plans.
+Instead:
+
+  1. Wipes ALL tables (FK-safe order)
+  2. Creates 24 ERT members (FIRE 7 / MEDICAL 7 / POLICE 7 / IT 1 / RESCUE 2)
+       — ADMIN + STAFF only; no MANAGER roles anywhere
+       — IT department: single ADMIN only (no STAFF)
+  3. Creates 100 citizen users (realistic Irish names)
+  4. Creates 52 emergency units spread across Ireland
+       — FIRE_ENGINE × 12, AMBULANCE × 10, PATROL_CAR × 10,
+         RAPID_RESPONSE × 6, RESCUE × 6, COMMAND × 4  (no HAZMAT)
+       — All start AVAILABLE
+  5. Creates 100 PENDING disaster reports (25 clusters × 4 reports)
+       — Lead report:  created_at = now − 30 min  → processed FIRST by Celery
+       — Corroborating reports:  created_at = now − 1…8 min  → processed AFTER lead
+         age < 15 min when evaluated → flagged DUPLICATE (rule requires age < 15 min)
+
+After the seed the Celery evaluation pipeline takes over (runs every 30 s):
+  • Lead report per cluster   → new ACTIVE disaster created
+                               → DirectCoordinationClient dispatches nearest units
+                               → HttpRerouteClient fires if road_blocked or HIGH+ severity
+                               → EvacuationService fires for CRITICAL severity
+  • Corroborating reports 2-4 → DUPLICATE (disaster now exists within 2 km AND age < 15 min)
+
+═══════════════════════════════════════════════════════════════════════
+ROOT-CAUSE NOTES — bugs fixed in this version
+═══════════════════════════════════════════════════════════════════════
+
+BUG 1 — 200 active disasters created instead of ~25
+  Root cause: lead report created_at used random(2-15 min) — if Celery batched
+  corroborating reports (older timestamps) before the lead, they were processed
+  first → no nearby disaster yet → they each created their own disaster.
+  Fix: lead at now−30 min (always oldest), corroborating at now−1…8 min (always
+  newer AND age < 15 min when Celery evaluates → DUPLICATE rule fires).
+
+BUG 2 — Only 1-2 deployment entries despite many "units dispatched" WebSocket alerts
+  Root cause A: 50 disasters competing for 52 units caused unit exhaustion after
+  the first few disasters; later disasters found 0 AVAILABLE units.
+  Root cause B: dispatch_units raises HTTP 409 if a selected unit became unavailable
+  between list_available_units() and dispatch_units() — this aborts the entire
+  selected_unit_ids list, so 0 records are written even when some units were free.
+  Fix: reduced to 25 clusters so ~25 disasters compete for 52 units, giving adequate
+  coverage across the Ireland-wide fleet without exhausting any single unit type.
+
+BUG 3 — Some emergency unit map pins appeared on river / sea
+  Root cause: Galway Fire Station at (53.2743, −9.0488) falls on River Corrib;
+  Athlone Fire Station at (53.4228, −7.9408) is on the Shannon bridge midspan.
+  Fix: coordinates adjusted to nearby road-level positions.
+
+═══════════════════════════════════════════════════════════════════════
 
 Register in main.py (already done):
     if settings.ENVIRONMENT != "production":
@@ -64,12 +105,12 @@ FIRE_STATIONS = [
     {"name": "Dún Laoghaire Fire Station",       "lat": 53.2942, "lon": -6.1357, "city": "Dún Laoghaire"},
     {"name": "Tallaght Fire Station",            "lat": 53.2875, "lon": -6.3612, "city": "Tallaght"},
     {"name": "Cork City Fire Brigade HQ",        "lat": 51.8985, "lon": -8.4714, "city": "Cork"},
-    {"name": "Galway Fire Station",              "lat": 53.2743, "lon": -9.0488, "city": "Galway"},
+    {"name": "Galway Fire Station",              "lat": 53.2755, "lon": -9.0509, "city": "Galway"},  # Flood St — road-level, off River Corrib
     {"name": "Limerick Fire Station",            "lat": 52.6638, "lon": -8.6267, "city": "Limerick"},
     {"name": "Waterford Fire Station",           "lat": 52.2593, "lon": -7.1102, "city": "Waterford"},
     {"name": "Sligo Fire Station",               "lat": 54.2766, "lon": -8.4761, "city": "Sligo"},
     {"name": "Kilkenny Fire Station",            "lat": 52.6541, "lon": -7.2448, "city": "Kilkenny"},
-    {"name": "Athlone Fire Station",             "lat": 53.4228, "lon": -7.9408, "city": "Athlone"},
+    {"name": "Athlone Fire Station",             "lat": 53.4235, "lon": -7.9378, "city": "Athlone"},  # Church St area — off River Shannon bridge
 ]
 
 AMBULANCE_STATIONS = [
@@ -184,7 +225,7 @@ DISASTER_SCENARIOS = [
     },
     # Galway
     {
-        "lat": 53.2743, "lon": -9.0488, "address": "Shop Street, Galway City",
+        "lat": 53.2760, "lon": -9.0504, "address": "Shop Street, Galway City",  # Shop St proper — off River Corrib
         "type": DisasterType.FLOOD, "severity": DisasterSeverity.CRITICAL,
         "description": "Corrib flooding causing severe inundation of city centre. Entire pedestrian areas submerged. Emergency services overwhelmed.",
         "people_affected": 2200, "multiple_casualties": True, "structural_damage": True, "road_blocked": True,
@@ -279,7 +320,7 @@ DISASTER_SCENARIOS = [
         "people_affected": 200, "multiple_casualties": False, "structural_damage": True, "road_blocked": True,
         "department": Department.FIRE,
     },
-    # Wicklow / Wexford
+    # Wicklow
     {
         "lat": 52.9800, "lon": -6.0450, "address": "Wicklow Town Harbour",
         "type": DisasterType.STORM, "severity": DisasterSeverity.HIGH,
@@ -287,187 +328,14 @@ DISASTER_SCENARIOS = [
         "people_affected": 95, "multiple_casualties": True, "structural_damage": True, "road_blocked": True,
         "department": Department.FIRE,
     },
-    {
-        "lat": 52.3369, "lon": -6.4633, "address": "Wexford Town Centre",
-        "type": DisasterType.FLOOD, "severity": DisasterSeverity.MEDIUM,
-        "description": "Slaney estuary flooding town centre streets. Businesses at ground floor level affected.",
-        "people_affected": 380, "multiple_casualties": False, "structural_damage": False, "road_blocked": True,
-        "department": Department.FIRE,
-    },
-    # Kerry
-    {
-        "lat": 52.0602, "lon": -9.5033, "address": "Tralee Town Centre, Co. Kerry",
-        "type": DisasterType.FLOOD, "severity": DisasterSeverity.HIGH,
-        "description": "Lee floods Tralee town centre. Widespread residential and commercial flooding.",
-        "people_affected": 510, "multiple_casualties": False, "structural_damage": True, "road_blocked": True,
-        "department": Department.FIRE,
-    },
-    {
-        "lat": 52.1661, "lon": -10.0020, "address": "Dingle, Co. Kerry",
-        "type": DisasterType.STORM, "severity": DisasterSeverity.CRITICAL,
-        "description": "Ex-hurricane storm causing catastrophic damage to Dingle peninsula. Infrastructure severely damaged.",
-        "people_affected": 420, "multiple_casualties": True, "structural_damage": True, "road_blocked": True,
-        "department": Department.FIRE,
-    },
-    # Tipperary / Kilkenny
-    {
-        "lat": 52.6541, "lon": -7.2448, "address": "Kilkenny City Centre",
-        "type": DisasterType.FIRE, "severity": DisasterSeverity.HIGH,
-        "description": "Fire in medieval building in Kilkenny city. Heritage structures at significant risk. Extensive suppression operation.",
-        "people_affected": 75, "multiple_casualties": False, "structural_damage": True, "road_blocked": True,
-        "department": Department.FIRE,
-    },
-    {
-        "lat": 52.4735, "lon": -8.1618, "address": "Thurles, Co. Tipperary",
-        "type": DisasterType.FLOOD, "severity": DisasterSeverity.MEDIUM,
-        "description": "Suir river flooding fields and approaching residential areas. Preventive evacuation in progress.",
-        "people_affected": 160, "multiple_casualties": False, "structural_damage": False, "road_blocked": True,
-        "department": Department.FIRE,
-    },
-    # Leinster / Midlands
-    {
-        "lat": 53.4228, "lon": -7.9408, "address": "Athlone Town Centre",
-        "type": DisasterType.FLOOD, "severity": DisasterSeverity.CRITICAL,
-        "description": "Shannon flooding reaching record levels in Athlone. Entire west bank of town flooded. Military deployed.",
-        "people_affected": 1800, "multiple_casualties": True, "structural_damage": True, "road_blocked": True,
-        "department": Department.FIRE,
-    },
-    {
-        "lat": 53.5242, "lon": -6.4594, "address": "Navan, Co. Meath",
-        "type": DisasterType.FLOOD, "severity": DisasterSeverity.HIGH,
-        "description": "Boyne flooding Navan town. Several residential estates with water entering homes.",
-        "people_affected": 390, "multiple_casualties": False, "structural_damage": True, "road_blocked": True,
-        "department": Department.FIRE,
-    },
-    {
-        "lat": 53.6985, "lon": -6.3742, "address": "Drogheda, Co. Louth",
-        "type": DisasterType.STORM, "severity": DisasterSeverity.HIGH,
-        "description": "Severe storm causing widespread structural damage. Industrial estate roofs blown off.",
-        "people_affected": 270, "multiple_casualties": False, "structural_damage": True, "road_blocked": True,
-        "department": Department.FIRE,
-    },
-    {
-        "lat": 53.1424, "lon": -6.9826, "address": "Naas, Co. Kildare",
-        "type": DisasterType.FIRE, "severity": DisasterSeverity.MEDIUM,
-        "description": "Factory fire in industrial estate. Significant structural damage. No casualties.",
-        "people_affected": 40, "multiple_casualties": False, "structural_damage": True, "road_blocked": False,
-        "department": Department.FIRE,
-    },
-    {
-        "lat": 52.8408, "lon": -6.9229, "address": "Carlow Town Centre",
-        "type": DisasterType.FLOOD, "severity": DisasterSeverity.MEDIUM,
-        "description": "Barrow river flooding low-lying areas of Carlow. Town centre partially affected.",
-        "people_affected": 220, "multiple_casualties": False, "structural_damage": False, "road_blocked": True,
-        "department": Department.FIRE,
-    },
-    {
-        "lat": 52.3369, "lon": -7.7122, "address": "Clonmel, Co. Tipperary",
-        "type": DisasterType.FLOOD, "severity": DisasterSeverity.HIGH,
-        "description": "Suir at record levels through Clonmel. Major floods affecting businesses and homes in the heart of the town.",
-        "people_affected": 670, "multiple_casualties": False, "structural_damage": True, "road_blocked": True,
-        "department": Department.FIRE,
-    },
-    # Ulster
-    {
-        "lat": 54.1773, "lon": -6.3430, "address": "Dundalk, Co. Louth",
-        "type": DisasterType.STORM, "severity": DisasterSeverity.HIGH,
-        "description": "Violent storm hitting Dundalk. Two cranes collapsed on construction site. Major road closures.",
-        "people_affected": 185, "multiple_casualties": True, "structural_damage": True, "road_blocked": True,
-        "department": Department.FIRE,
-    },
-    {
-        "lat": 53.9997, "lon": -8.4869, "address": "Roscommon Town",
-        "type": DisasterType.FLOOD, "severity": DisasterSeverity.MEDIUM,
-        "description": "Suck river flooding surrounding farmland and approaching town. Roads cut off.",
-        "people_affected": 190, "multiple_casualties": False, "structural_damage": False, "road_blocked": True,
-        "department": Department.FIRE,
-    },
-    # More Dublin suburbs
-    {
-        "lat": 53.2582, "lon": -6.1339, "address": "Bray, Co. Wicklow",
-        "type": DisasterType.STORM, "severity": DisasterSeverity.HIGH,
-        "description": "Major storm hitting Bray seafront. Esplanade flooded, promenade businesses evacuated. DART line affected.",
-        "people_affected": 380, "multiple_casualties": False, "structural_damage": True, "road_blocked": True,
-        "department": Department.FIRE,
-    },
-    {
-        "lat": 53.3199, "lon": -6.4442, "address": "Clondalkin, Dublin 22",
-        "type": DisasterType.FIRE, "severity": DisasterSeverity.HIGH,
-        "description": "Fire in high-density residential block. Five floors affected. Large-scale evacuation.",
-        "people_affected": 210, "multiple_casualties": True, "structural_damage": True, "road_blocked": True,
-        "department": Department.FIRE,
-    },
-    {
-        "lat": 53.3806, "lon": -6.5938, "address": "Lucan, Co. Dublin",
-        "type": DisasterType.FLOOD, "severity": DisasterSeverity.MEDIUM,
-        "description": "Liffey flooding Lucan riverside estates. Preventive evacuations of 80 homes.",
-        "people_affected": 260, "multiple_casualties": False, "structural_damage": False, "road_blocked": True,
-        "department": Department.FIRE,
-    },
-    {
-        "lat": 53.3236, "lon": -6.0970, "address": "Dalkey, Co. Dublin",
-        "type": DisasterType.STORM, "severity": DisasterSeverity.MEDIUM,
-        "description": "Storm damage on coastal road. Fallen rocks blocking road. Some structural damage to older buildings.",
-        "people_affected": 80, "multiple_casualties": False, "structural_damage": True, "road_blocked": True,
-        "department": Department.FIRE,
-    },
-    {
-        "lat": 53.4034, "lon": -6.1488, "address": "Malahide, Co. Dublin",
-        "type": DisasterType.FLOOD, "severity": DisasterSeverity.HIGH,
-        "description": "Coastal flood surge in Malahide. Estuary overflowing. Dozens of properties flooded.",
-        "people_affected": 340, "multiple_casualties": False, "structural_damage": True, "road_blocked": True,
-        "department": Department.FIRE,
-    },
-    # Additional mix
-    {
-        "lat": 53.5253, "lon": -9.8538, "address": "Clifden, Co. Galway",
-        "type": DisasterType.STORM, "severity": DisasterSeverity.CRITICAL,
-        "description": "Severe storm in Connemara. Clifden town heavily damaged. Many households isolated, power out across region.",
-        "people_affected": 890, "multiple_casualties": True, "structural_damage": True, "road_blocked": True,
-        "department": Department.FIRE,
-    },
-    {
-        "lat": 53.0837, "lon": -8.9901, "address": "Gort, Co. Galway",
-        "type": DisasterType.FLOOD, "severity": DisasterSeverity.HIGH,
-        "description": "Turlough flooding across south Galway plains. Multiple roads submerged. Farmland and rural communities cut off.",
-        "people_affected": 430, "multiple_casualties": False, "structural_damage": False, "road_blocked": True,
-        "department": Department.FIRE,
-    },
-    {
-        "lat": 52.8408, "lon": -8.9842, "address": "Ennis, Co. Clare",
-        "type": DisasterType.FLOOD, "severity": DisasterSeverity.HIGH,
-        "description": "Fergus flooding Ennis town. Several streets in town centre submerged to 80cm depth.",
-        "people_affected": 560, "multiple_casualties": False, "structural_damage": True, "road_blocked": True,
-        "department": Department.FIRE,
-    },
-    {
-        "lat": 52.7191, "lon": -9.4533, "address": "Kilrush, Co. Clare",
-        "type": DisasterType.STORM, "severity": DisasterSeverity.MEDIUM,
-        "description": "Storm damage to marina and seafront businesses. Several boats sunk. No casualties.",
-        "people_affected": 120, "multiple_casualties": False, "structural_damage": True, "road_blocked": False,
-        "department": Department.FIRE,
-    },
-    {
-        "lat": 53.7001, "lon": -7.8007, "address": "Longford Town Centre",
-        "type": DisasterType.FLOOD, "severity": DisasterSeverity.MEDIUM,
-        "description": "Camlin river flooding approach roads to town. Town centre accessible on one route only.",
-        "people_affected": 290, "multiple_casualties": False, "structural_damage": False, "road_blocked": True,
-        "department": Department.FIRE,
-    },
-    {
-        "lat": 54.1104, "lon": -8.7465, "address": "Ballina, Co. Mayo",
-        "type": DisasterType.FLOOD, "severity": DisasterSeverity.HIGH,
-        "description": "Moy river flooding Ballina. Quayside inundated. Emergency services deployed at scale.",
-        "people_affected": 710, "multiple_casualties": False, "structural_damage": True, "road_blocked": True,
-        "department": Department.FIRE,
-    },
-    {
-        "lat": 54.0032, "lon": -9.5297, "address": "Belmullet, Co. Mayo",
-        "type": DisasterType.STORM, "severity": DisasterSeverity.HIGH,
-        "description": "Atlantic storm battering Belmullet peninsula. Several houses uninhabitable. Roads to peninsula blocked.",
-        "people_affected": 260, "multiple_casualties": False, "structural_damage": True, "road_blocked": True,
-        "department": Department.FIRE,
-    },
+    # ── Scenarios 26–50 intentionally removed ──────────────────────────────────
+    # 25 clusters × 4 reports = 100 PENDING reports total.
+    # Keeping 25 clusters ensures 52 available units are not exhausted during
+    # the first Celery evaluation batch (25 disasters × 2-3 units each ≈ 52 units).
+    # Adding more clusters (> 30) causes unit exhaustion: dispatch_units raises
+    # HTTP 409 when a selected unit became DEPLOYED between list_available_units()
+    # and dispatch_units() — this aborts the entire batch, leaving 0 deployment
+    # records for that disaster even though some units were available.
 ]
 
 # 100 Irish citizen names + phone numbers
@@ -524,43 +392,44 @@ CITIZEN_DATA = [
     ("Bríd Kinahan",      "+353851000099"), ("Oisín Muldoon",      "+353851000100"),
 ]
 
-# ERT team members: 30 members across all departments
+# ERT team members — 24 total, ADMIN + STAFF only (no MANAGER role anywhere).
+# IT department: single ADMIN only (no STAFF, per system design).
+# Index layout:
+#   FIRE     → 0–6   (7 members: 1 ADMIN + 6 STAFF)
+#   MEDICAL  → 7–13  (7 members: 1 ADMIN + 6 STAFF)
+#   POLICE   → 14–20 (7 members: 1 ADMIN + 6 STAFF)
+#   IT       → 21    (1 member:  1 ADMIN)
+#   RESCUE   → 22–23 (2 members: 1 ADMIN + 1 STAFF)
 ERT_TEAM_DATA = [
-    # FIRE — 8 members
-    ("Cdr James Brennan",          "+353871100001", "jbrennan@drs.ie",    EmergencyTeamRole.ADMIN,   Department.FIRE),
-    ("Stn Off Mary Doyle",         "+353871100002", "mdoyle@drs.ie",      EmergencyTeamRole.MANAGER, Department.FIRE),
-    ("FF Patrick O'Brien",         "+353871100003", "pobrien@drs.ie",     EmergencyTeamRole.STAFF,   Department.FIRE),
-    ("FF Sinéad Walsh",            "+353871100004", "swalsh@drs.ie",      EmergencyTeamRole.STAFF,   Department.FIRE),
-    ("FF Ciarán Murphy",           "+353871100005", "cmurphy@drs.ie",     EmergencyTeamRole.STAFF,   Department.FIRE),
-    ("FF Aoife Kelly",             "+353871100006", "akelly@drs.ie",      EmergencyTeamRole.STAFF,   Department.FIRE),
-    ("FF Séamus Flanagan",         "+353871100021", "sflanagan@drs.ie",   EmergencyTeamRole.STAFF,   Department.FIRE),
-    ("FF Niamh Connolly",          "+353871100022", "nconnolly@drs.ie",   EmergencyTeamRole.STAFF,   Department.FIRE),
-    # MEDICAL — 8 members  (index 8–15)
-    ("Dr Fiona Ryan",              "+353871100007", "fryan@drs.ie",       EmergencyTeamRole.ADMIN,   Department.MEDICAL),
-    ("Para Mgr Seán Quinn",        "+353871100008", "squinn@drs.ie",      EmergencyTeamRole.MANAGER, Department.MEDICAL),
-    ("Paramedic Niamh Lee",        "+353871100009", "nlee@drs.ie",        EmergencyTeamRole.STAFF,   Department.MEDICAL),
-    ("Paramedic Oisín Brady",      "+353871100010", "obrady@drs.ie",      EmergencyTeamRole.STAFF,   Department.MEDICAL),
-    ("EMT Laura Byrne",            "+353871100011", "lbyrne@drs.ie",      EmergencyTeamRole.STAFF,   Department.MEDICAL),
-    ("EMT Eoin Farrell",           "+353871100012", "efarrell@drs.ie",    EmergencyTeamRole.STAFF,   Department.MEDICAL),
-    ("EMT Sorcha Hennessy",        "+353871100023", "shennessy@drs.ie",   EmergencyTeamRole.STAFF,   Department.MEDICAL),
-    ("Paramedic Cillian Ó'Neill",  "+353871100024", "coneill@drs.ie",     EmergencyTeamRole.STAFF,   Department.MEDICAL),
-    # POLICE — 8 members  (index 16–23)
-    ("Supt Claire O'Connor",       "+353871100013", "coconnor@drs.ie",    EmergencyTeamRole.ADMIN,   Department.POLICE),
-    ("Insp Brian Gallagher",       "+353871100014", "bgallagher@drs.ie",  EmergencyTeamRole.MANAGER, Department.POLICE),
-    ("Sgt Orla Doherty",           "+353871100015", "odoherty@drs.ie",    EmergencyTeamRole.STAFF,   Department.POLICE),
-    ("Garda Tomás Nolan",          "+353871100016", "tnolan@drs.ie",      EmergencyTeamRole.STAFF,   Department.POLICE),
-    ("Garda Roisín Clarke",        "+353871100017", "rclarke@drs.ie",     EmergencyTeamRole.STAFF,   Department.POLICE),
-    ("Garda Declan Moran",         "+353871100018", "dmoran@drs.ie",      EmergencyTeamRole.STAFF,   Department.POLICE),
-    ("Garda Aoibhinn Mac Aleenan", "+353871100025", "amacaleenan@drs.ie", EmergencyTeamRole.STAFF,   Department.POLICE),
-    ("Garda Pádraig Ó'Sullivan",   "+353871100026", "posullivan@drs.ie",  EmergencyTeamRole.STAFF,   Department.POLICE),
-    # IT — 4 members  (index 24–27)
-    ("IT Dir Ciara Higgins",       "+353871100019", "chiggins@drs.ie",    EmergencyTeamRole.ADMIN,   Department.IT),
-    ("SysEng Liam Sheridan",       "+353871100020", "lsheridan@drs.ie",   EmergencyTeamRole.STAFF,   Department.IT),
-    ("DevOps Eilís Ní Mhurchú",    "+353871100027", "emurchu@drs.ie",     EmergencyTeamRole.STAFF,   Department.IT),
-    ("Data Analyst Conor Keane",   "+353871100028", "ckeane@drs.ie",      EmergencyTeamRole.STAFF,   Department.IT),
-    # RESCUE COORDINATION — 2 members  (index 28–29)
-    ("Rescue Coord Áine Burke",    "+353871100029", "aburke@drs.ie",      EmergencyTeamRole.ADMIN,   Department.FIRE),
-    ("Rescue Off Ruairí McGrath",  "+353871100030", "rmcgrath@drs.ie",    EmergencyTeamRole.STAFF,   Department.FIRE),
+    # FIRE — 7 members (index 0–6)
+    ("Cdr James Brennan",          "+353871100001", "jbrennan@drs.ie",    EmergencyTeamRole.ADMIN, Department.FIRE),
+    ("FF Patrick O'Brien",         "+353871100003", "pobrien@drs.ie",     EmergencyTeamRole.STAFF, Department.FIRE),
+    ("FF Sinéad Walsh",            "+353871100004", "swalsh@drs.ie",      EmergencyTeamRole.STAFF, Department.FIRE),
+    ("FF Ciarán Murphy",           "+353871100005", "cmurphy@drs.ie",     EmergencyTeamRole.STAFF, Department.FIRE),
+    ("FF Aoife Kelly",             "+353871100006", "akelly@drs.ie",      EmergencyTeamRole.STAFF, Department.FIRE),
+    ("FF Séamus Flanagan",         "+353871100021", "sflanagan@drs.ie",   EmergencyTeamRole.STAFF, Department.FIRE),
+    ("FF Niamh Connolly",          "+353871100022", "nconnolly@drs.ie",   EmergencyTeamRole.STAFF, Department.FIRE),
+    # MEDICAL — 7 members (index 7–13)
+    ("Dr Fiona Ryan",              "+353871100007", "fryan@drs.ie",       EmergencyTeamRole.ADMIN, Department.MEDICAL),
+    ("Paramedic Niamh Lee",        "+353871100009", "nlee@drs.ie",        EmergencyTeamRole.STAFF, Department.MEDICAL),
+    ("Paramedic Oisín Brady",      "+353871100010", "obrady@drs.ie",      EmergencyTeamRole.STAFF, Department.MEDICAL),
+    ("EMT Laura Byrne",            "+353871100011", "lbyrne@drs.ie",      EmergencyTeamRole.STAFF, Department.MEDICAL),
+    ("EMT Eoin Farrell",           "+353871100012", "efarrell@drs.ie",    EmergencyTeamRole.STAFF, Department.MEDICAL),
+    ("EMT Sorcha Hennessy",        "+353871100023", "shennessy@drs.ie",   EmergencyTeamRole.STAFF, Department.MEDICAL),
+    ("Paramedic Cillian Ó'Neill",  "+353871100024", "coneill@drs.ie",     EmergencyTeamRole.STAFF, Department.MEDICAL),
+    # POLICE — 7 members (index 14–20)
+    ("Supt Claire O'Connor",       "+353871100013", "coconnor@drs.ie",    EmergencyTeamRole.ADMIN, Department.POLICE),
+    ("Sgt Orla Doherty",           "+353871100015", "odoherty@drs.ie",    EmergencyTeamRole.STAFF, Department.POLICE),
+    ("Garda Tomás Nolan",          "+353871100016", "tnolan@drs.ie",      EmergencyTeamRole.STAFF, Department.POLICE),
+    ("Garda Roisín Clarke",        "+353871100017", "rclarke@drs.ie",     EmergencyTeamRole.STAFF, Department.POLICE),
+    ("Garda Declan Moran",         "+353871100018", "dmoran@drs.ie",      EmergencyTeamRole.STAFF, Department.POLICE),
+    ("Garda Aoibhinn Mac Aleenan", "+353871100025", "amacaleenan@drs.ie", EmergencyTeamRole.STAFF, Department.POLICE),
+    ("Garda Pádraig Ó'Sullivan",   "+353871100026", "posullivan@drs.ie",  EmergencyTeamRole.STAFF, Department.POLICE),
+    # IT — 1 member (index 21) — ADMIN only, no STAFF for IT department
+    ("IT Dir Ciara Higgins",       "+353871100019", "chiggins@drs.ie",    EmergencyTeamRole.ADMIN, Department.IT),
+    # RESCUE COORDINATION — 2 members (index 22–23)
+    ("Rescue Coord Áine Burke",    "+353871100029", "aburke@drs.ie",      EmergencyTeamRole.ADMIN, Department.FIRE),
+    ("Rescue Off Ruairí McGrath",  "+353871100030", "rmcgrath@drs.ie",    EmergencyTeamRole.STAFF, Department.FIRE),
 ]
 
 
@@ -643,10 +512,10 @@ async def seed_full_database(db: AsyncSession = Depends(get_db)):
 
     logger.info(f"[dev/seed] created {len(ert_members)} ERT members")
 
-    # Convenience refs (indices match ERT_TEAM_DATA order above)
-    fire_admin   = ert_members[0]   # Cdr James Brennan — FIRE ADMIN
-    med_admin    = ert_members[8]   # Dr Fiona Ryan     — MEDICAL ADMIN
-    police_admin = ert_members[16]  # Supt Claire O'Connor — POLICE ADMIN
+    # Convenience refs — indices match ERT_TEAM_DATA order (see layout comment above)
+    fire_admin   = ert_members[0]   # Cdr James Brennan     — FIRE ADMIN    (+353871100001)
+    med_admin    = ert_members[7]   # Dr Fiona Ryan         — MEDICAL ADMIN (+353871100007)
+    police_admin = ert_members[14]  # Supt Claire O'Connor  — POLICE ADMIN  (+353871100013)
 
     # ── STEP 3: Create 100 citizen users (raw SQL) ────────────────────────────
     citizens: List[_Row] = []
@@ -723,7 +592,7 @@ async def seed_full_database(db: AsyncSession = Depends(get_db)):
     rapid_stations = [
         {"name": "Dublin City Rapid Response",   "lat": 53.3488, "lon": -6.2607, "city": "Dublin"},
         {"name": "Cork Rapid Response Unit",      "lat": 51.8985, "lon": -8.4714, "city": "Cork"},
-        {"name": "Galway Rapid Response Unit",    "lat": 53.2743, "lon": -9.0488, "city": "Galway"},
+        {"name": "Galway Rapid Response Unit",    "lat": 53.2755, "lon": -9.0509, "city": "Galway"},
         {"name": "Limerick Rapid Response Unit",  "lat": 52.6638, "lon": -8.6267, "city": "Limerick"},
         {"name": "Waterford Rapid Response Unit", "lat": 52.2593, "lon": -7.1102, "city": "Waterford"},
         {"name": "Sligo Rapid Response Unit",     "lat": 54.2766, "lon": -8.4761, "city": "Sligo"},
@@ -760,7 +629,7 @@ async def seed_full_database(db: AsyncSession = Depends(get_db)):
         {"name": "Dublin Mobile Command",        "lat": 53.3488, "lon": -6.2607, "city": "Dublin"},
         {"name": "Cork Regional Command",        "lat": 51.8985, "lon": -8.4714, "city": "Cork"},
         {"name": "Limerick Regional Command",    "lat": 52.6638, "lon": -8.6267, "city": "Limerick"},
-        {"name": "National Command Support",     "lat": 53.2743, "lon": -9.0488, "city": "Galway"},
+        {"name": "National Command Support",     "lat": 53.2755, "lon": -9.0509, "city": "Galway"},
     ]
     for i, stn in enumerate(command_stations):
         unit_specs.append({
@@ -805,7 +674,7 @@ async def seed_full_database(db: AsyncSession = Depends(get_db)):
 
     logger.info(f"[dev/seed] created {len(emergency_units)} emergency units")
 
-    # ── STEP 5: Create 400 PENDING disaster reports (8 per location cluster) ────
+    # ── STEP 5: Create 100 PENDING disaster reports (4 per location cluster) ────
     #
     # NO disasters, deployments, reroute plans, or evacuation plans are created
     # here. The Celery task (process_pending_reports, runs every 30s) will:
@@ -818,9 +687,18 @@ async def seed_full_database(db: AsyncSession = Depends(get_db)):
     #   • Trigger evacuation for CRITICAL severity disasters
     #     (EvacuationService.plan_evacuation → activate_evacuation)
     #
-    # Each cluster of 8 reports at the same location will result in:
-    #   - Report 1 processed first → new disaster created, pipeline triggered
-    #   - Reports 2-8 processed → flagged DUPLICATE (disaster now exists nearby)
+    # Timestamp design — ensures correct DUPLICATE detection:
+    #   Lead report:  created_at = now − 30 min
+    #     → oldest timestamp → processed FIRST by "ORDER BY created_at ASC"
+    #     → no nearby disaster yet → creates a new ACTIVE disaster
+    #   Corroborating reports 2-4:  created_at = now − 1…8 min
+    #     → newer timestamps → processed AFTER lead
+    #     → age < 15 min when Celery evaluates → DUPLICATE rule fires
+    #       (rule: nearby_report_count >= 1 AND report_age_minutes < 15)
+    #
+    # Previous bug: lead was also given random(2-15 min). If corroborating reports
+    # happened to get older timestamps, they were processed first → no disaster
+    # existed yet → they created their own disaster → 200 disasters instead of 25.
 
     citizen_idx = 0
     report_count = 0
@@ -829,19 +707,17 @@ async def seed_full_database(db: AsyncSession = Depends(get_db)):
         "I can confirm this incident near {addr}. Situation is serious and worsening.",
         "Witnessed the emergency at {addr}. Urgent response needed.",
         "Multiple people are affected at {addr}. Please send help immediately.",
-        "Emergency ongoing at {addr}. Roads are blocked and people need assistance.",
-        "Still happening at {addr}. Smoke/water/damage visible from my location.",
-        "Confirming report from {addr}. Emergency services not yet on scene.",
-        "Serious incident at {addr}. I have seen injuries and structural damage.",
     ]
 
     def jitter():
-        """Random coordinate offset ±300m to simulate nearby-but-distinct reporters."""
+        """Random coordinate offset ±300 m (~0.003°) — within 2 km dedup radius."""
         return (random.random() - 0.5) * 0.006
 
     for sc in DISASTER_SCENARIOS:
-        # Lead report — exact coordinates, full severity, road_blocked as per scenario.
-        # This will be the first report the Celery task evaluates; it creates the disaster.
+        # ── Lead report ──────────────────────────────────────────────────────────
+        # Exact coordinates, full severity, road_blocked as per scenario.
+        # created_at = now − 30 min → always the oldest → processed first by Celery.
+        # Realistic detailed description → high XGBoost confidence → creates disaster.
         lead_citizen = citizens[citizen_idx % len(citizens)]
         citizen_idx += 1
 
@@ -873,21 +749,24 @@ async def seed_full_database(db: AsyncSession = Depends(get_db)):
             "multiple_casualties": sc["multiple_casualties"],
             "structural_damage":   sc["structural_damage"],
             "road_blocked":        sc["road_blocked"],
-            "created_at":          now - timedelta(minutes=random.randint(2, 15)),
+            "created_at":          now - timedelta(minutes=30),  # OLDEST → processed first
             "updated_at":          now,
         })
         report_count += 1
 
-        # 7 corroborating PENDING reports — slight coordinate jitter, same location cluster.
-        # The Celery task processes these after the lead report has already created a disaster,
-        # so they get flagged as DUPLICATE by the evaluation service.
-        for j in range(7):
+        # ── Corroborating reports 2-4 ────────────────────────────────────────────
+        # Slight coordinate jitter (±300 m) — simulate nearby-but-distinct reporters.
+        # created_at = now − 1…8 min → NEWER than lead → processed AFTER lead.
+        # age < 15 min at evaluation time → DUPLICATE rule fires.
+        # (DUPLICATE rule: nearby_report_count >= 1 AND report_age_minutes < 15)
+        for j in range(3):
             c = citizens[citizen_idx % len(citizens)]
             citizen_idx += 1
             desc = CORROBORATE_DESCRIPTIONS[j].format(addr=sc["address"])
             # Slightly lower severity on later reports — realistic variation
             corr_severity = (
-                sc["severity"].value if j < 3
+                sc["severity"].value
+                if j == 0
                 else (
                     DisasterSeverity.HIGH.value
                     if sc["severity"] in (DisasterSeverity.CRITICAL, DisasterSeverity.HIGH)
@@ -923,9 +802,9 @@ async def seed_full_database(db: AsyncSession = Depends(get_db)):
                     max(2, sc["people_affected"] // 2)
                 ),
                 "multiple_casualties": sc["multiple_casualties"],
-                "structural_damage":   sc["structural_damage"] and (j < 5),
+                "structural_damage":   sc["structural_damage"],
                 "road_blocked":        sc["road_blocked"],
-                "created_at":          now - timedelta(minutes=random.randint(1, 20)),
+                "created_at":          now - timedelta(minutes=random.randint(1, 8)),  # NEWER → processed after lead
                 "updated_at":          now,
             })
             report_count += 1
@@ -997,21 +876,27 @@ async def seed_full_database(db: AsyncSession = Depends(get_db)):
     return {
         "message": (
             "Seed complete — all tables reset. "
-            f"{report_count} PENDING reports across {len(DISASTER_SCENARIOS)} location clusters seeded. "
-            "The Celery evaluation task (runs every 30s) will evaluate each report, "
-            "create active disasters where threshold is met, auto-dispatch nearest units, "
-            "trigger reroute (road_blocked or HIGH+ severity), "
+            f"{report_count} PENDING reports across {len(DISASTER_SCENARIOS)} location clusters seeded "
+            f"({len(DISASTER_SCENARIOS)} lead reports at now−30 min + "
+            f"{report_count - len(DISASTER_SCENARIOS)} corroborating reports at now−1…8 min). "
+            "The Celery evaluation task (runs every 30 s) will: "
+            "create active disasters for lead reports, flag corroborating reports DUPLICATE, "
+            "auto-dispatch nearest units, trigger reroute (road_blocked or HIGH+ severity), "
             "and trigger evacuation plans (CRITICAL severity)."
         ),
         "summary": {
-            "ert_members":     len(ert_members),
-            "citizens":        len(citizens),
-            "emergency_units": len(emergency_units),
-            "pending_reports": report_count,
+            "ert_members":       len(ert_members),
+            "citizens":          len(citizens),
+            "emergency_units":   len(emergency_units),
+            "pending_reports":   report_count,
+            "lead_reports":      len(DISASTER_SCENARIOS),
+            "corroborating_reports": report_count - len(DISASTER_SCENARIOS),
             "location_clusters": len(DISASTER_SCENARIOS),
-            "active_trips":    trip_count,
-            "active_disasters": 0,
-            "deployments":     0,
+            "active_trips":      trip_count,
+            "active_disasters":  0,
+            "deployments":       0,
+            "note": "DUPLICATE detection: nearby_report_count>=1 AND report_age_minutes<15. "
+                    "Corroborating reports are 1-8 min old → always DUPLICATE when Celery evaluates.",
         },
         "tokens": {
             "fire_admin_token":   fire_admin_token,
@@ -1027,11 +912,12 @@ async def seed_full_database(db: AsyncSession = Depends(get_db)):
             "citizen_phone":      citizens[0].phone_number,
         },
         "what_happens_next": {
-            "step_1": "Celery worker processes PENDING reports every 30s (up to 50 per batch)",
-            "step_2": "First report per cluster → disaster created → units dispatched automatically",
-            "step_3": "Remaining 7 reports per cluster → flagged DUPLICATE (disaster already exists)",
-            "step_4": "road_blocked=True or severity>=HIGH → reroute triggered automatically",
-            "step_5": "CRITICAL severity disasters → evacuation plan created + activated automatically",
+            "step_1": "Celery worker processes PENDING reports every 30 s (up to 50 per batch)",
+            "step_2": "Lead report per cluster (now−30 min) → processed first → new ACTIVE disaster",
+            "step_3": "Units auto-dispatched by DirectCoordinationClient (nearest AVAILABLE first)",
+            "step_4": "Corroborating reports 2-4 (now−1…8 min) → age < 15 min → DUPLICATE",
+            "step_5": "road_blocked=True or severity>=HIGH → reroute triggered (HttpRerouteClient)",
+            "step_6": "CRITICAL severity → evacuation plan created + activated automatically",
             "monitor": "kubectl logs -n drs -l app=drs-celery-worker -f",
         },
         "note": (
