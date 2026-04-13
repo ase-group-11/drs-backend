@@ -250,6 +250,25 @@ class DisasterEvaluationService:
             if updated_report and updated_report.get("disaster_id"):
                 result.disaster_id = str(updated_report["disaster_id"])
 
+        # 9c. DUPLICATE pioneer normalisation
+        # If the rules engine flagged this report DUPLICATE but no existing active
+        # disaster was found (_persist_result fell through and created a pioneer
+        # disaster record), the flag is still "DUPLICATE" on result.
+        # _dispatch_downstream and the RabbitMQ publish both skip DUPLICATE — so
+        # units would never be dispatched for this disaster.
+        # Promote the flag to NORMAL so downstream triggers fire correctly.
+        if (
+            result.flag == EvaluationFlag.DUPLICATE.name
+            and tracking_id is not None
+        ):
+            logger.info(
+                "Report %s: DUPLICATE pioneer promoted to NORMAL for downstream dispatch "
+                "(disaster %s created as pioneer).",
+                report_id,
+                result.disaster_id,
+            )
+            result.flag = EvaluationFlag.NORMAL.name
+
         # 10. Publish evaluation result to message queue — fire-and-forget
         #     FALSE_ALARM and DUPLICATE don't create new disasters, so skip the queue.
 

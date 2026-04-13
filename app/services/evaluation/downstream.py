@@ -428,9 +428,18 @@ class DirectCoordinationClient(BaseCoordinationClient):
                 special_instructions="Auto-dispatched by evaluation service",
             )
 
-            # Publish disaster.dispatched RabbitMQ event.
-            # Normally done via BackgroundTasks in the API layer — we do it
-            # directly here since we bypass the API layer entirely.
+            # ── CRITICAL: commit before publishing ───────────────────────────
+            # dispatch_units only calls flush() — the unit-status UPDATEs and
+            # deployment INSERTs are in an uncommitted transaction on self._db.
+            # The Celery task's `async with async_session_factory() as db:`
+            # calls session.close() on exit which ROLLS BACK any uncommitted
+            # transaction. Without this commit, all deployment records and unit
+            # status changes are silently discarded even though RabbitMQ already
+            # fired "units dispatched" — leaving the frontend showing 0 units.
+            await self._db.commit()
+
+            # Publish disaster.dispatched RabbitMQ event — only after commit so
+            # the deployment records are durably stored before notifying clients.
             pending_event = result.pop("_pending_event", None)
             if pending_event:
                 try:
@@ -511,8 +520,15 @@ class DirectCoordinationClient(BaseCoordinationClient):
                 plan_id, disaster_id, estimated_population, impact_radius_km,
             )
 
+            # Phase 2 — commit the plan before activating so activate_evacuation
+            # can read the plan record in the same session or a fresh one.
+            await self._db.commit()
+
             # Phase 3 — activate (sends alerts, pushes notifications)
             await evacuation_service.activate_evacuation(plan_id=plan_id)
+
+            # Commit activation changes (status update, notification records, etc.)
+            await self._db.commit()
 
             logger.info(
                 "DirectCoordinationClient.trigger_evacuation: "
