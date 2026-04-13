@@ -327,19 +327,26 @@ class DisasterEvaluationService:
             logger.warning("Could not commit before downstream dispatch — reroute may fail with FK error")
 
         # Fire downstream triggers — fire-and-forget; never blocks the response
+        # Only fires when this evaluation actually created a new disaster (tracking_id
+        # is not None). When the race-condition guard in _persist_result fires, it
+        # returns None — the report is marked DUPLICATE in the DB and linked to an
+        # existing disaster. Dispatching in that case would use the report_id as the
+        # disaster_id (no disaster with that UUID exists), producing "Disaster not found"
+        # errors in reroute and evacuation.
         # trigger_reroute_override=False suppresses reroute regardless of model decision
         # trigger_reroute_override=True forces reroute regardless of model decision
         # trigger_reroute_override=None uses model's own result.trigger_reroute
-        await self._dispatch_downstream(
-            disaster_id=result.disaster_id,
-            result=result,
-            impact_radius_km=impact_radius_km,
-            estimated_population=estimated_population,
-            affected_roads=affected_roads,
-            lat = lat or 0.0,
-            lon = lon or 0.0,
-            trigger_reroute_override=trigger_reroute_override,
-        )
+        if tracking_id is not None:
+            await self._dispatch_downstream(
+                disaster_id=result.disaster_id,
+                result=result,
+                impact_radius_km=impact_radius_km,
+                estimated_population=estimated_population,
+                affected_roads=affected_roads,
+                lat=lat or 0.0,
+                lon=lon or 0.0,
+                trigger_reroute_override=trigger_reroute_override,
+            )
 
         # 12. Notify reporter — spec steps 10 (notifyReporter) and 8.5 (notifyFalseAlarmReporter)
         self._notify_reporter(

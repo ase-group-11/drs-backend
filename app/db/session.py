@@ -61,15 +61,18 @@ def create_async_engine_instance() -> AsyncEngine:
     return engine
 
 
-def get_async_session_factory() -> async_sessionmaker[AsyncSession]:
+def get_async_session_factory() -> tuple[AsyncEngine, async_sessionmaker[AsyncSession]]:
     """
-    Get async session factory for creating database sessions.
-    
+    Get async engine + session factory for creating database sessions.
+
     Returns:
-        async_sessionmaker: Factory for creating AsyncSession instances
+        tuple: (AsyncEngine, async_sessionmaker) — engine exposed so Celery
+               tasks can call ``await engine.dispose()`` before each
+               ``asyncio.run()`` invocation to discard connections that are
+               bound to a now-closed event loop.
     """
     engine = create_async_engine_instance()
-    
+
     session_factory = async_sessionmaker(
         bind=engine,
         class_=AsyncSession,
@@ -77,12 +80,15 @@ def get_async_session_factory() -> async_sessionmaker[AsyncSession]:
         autocommit=False,
         autoflush=False,
     )
-    
-    return session_factory
+
+    return engine, session_factory
 
 
-# Global session factory instance
-async_session_factory = get_async_session_factory()
+# Global engine + session factory instances
+# ``engine`` is exported so Celery tasks can dispose stale pool connections
+# between asyncio.run() calls (each call creates/destroys its own event loop,
+# leaving asyncpg futures bound to the previous closed loop).
+engine, async_session_factory = get_async_session_factory()
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:

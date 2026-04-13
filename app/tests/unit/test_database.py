@@ -33,10 +33,11 @@ async def test_session_factory_creates_sessions():
     """Test that session factory creates valid AsyncSession instances."""
     # Act
     from app.db.session import get_async_session_factory
-    session_factory = get_async_session_factory()
-    
+    _engine, session_factory = get_async_session_factory()
+
     # Session factory should be callable
     assert callable(session_factory)
+    await _engine.dispose()
 
 
 @pytest.mark.asyncio

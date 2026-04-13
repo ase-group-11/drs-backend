@@ -11,7 +11,8 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone, timedelta
 from sqlalchemy import select, and_, func, update
 from sqlalchemy.ext.asyncio import AsyncSession
-from geoalchemy2.functions import ST_AsGeoJSON, ST_X, ST_Y, ST_DWithin, ST_MakePoint
+from geoalchemy2.functions import ST_AsGeoJSON, ST_X, ST_Y, ST_DWithin, ST_MakePoint, ST_SetSRID
+from geoalchemy2 import Geography
 
 from app.db.models.disaster_report import DisasterReport
 from app.db.models.enums import DisasterReportStatus, DisasterType, DisasterSeverity
@@ -277,7 +278,7 @@ class DisasterReportRepository:
             List of nearby report dicts with id, user_id, severity, created_at
         """
         cutoff = datetime.now(timezone.utc) - timedelta(minutes=window_minutes)
-        point = func.ST_SetSRID(ST_MakePoint(lon, lat), 4326).cast("geography")
+        point = func.ST_SetSRID(ST_MakePoint(lon, lat), 4326).cast(Geography)
 
         conditions = [
             DisasterReport.id != exclude_report_id,

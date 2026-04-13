@@ -232,8 +232,8 @@ def recalculate_routes(
 
 async def _recalculate_async(
     disaster_id: str,
-    lat, 
-    lon, 
+    lat,
+    lon,
     radius_km,
     triggered_by: str,
 ) -> None:
@@ -243,6 +243,9 @@ async def _recalculate_async(
     Fetches current blocked roads, recalculates routes via TomTom,
     reruns Innovation 1, updates map, publishes route.updated event.
     """
+    # Dispose stale pool connections before opening a DB session on this loop.
+    from app.db.session import engine as _engine
+    await _engine.dispose()
 
     from app.repositories.reroute_repository import RerouteRepository
     from app.services.reroute_service import RerouteService
@@ -330,6 +333,15 @@ def auto_evaluate_pending_reports(self):
 
 
 async def _run_process_pending():
+    # Dispose any pooled connections that are bound to a previously closed
+    # event loop.  Each asyncio.run() call creates a new loop; asyncpg
+    # futures from the old loop raise "Future attached to a different loop"
+    # if we let the pool reuse them.  dispose() closes all idle connections
+    # immediately and invalidates checked-out ones so they are discarded on
+    # return — the pool will open fresh connections on this new loop.
+    from app.db.session import engine as _engine
+    await _engine.dispose()
+
     from app.tasks.process_pending_reports import process_pending_reports
     from app.providers.map_provider import MapProvider
     from app.providers.traffic import TrafficProvider
@@ -376,6 +388,11 @@ def periodic_reassess_disasters(self):
 
 
 async def _run_periodic_reassess():
+    # Same dispose() guard as _run_process_pending — prevents stale asyncpg
+    # connections from a previous asyncio.run() loop from poisoning this task.
+    from app.db.session import engine as _engine
+    await _engine.dispose()
+
     from app.tasks.periodic_reassess import run_periodic_reassess
     from app.providers.map_provider import MapProvider
     from app.providers.traffic import TrafficProvider
