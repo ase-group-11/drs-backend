@@ -358,7 +358,10 @@ class EvacuationService:
         blocked_roads = await self.db.get_blocked_roads(disaster_id)
 
         # 4. Traffic
-        traffic_snapshot = await self.fetch_traffic_data()
+        traffic_snapshot = await self.fetch_traffic_data(
+            lat=impact_area["center_lat"],
+            lon=impact_area["center_lon"],
+        )
 
         # 5. Nearest shelters
         shelters = get_nearest_shelters(
@@ -631,7 +634,10 @@ class EvacuationService:
         all_road_names = list(set(list(plan.get("blocked_roads") or []) + blocked_roads + uc7_names))
 
         impact_area      = (plan.get("impact_zones") or [{}])[0]
-        traffic_snapshot = await self.fetch_traffic_data()
+        traffic_snapshot = await self.fetch_traffic_data(
+            lat=impact_area.get("center_lat", 53.3498),
+            lon=impact_area.get("center_lon", -6.2603),
+        )
 
         new_routes     = await self._compute_routes(
             impact_area, plan["shelters_with_capacity"], uc7_segments, traffic_snapshot)
@@ -696,7 +702,10 @@ class EvacuationService:
                     1, int(impact_area["population"] * DEFAULT_VULNERABLE_RATIO))
 
         uc7_segments     = await self.db.get_blocked_roads(plan["disaster_id"])
-        traffic_snapshot = await self.fetch_traffic_data()
+        traffic_snapshot = await self.fetch_traffic_data(
+            lat=impact_area.get("center_lat", 53.3498),
+            lon=impact_area.get("center_lon", -6.2603),
+        )
         shelters         = get_nearest_shelters(
             impact_area["center_lat"], impact_area["center_lon"],
             max_count=MAX_SHELTERS_TO_ROUTE + 1,
@@ -765,10 +774,21 @@ class EvacuationService:
     # HELPERS
     # ═════════════════════════════════════════════════════════════════════════
 
-    async def fetch_traffic_data(self) -> Dict[str, Any]:
-        """Fetch traffic via IntegrationService with fallback."""
+    async def fetch_traffic_data(
+        self,
+        lat: float = 53.3498,
+        lon: float = -6.2603,
+        radius_km: float = 5.0,
+    ) -> Dict[str, Any]:
+        """Fetch traffic via IntegrationService with fallback.
+
+        Args:
+            lat:       Centre latitude  (default: Dublin city centre)
+            lon:       Centre longitude (default: Dublin city centre)
+            radius_km: Search radius in km (default: 5 km)
+        """
         try:
-            return await self.external.fetch_traffic_data(EVACUATION_REGION)
+            return await self.external.fetch_traffic_data(lat, lon, radius_km)
         except Exception as exc:
             logger.warning(f"[UC8] Traffic fetch degraded: {exc}")
             return {"source": "fallback", "available": False, "segments": []}

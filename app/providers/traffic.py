@@ -617,7 +617,22 @@ class TrafficProvider:
 
         Get or create aiohttp session for connection pooling.
 
+        Recreates the session if the underlying connector belongs to a
+        closed event loop — this prevents "Event loop is closed" errors
+        in Celery ForkPool workers where asyncio.run() creates a fresh
+        event loop per task but the singleton session was bound to a
+        previous (now-closed) loop.
         """
+        if self.session is not None and not self.session.closed:
+            try:
+                connector = self.session.connector
+                if connector is not None:
+                    loop = getattr(connector, "_loop", None)
+                    if loop is not None and loop.is_closed():
+                        await self.session.close()
+                        self.session = None
+            except Exception:
+                self.session = None
         if self.session is None or self.session.closed:
             self.session = aiohttp.ClientSession()
         return self.session

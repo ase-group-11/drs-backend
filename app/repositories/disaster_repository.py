@@ -17,7 +17,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 from geoalchemy2.functions import (
     ST_MakeEnvelope, ST_Within, ST_Distance,
-    ST_AsGeoJSON, ST_Point, ST_DWithin, ST_X, ST_Y
+    ST_AsGeoJSON, ST_Point, ST_DWithin, ST_X, ST_Y,
+    ST_SetSRID, ST_MakePoint,
 )
 from geoalchemy2 import Geography
 from sqlalchemy.orm import selectinload
@@ -297,7 +298,10 @@ class DisasterRepository:
             logger.warning("get_active_disaster_near: unknown disaster_type %r", disaster_type)
             return None
 
-        point = ST_Point(lon, lat)
+        # Use ST_SetSRID(ST_MakePoint(lon, lat), 4326)::geography so the point
+        # matches the geography column on Disaster.location and ST_DWithin
+        # interprets radius_m in metres (not degrees).
+        point = func.ST_SetSRID(ST_MakePoint(lon, lat), 4326).cast(Geography)
         radius_m = radius_km * 1000
 
         query = (

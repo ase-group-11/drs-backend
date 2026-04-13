@@ -79,9 +79,10 @@ import uuid
 import logging
 import random
 from datetime import datetime, timedelta
-from typing import List
+from typing import List, Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Body, Depends
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
 
@@ -103,6 +104,38 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Dev Seed"])
 
 TEAM_PASSWORD = "Password123!"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Request body model — controls report volume
+# ─────────────────────────────────────────────────────────────────────────────
+
+class SeedRequest(BaseModel):
+    active_disasters: int = Field(
+        default=3,
+        ge=1,
+        le=25,
+        description=(
+            "How many disaster clusters to seed (= how many active disasters will appear "
+            "after Celery evaluates). Each cluster contributes one lead report that becomes "
+            "an active disaster. Scenarios are taken from the top of the DISASTER_SCENARIOS "
+            "list in order, so index 0 (O'Connell St CRITICAL fire) is always included first."
+        ),
+    )
+    reports_per_disaster: int = Field(
+        default=2,
+        ge=1,
+        le=4,
+        description=(
+            "Total reports per disaster cluster, including the lead report. "
+            "1 = lead only (no corroborating reports). "
+            "2 = lead + 1 corroborating. "
+            "4 = lead + 3 corroborating (original full behaviour). "
+            "Corroborating reports are created at now−1…8 min so they are always "
+            "processed AFTER the lead and flagged DUPLICATE by the evaluation pipeline."
+        ),
+    )
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Real Irish station / base coordinates (verified OSM)
@@ -459,14 +492,26 @@ def _uid() -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.post("/dev/seed", summary="[DEV] Full DB wipe and realistic Ireland seed")
-async def seed_full_database(db: AsyncSession = Depends(get_db)):
+async def seed_full_database(
+    body: SeedRequest = Body(default_factory=SeedRequest),
+    db: AsyncSession = Depends(get_db),
+):
     """
     Wipes ALL tables and seeds realistic demo data for all use-cases.
+
+    **active_disasters** — how many disaster clusters to seed (1–25).
+    Each cluster produces one lead report that the Celery pipeline turns into
+    an active disaster. Defaults to 3 so the first run is fast and easy to follow.
+
+    **reports_per_disaster** — total reports per cluster (1–4).
+    1 = lead only. 2 = lead + 1 corroborating. 4 = full original behaviour.
 
     Idempotent — safe to call repeatedly.
     Returns JWT tokens for immediate Swagger/Postman use.
     """
     now = datetime.utcnow()
+    n_clusters    = body.active_disasters
+    n_per_cluster = body.reports_per_disaster
 
     # ── STEP 1: Wipe everything (FK-safe order) ───────────────────────────────
     # BUG FIX: each DELETE is wrapped in its own SAVEPOINT via begin_nested().
@@ -802,7 +847,10 @@ async def seed_full_database(db: AsyncSession = Depends(get_db)):
         """Random coordinate offset ±300 m (~0.003°) — within 2 km dedup radius."""
         return (random.random() - 0.5) * 0.006
 
-    for sc in DISASTER_SCENARIOS:
+    # Only use the first n_clusters scenarios
+    selected_scenarios = DISASTER_SCENARIOS[:n_clusters]
+
+    for sc in selected_scenarios:
         # ── Lead report ──────────────────────────────────────────────────────────
         # Exact coordinates, full severity, road_blocked as per scenario.
         # created_at = now − 30 min → always the oldest → processed first by Celery.
@@ -843,12 +891,12 @@ async def seed_full_database(db: AsyncSession = Depends(get_db)):
         })
         report_count += 1
 
-        # ── Corroborating reports 2-4 ────────────────────────────────────────────
+        # ── Corroborating reports (n_per_cluster − 1) ───────────────────────────
         # Slight coordinate jitter (±300 m) — simulate nearby-but-distinct reporters.
         # created_at = now − 1…8 min → NEWER than lead → processed AFTER lead.
         # age < 15 min at evaluation time → DUPLICATE rule fires.
         # (DUPLICATE rule: nearby_report_count >= 1 AND report_age_minutes < 15)
-        for j in range(3):
+        for j in range(n_per_cluster - 1):
             c = citizens[citizen_idx % len(citizens)]
             citizen_idx += 1
             desc = CORROBORATE_DESCRIPTIONS[j].format(addr=sc["address"])
@@ -905,13 +953,16 @@ async def seed_full_database(db: AsyncSession = Depends(get_db)):
         report_count, len(DISASTER_SCENARIOS),
     )
 
-    # ── STEP 6: Create 30 active trips (for reroute/evacuation services) ──────
+    # ── STEP 6: Create active trips (for reroute/evacuation services) ──────────
+    # 3 trips per selected disaster cluster — enough for the reroute pipeline to
+    # find impacted vehicles and generate alternative routes.
 
     # Citizens travelling near disaster zones
     trip_count = 0
-    for i in range(30):
-        c     = citizens[i]
-        sc    = DISASTER_SCENARIOS[i % len(DISASTER_SCENARIOS)]
+    n_trips = n_clusters * 3
+    for i in range(n_trips):
+        c     = citizens[i % len(citizens)]
+        sc    = selected_scenarios[i % len(selected_scenarios)]
         # Current position slightly away from disaster, destination near it
         await db.execute(text("""
             INSERT INTO active_trips (
@@ -962,25 +1013,45 @@ async def seed_full_database(db: AsyncSession = Depends(get_db)):
     police_admin_token = create_access_token(police_admin.id, "emergency_team")
     citizen_token      = create_access_token(citizens[0].id,  "user")
 
+    # Summary of which scenarios were used (for easy reference)
+    scenario_summary = [
+        {
+            "index":    i,
+            "address":  sc["address"],
+            "type":     sc["type"].value,
+            "severity": sc["severity"].value,
+        }
+        for i, sc in enumerate(selected_scenarios)
+    ]
+
     return {
         "message": (
             "Seed complete — all tables reset. "
-            f"{report_count} PENDING reports across {len(DISASTER_SCENARIOS)} location clusters seeded "
-            f"({len(DISASTER_SCENARIOS)} lead reports at now−30 min + "
-            f"{report_count - len(DISASTER_SCENARIOS)} corroborating reports at now−1…8 min). "
+            f"{report_count} PENDING reports across {n_clusters} location clusters seeded "
+            f"({n_clusters} lead reports at now−30 min + "
+            f"{report_count - n_clusters} corroborating reports at now−1…8 min). "
             "The Celery evaluation task (runs every 30 s) will: "
             "create active disasters for lead reports, flag corroborating reports DUPLICATE, "
             "auto-dispatch nearest units, trigger reroute (road_blocked or HIGH+ severity), "
             "and trigger evacuation plans (CRITICAL severity)."
         ),
+        "seed_config": {
+            "active_disasters_requested": n_clusters,
+            "reports_per_disaster":       n_per_cluster,
+            "total_pending_reports":      report_count,
+            "lead_reports":               n_clusters,
+            "corroborating_reports":      report_count - n_clusters,
+            "active_trips_seeded":        trip_count,
+        },
+        "scenarios_seeded": scenario_summary,
         "summary": {
             "ert_members":       len(ert_members),
             "citizens":          len(citizens),
             "emergency_units":   len(emergency_units),
             "pending_reports":   report_count,
-            "lead_reports":      len(DISASTER_SCENARIOS),
-            "corroborating_reports": report_count - len(DISASTER_SCENARIOS),
-            "location_clusters": len(DISASTER_SCENARIOS),
+            "lead_reports":      n_clusters,
+            "corroborating_reports": report_count - n_clusters,
+            "location_clusters": n_clusters,
             "active_trips":      trip_count,
             "active_disasters":  0,
             "deployments":       0,

@@ -254,6 +254,20 @@ class IntegrationService:
         return f"integration:routing:{hashlib.md5(payload.encode()).hexdigest()[:12]}"
 
     async def _get_session(self) -> aiohttp.ClientSession:
+        # Also recreate the session if the underlying connector's event loop
+        # is no longer the running loop — this happens in Celery ForkPool
+        # workers where asyncio.run() creates a new event loop per task but
+        # the singleton session was created in a previous (now-closed) loop.
+        if self._session is not None and not self._session.closed:
+            try:
+                connector = self._session.connector
+                if connector is not None:
+                    loop = getattr(connector, "_loop", None)
+                    if loop is not None and loop.is_closed():
+                        await self._session.close()
+                        self._session = None
+            except Exception:
+                self._session = None
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession()
         return self._session
@@ -518,52 +532,58 @@ class IntegrationService:
         alternatives: bool,
         max_alternatives: int,
     ) -> Dict[str, Any]:
-        """Internal: routing call with retry + circuit breaker."""
-        session = await self._get_session()
+        """Internal: routing call with retry + circuit breaker.
 
-        origin_str = f"{origin['lat']},{origin['lng']}"
-        dest_str = f"{destination['lat']},{destination['lng']}"
-        url = f"{self.ROUTING_BASE_URL}/{origin_str}:{dest_str}/json"
+        _tomtom_semaphore (module-level, max=3) limits the number of
+        concurrent outbound routing requests across ALL callers in this
+        process — evacuation _compute_routes + reroute geometry enrichment.
+        """
+        async with _tomtom_semaphore:
+            session = await self._get_session()
 
-        avoid_params = build_avoidance_params(avoid) if avoid else []
+            origin_str = f"{origin['lat']},{origin['lng']}"
+            dest_str = f"{destination['lat']},{destination['lng']}"
+            url = f"{self.ROUTING_BASE_URL}/{origin_str}:{dest_str}/json"
 
-        params: Dict[str, Any] = {
-            "key": self.api_key,
-            "traffic": "true",
-            "travelMode": "car",
-            "routeType": "fastest",
-        }
+            avoid_params = build_avoidance_params(avoid) if avoid else []
 
-        if alternatives:
-            params["maxAlternatives"] = min(max_alternatives, 3)
+            params: Dict[str, Any] = {
+                "key": self.api_key,
+                "traffic": "true",
+                "travelMode": "car",
+                "routeType": "fastest",
+            }
 
-        payload = {}
-        if avoid_params:
-            payload["avoidAreas"] = {"rectangles": [
-                a["avoidAreaRectangle"] for a in avoid_params
-            ]}
+            if alternatives:
+                params["maxAlternatives"] = min(max_alternatives, 3)
 
-        if payload:
-            async with session.post(
-                url,
-                params=params,
-                json=payload,
-                timeout=aiohttp.ClientTimeout(total=self.timeout),
-            ) as response:
-                response.raise_for_status()
-                data = await response.json()
-        else:
-            async with session.get(
-                url,
-                params=params,
-                timeout=aiohttp.ClientTimeout(total=self.timeout),
-            ) as response:
-                response.raise_for_status()
-                data = await response.json()
+            payload = {}
+            if avoid_params:
+                payload["avoidAreas"] = {"rectangles": [
+                    a["avoidAreaRectangle"] for a in avoid_params
+                ]}
 
-        routes = parse_routing_response(data)
-        logger.info(f"get_directions: {len(routes)} routes returned")
-        return {"routes": routes}
+            if payload:
+                async with session.post(
+                    url,
+                    params=params,
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=self.timeout),
+                ) as response:
+                    response.raise_for_status()
+                    data = await response.json()
+            else:
+                async with session.get(
+                    url,
+                    params=params,
+                    timeout=aiohttp.ClientTimeout(total=self.timeout),
+                ) as response:
+                    response.raise_for_status()
+                    data = await response.json()
+
+            routes = parse_routing_response(data)
+            logger.info(f"get_directions: {len(routes)} routes returned")
+            return {"routes": routes}
 
     # -------------------------------------------------------------------------
     # Recomputation helpers (for overrides + multi-incident)
