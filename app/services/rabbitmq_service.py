@@ -52,6 +52,7 @@ QUEUE_BINDINGS = {
         "disaster.backup_requested",
         "disaster.unit_completed",
         "disaster.false_alarm",
+        "notification.alert", 
     ],
     # Reroute service trigger queue — bound to disaster_events exchange.
     # disaster.evaluated: auto-trigger reroute when evaluation says trigger_reroute=True

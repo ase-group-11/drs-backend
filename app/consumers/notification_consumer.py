@@ -669,6 +669,25 @@ def _on_evacuation_triggered(data: dict) -> None:
         target_roles={"emergency_team"},
     )
 
+def _on_notification_alert(data: dict) -> None:
+    """Deployment status transition notifications → Redis WebSocket."""
+    _deliver(
+        service=data.get("service", "deployment"),
+        event_type=data.get("event_type", "notification.alert"),
+        severity=data.get("severity", "HIGH"),
+        title=data.get("title", ""),
+        message=data.get("message", ""),
+        data={
+            "deployment_id":   data.get("deployment_id"),
+            "disaster_id":     data.get("disaster_id"),
+            "tracking_id":     data.get("tracking_id"),
+            "unit_id":         data.get("unit_id"),
+            "previous_status": data.get("previous_status"),
+            "new_status":      data.get("new_status"),
+        },
+        target_roles={"emergency_team"},
+    )
+
 
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
@@ -688,6 +707,7 @@ NOTIFICATION_HANDLERS = {
     "disaster.backup_requested": _on_backup_requested,
     "disaster.unit_completed":   _on_unit_completed,
     "disaster.false_alarm":      _on_false_alarm,
+    "notification.alert":        _on_notification_alert,
     "disaster.reported":         _on_disaster_reported,
 }
 

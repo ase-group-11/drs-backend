@@ -46,7 +46,7 @@ import redis.asyncio as aioredis
 
 logger = logging.getLogger("notification_publisher")
 
-REDIS_URL     = os.getenv("REDIS_URL", "redis://localhost:6379")
+REDIS_URL     = os.getenv("REDIS_URL", "redis://20.90.162.121:7001")
 REDIS_CHANNEL = "app_alerts"
 
 COLOUR_MAP = {
