@@ -18,8 +18,9 @@ routing keys and handles SMS / push / Socket.IO delivery.
 
 import json
 import logging
+import uuid
 from typing import Dict, Any, Optional
-from datetime import datetime, timezone
+from datetime import datetime, date, timezone
 
 import aio_pika
 from aio_pika import ExchangeType
@@ -27,6 +28,17 @@ from aio_pika import ExchangeType
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+class _UUIDEncoder(json.JSONEncoder):
+    """JSON encoder that handles UUID and datetime objects from SQLAlchemy rows."""
+
+    def default(self, obj: Any) -> Any:
+        if isinstance(obj, uuid.UUID):
+            return str(obj)
+        if isinstance(obj, (datetime, date)):
+            return obj.isoformat()
+        return super().default(obj)
 
 EXCHANGE_NAME = "reroute.events"
 
@@ -240,7 +252,7 @@ class ReroutePublisher:
 
         try:
             message = aio_pika.Message(
-                body=json.dumps(payload).encode(),
+                body=json.dumps(payload, cls=_UUIDEncoder).encode(),
                 content_type="application/json",
                 delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
             )
