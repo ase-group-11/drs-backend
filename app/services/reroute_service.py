@@ -389,10 +389,19 @@ class RerouteService:
         # return_exceptions=True so one TomTom failure doesn't kill all segments.
         # Any Exception result is replaced with the original unenriched segment
         # (the fallback inside _enrich_one should make raw exceptions rare).
-        raw_results = await asyncio.gather(
-            *[_enrich_one(s) for s in segments],
-            return_exceptions=True,
-        )
+        # Hard 15s cap: TomTom rate-limits silently — without a cap, 5+ segments
+        # that all timeout (10s each, semaphore(3)) can block for 30-40s total.
+        try:
+            raw_results = await asyncio.wait_for(
+                asyncio.gather(*[_enrich_one(s) for s in segments], return_exceptions=True),
+                timeout=15.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "enrich_segments_with_geometry: 15s cap hit — using fallback geometry for all %d segments",
+                len(segments),
+            )
+            raw_results = segments  # keep unenriched; frontend shows circle fallback
         enriched = []
         for i, res in enumerate(raw_results):
             if isinstance(res, Exception):

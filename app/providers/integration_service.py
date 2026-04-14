@@ -199,7 +199,6 @@ class IntegrationService:
         self.api_key = api_key or settings.TRAFFIC_API_KEY
         self.timeout = timeout
         self._session: Optional[aiohttp.ClientSession] = None
-        self._redis = None  # Lazily initialised on first cache call
         self._inflight_locks: dict = {}
 
         # Auto-switch to mock if no API key or testing environment
@@ -221,19 +220,16 @@ class IntegrationService:
     # -------------------------------------------------------------------------
 
     async def _get_redis(self):
-        """Lazily initialise Redis using the existing redis.asyncio client."""
-        if self._redis is not None:
-            return self._redis
+        """Return the shared app-level Redis client (from cache/redis_client.py).
+
+        Previously this created its own connection pool with a 5s socket_timeout,
+        which caused 'Timeout reading from ...:7001' errors when 5 concurrent
+        cache reads queued up on the same pool under load.
+        The shared client uses a larger pool and is already proven stable.
+        """
         try:
-            import redis.asyncio as aioredis
-            self._redis = await aioredis.from_url(
-                settings.REDIS_URL,
-                encoding="utf-8",
-                decode_responses=True,
-                socket_connect_timeout=3,
-                socket_timeout=5,
-            )
-            return self._redis
+            from cache.redis_client import get_redis_client
+            return await get_redis_client()
         except Exception as e:
             logger.warning(f"IntegrationService: Redis unavailable — caching disabled ({e})")
             return None
@@ -557,7 +553,7 @@ class IntegrationService:
 
     @_circuit_breaker
     @retry(
-            stop=stop_after_attempt(3),
+            stop=stop_after_attempt(1),   # no retries for routing — fallback geometry is fine
             wait=wait_exponential(multiplier=1, min=1, max=8),
             retry=retry_if_exception_type((aiohttp.ClientError, asyncio.TimeoutError)),
             before_sleep=before_sleep_log(logger, logging.WARNING),
