@@ -1068,17 +1068,17 @@ async def _get_tokens(db: AsyncSession, now: datetime):
     tokens = {}
     creds  = {"password": DEFAULT_PASSWORD}
     if fa:
-        tokens["fire_admin_token"]   = create_access_token(fa.id,   "emergency_team")
+        tokens["fire_admin_token"]   = create_access_token(str(fa.id),  "emergency_team")
         creds["fire_admin_phone"]    = fa.phone_number
         creds["fire_admin_name"]     = fa.full_name
     if ma:
-        tokens["med_admin_token"]    = create_access_token(ma.id,   "emergency_team")
+        tokens["med_admin_token"]    = create_access_token(str(ma.id),  "emergency_team")
         creds["med_admin_phone"]     = ma.phone_number
     if pa:
-        tokens["police_admin_token"] = create_access_token(pa.id,   "emergency_team")
+        tokens["police_admin_token"] = create_access_token(str(pa.id),  "emergency_team")
         creds["police_admin_phone"]  = pa.phone_number
     if cit:
-        tokens["citizen_token"]      = create_access_token(cit.id,  "user")
+        tokens["citizen_token"]      = create_access_token(str(cit.id), "user")
         creds["citizen_phone"]       = cit.phone_number
         creds["citizen_name"]        = cit.full_name
     return tokens, creds
