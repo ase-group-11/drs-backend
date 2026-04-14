@@ -38,7 +38,7 @@ class EmergencyUnitService:
         unit_type: Optional[str] = None,
         search: Optional[str] = None,
         limit: int = 500,
-    ) -> Dict[str, Any]: 
+    ) -> Dict[str, Any]:  
         """List units with optional filters. Supports Emergency Teams admin page."""
         try:
             conditions = ["u.deleted_at IS NULL"]
