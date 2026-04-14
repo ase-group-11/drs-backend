@@ -50,6 +50,13 @@ def send_sms(to_number: str, body: str) -> bool:
         return False
     if not to_number:
         return False
+    
+    # Whitelist guard — Twilio trial can only reach verified numbers
+    from app.services.twilio_service import TWILIO_VERIFIED_NUMBERS
+    if to_number not in TWILIO_VERIFIED_NUMBERS:
+        logger.info(f"Skipping SMS to {to_number} — not in TWILIO_VERIFIED_NUMBERS")
+        return False
+    
     try:
         from twilio.rest import Client
         msg = Client(sid, token).messages.create(body=body, from_=from_, to=to_number)
