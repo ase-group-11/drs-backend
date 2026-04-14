@@ -197,18 +197,25 @@ class ReroutePublisher:
         routes: list,
         total_users: int = 0,
         location: str = "",
+        lat: float = 0.0,
+        lon: float = 0.0,
     ) -> bool:
         return await self._publish(
             routing_key="evacuation.triggered",
             payload={
-                "event":       "evacuation.triggered",
-                "disaster_id": disaster_id,
-                "plan_id":     plan_id,
-                "vehicles":    vehicles,
-                "routes":      _slim_routes(routes),
-                "total_users": total_users,
+                "event":            "evacuation.triggered",
+                "disaster_id":      disaster_id,
+                "plan_id":          plan_id,
+                "vehicles":         vehicles,
+                "routes":           _slim_routes(routes),
+                "total_users":      total_users,
                 "location_address": location,
-                "timestamp":   _now(),
+                # lat/lon included so the consumer can geo-target users
+                # in the evacuation radius (5 km) — without these the
+                # _on_evacuation_triggered handler cannot resolve nearby users.
+                "lat":              lat,
+                "lon":              lon,
+                "timestamp":        _now(),
             },
         )
 

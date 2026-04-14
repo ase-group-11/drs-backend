@@ -643,8 +643,9 @@ def _on_false_alarm(data: dict) -> None:
 def _on_evacuation_triggered(data: dict) -> None:
     """
     Published by evacuation_service when a plan is activated.
-    CRITICAL — targets users physically inside the evacuation zones.
-    Each user's assigned evacuation route is in data["users"][user_id].
+    CRITICAL public-safety broadcast — sent to ALL connected users.
+    Geo-targeting (5 km radius) is applied on top when lat/lon are present,
+    but broadcast=True ensures citizens always receive it regardless.
     """
     lat   = data.get("lat") or data.get("disaster_lat")
     lon   = data.get("lon") or data.get("disaster_lon")
@@ -665,7 +666,10 @@ def _on_evacuation_triggered(data: dict) -> None:
         disaster_lat=lat, disaster_lon=lon,
         radius_km=5.0,
         location=data.get("location_address", ""),
-        # ERT must also know evacuation is in progress
+        # broadcast=True — evacuation is a critical public safety event.
+        # Every user in the app must receive it, not just those who happen
+        # to have an active trip registered at the time of activation.
+        broadcast=True,
         target_roles={"emergency_team"},
     )
 

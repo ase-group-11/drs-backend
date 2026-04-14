@@ -794,25 +794,46 @@ class EvacuationService:
             return {"source": "fallback", "available": False, "segments": []}
 
     async def broadcast_alerts(self, users, disaster_id, plan_id, best_routes, shelters) -> int:
-        if not users:
-            return 0
-
-        # RabbitMQ — mobile push (fire and forget, non-fatal)
+        # RabbitMQ publish is NOT gated on finding active trips.
+        # Evacuation is a public safety broadcast — it must fire even when
+        # get_users_in_impact_area() returns [] (no registered active trips).
+        # The notification consumer will geo-target or broadcast to all users.
         try:
             if self.publisher.is_connected:
                 all_routes = [
                     r for zr in best_routes.values()
                     for r in (zr if isinstance(zr, list) else [zr])
                 ]
+                # Fetch disaster location so the consumer can geo-target users
+                # in the 5 km evacuation radius.
+                disaster_lat: float = 0.0
+                disaster_lon: float = 0.0
+                location_address: str = ""
+                try:
+                    from app.repositories.disaster_repository import DisasterRepository
+                    d = await DisasterRepository(self.db.db).get_disaster_by_id(disaster_id)
+                    if d:
+                        disaster_lat     = d["location"]["lat"]
+                        disaster_lon     = d["location"]["lon"]
+                        location_address = d.get("location_address", "")
+                except Exception as loc_exc:
+                    logger.warning(f"[UC8] Could not fetch disaster location: {loc_exc}")
+
                 await self.publisher.publish_evacuation_triggered(
                     disaster_id=disaster_id,
                     plan_id=plan_id,
                     vehicles=users,
                     routes=all_routes,
                     total_users=len(users),
+                    location=location_address,
+                    lat=disaster_lat,
+                    lon=disaster_lon,
                 )
         except Exception as exc:
             logger.warning(f"[UC8] RabbitMQ publish failed: {exc}")
+
+        if not users:
+            return 0
 
         # Twilio SMS — always sent regardless of RabbitMQ status
         from app.services.twilio_service import send_sms
