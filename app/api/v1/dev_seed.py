@@ -116,13 +116,13 @@ UNIT_STATION_POOL: List[Dict[str, Any]] = [
      "utype": UnitType.AMBULANCE,     "dept": Department.MEDICAL},
     {"name": "Beaumont Hospital",              "lat": 53.3906, "lon": -6.2386, "city": "Dublin",
      "utype": UnitType.AMBULANCE,     "dept": Department.MEDICAL},
-    {"name": "Tallaght Hospital",              "lat": 53.2867, "lon": -6.3745, "city": "Dublin",
+    {"name": "Tallaght Hospital",              "lat": 53.2910, "lon": -6.3680, "city": "Dublin",
      "utype": UnitType.AMBULANCE,     "dept": Department.MEDICAL},
     {"name": "Pearse Street Garda Station",    "lat": 53.3444, "lon": -6.2482, "city": "Dublin",
      "utype": UnitType.PATROL_CAR,    "dept": Department.POLICE},
     {"name": "Store Street Garda Station",     "lat": 53.3497, "lon": -6.2471, "city": "Dublin",
      "utype": UnitType.PATROL_CAR,    "dept": Department.POLICE},
-    {"name": "Blanchardstown Garda Station",   "lat": 53.3900, "lon": -6.3800, "city": "Dublin",
+    {"name": "Blanchardstown Garda Station",   "lat": 53.3855, "lon": -6.3720, "city": "Dublin",
      "utype": UnitType.PATROL_CAR,    "dept": Department.POLICE},
     {"name": "Dublin Mountain Rescue",         "lat": 53.2441, "lon": -6.3877, "city": "Dublin",
      "utype": UnitType.RESCUE,        "dept": Department.FIRE},
@@ -131,7 +131,7 @@ UNIT_STATION_POOL: List[Dict[str, Any]] = [
     {"name": "Dublin Hazmat Unit",             "lat": 53.3350, "lon": -6.2620, "city": "Dublin",
      "utype": UnitType.HAZMAT,        "dept": Department.FIRE},
     # ─── Cork ─────────────────────────────────────────────────────────────────
-    {"name": "Cork City Fire Station",         "lat": 51.8985, "lon": -8.4756, "city": "Cork",
+    {"name": "Cork City Fire Station",         "lat": 51.9025, "lon": -8.4690, "city": "Cork",
      "utype": UnitType.FIRE_ENGINE,   "dept": Department.FIRE},
     {"name": "Anglesea Street Garda Station",  "lat": 51.8960, "lon": -8.4710, "city": "Cork",
      "utype": UnitType.PATROL_CAR,    "dept": Department.POLICE},
@@ -140,34 +140,34 @@ UNIT_STATION_POOL: List[Dict[str, Any]] = [
     # ─── Galway ───────────────────────────────────────────────────────────────
     {"name": "Galway City Fire Brigade",       "lat": 53.2720, "lon": -9.0540, "city": "Galway",
      "utype": UnitType.FIRE_ENGINE,   "dept": Department.FIRE},
-    {"name": "Mill Street Garda Station",      "lat": 53.2707, "lon": -9.0568, "city": "Galway",
+    {"name": "Mill Street Garda Station",      "lat": 53.2740, "lon": -9.0510, "city": "Galway",
      "utype": UnitType.PATROL_CAR,    "dept": Department.POLICE},
     {"name": "University Hospital Galway",     "lat": 53.2740, "lon": -9.0600, "city": "Galway",
      "utype": UnitType.AMBULANCE,     "dept": Department.MEDICAL},
     # ─── Limerick ─────────────────────────────────────────────────────────────
-    {"name": "Limerick Fire & Rescue",         "lat": 52.6638, "lon": -8.6267, "city": "Limerick",
+    {"name": "Limerick Fire & Rescue",         "lat": 52.6680, "lon": -8.6210, "city": "Limerick",
      "utype": UnitType.FIRE_ENGINE,   "dept": Department.FIRE},
     {"name": "Henry Street Garda Station",     "lat": 52.6600, "lon": -8.6300, "city": "Limerick",
      "utype": UnitType.PATROL_CAR,    "dept": Department.POLICE},
     {"name": "University Hospital Limerick",   "lat": 52.6740, "lon": -8.6400, "city": "Limerick",
      "utype": UnitType.AMBULANCE,     "dept": Department.MEDICAL},
     # ─── Waterford ────────────────────────────────────────────────────────────
-    {"name": "Waterford Fire Station",         "lat": 52.2593, "lon": -7.1101, "city": "Waterford",
+    {"name": "Waterford Fire Station",         "lat": 52.2560, "lon": -7.1050, "city": "Waterford",
      "utype": UnitType.FIRE_ENGINE,   "dept": Department.FIRE},
     {"name": "Waterford Garda Station",        "lat": 52.2580, "lon": -7.1150, "city": "Waterford",
      "utype": UnitType.PATROL_CAR,    "dept": Department.POLICE},
     # ─── Kerry ────────────────────────────────────────────────────────────────
-    {"name": "Killarney Fire Station",         "lat": 52.0598, "lon": -9.5044, "city": "Killarney",
+    {"name": "Killarney Fire Station",         "lat": 52.0560, "lon": -9.4980, "city": "Killarney",
      "utype": UnitType.FIRE_ENGINE,   "dept": Department.FIRE},
     {"name": "Kerry General Hospital",         "lat": 52.2716, "lon": -9.6982, "city": "Tralee",
      "utype": UnitType.AMBULANCE,     "dept": Department.MEDICAL},
     # ─── Sligo ────────────────────────────────────────────────────────────────
-    {"name": "Sligo Fire Station",             "lat": 54.2766, "lon": -8.4761, "city": "Sligo",
+    {"name": "Sligo Fire Station",             "lat": 54.2800, "lon": -8.4700, "city": "Sligo",
      "utype": UnitType.FIRE_ENGINE,   "dept": Department.FIRE},
     {"name": "Sligo Garda Station",            "lat": 54.2760, "lon": -8.4750, "city": "Sligo",
      "utype": UnitType.PATROL_CAR,    "dept": Department.POLICE},
     # ─── Donegal ──────────────────────────────────────────────────────────────
-    {"name": "Letterkenny Fire Station",       "lat": 54.9551, "lon": -7.7340, "city": "Letterkenny",
+    {"name": "Letterkenny Fire Station",       "lat": 54.9590, "lon": -7.7280, "city": "Letterkenny",
      "utype": UnitType.FIRE_ENGINE,   "dept": Department.FIRE},
     {"name": "Letterkenny University Hospital","lat": 54.9500, "lon": -7.7300, "city": "Letterkenny",
      "utype": UnitType.AMBULANCE,     "dept": Department.MEDICAL},
@@ -433,19 +433,20 @@ DISASTER_SCENARIOS: List[Dict[str, Any]] = [
 #
 # Layout: (cur_dlat, cur_dlon, dest_dlat, dest_dlon)
 #
-# Current position is ~1.5 km from disaster centre (within 2 km radius ✓).
-# Destination is ~17-22 km on the OPPOSITE side (long, visually clear route).
+# Current position is ~0.9 km from disaster centre — safely inside any radius
+# (even a tight 1.5 km bounding box).  Destination is ~17-22 km on the
+# OPPOSITE side so the route visibly crosses the disaster zone on the map.
 #
 # At Dublin latitude (53.3°):
-#   0.014° lat ≈ 1.56 km   |   0.175° lat ≈ 19.4 km
-#   0.020° lon ≈ 1.34 km   |   0.260° lon ≈ 17.4 km
+#   0.008° lat ≈ 0.89 km   |   0.175° lat ≈ 19.4 km
+#   0.011° lon ≈ 0.80 km   |   0.260° lon ≈ 19.0 km
 LONG_TRIP_OFFSETS = [
-    (+0.014,  0.000, -0.175,  0.000),   # North current → South dest (~21 km)
-    (-0.014,  0.000, +0.175,  0.000),   # South current → North dest (~21 km)
-    ( 0.000, +0.020,  0.000, -0.260),   # East  current → West  dest (~19 km)
-    ( 0.000, -0.020,  0.000, +0.260),   # West  current → East  dest (~19 km)
-    (+0.010, +0.014, -0.124, -0.184),   # NE current → SW dest (~20 km diagonal)
-    (-0.010, +0.014, +0.124, -0.184),   # SE current → NW dest (~20 km diagonal)
+    (+0.008,  0.000, -0.175,  0.000),   # North current → South dest (~21 km)
+    (-0.008,  0.000, +0.175,  0.000),   # South current → North dest (~21 km)
+    ( 0.000, +0.011,  0.000, -0.260),   # East  current → West  dest (~19 km)
+    ( 0.000, -0.011,  0.000, +0.260),   # West  current → East  dest (~19 km)
+    (+0.006, +0.008, -0.124, -0.184),   # NE current → SW dest (~20 km diagonal)
+    (-0.006, +0.008, +0.124, -0.184),   # SE current → NW dest (~20 km diagonal)
 ]
 
 VEHICLE_TYPES = ["general", "general", "general", "public_transport"]
@@ -498,7 +499,7 @@ class DisastersRequest(BaseModel):
                                      description="Reports per pipeline cluster (1 lead + N-1 corroborating).")
 
 class TripsRequest(BaseModel):
-    count: int = Field(default=60, ge=4, le=200,
+    count: int = Field(default=120, ge=4, le=400,
                        description="Total active trips to create, spread across disaster locations.")
 
 class AllRequest(BaseModel):
@@ -923,12 +924,11 @@ async def _seed_trips(db: AsyncSession, count: int, citizens: List, now: datetim
     if rows:
         disaster_locs = [{"lat": r.lat, "lon": r.lon} for r in rows]
     else:
-        # No active disasters yet — use hardcoded pipeline disaster locations
-        # (pipeline disasters are PENDING reports at this point)
+        # No active disasters yet — use ALL scenario locations so every disaster
+        # type (evacuation, reroute, monitoring) has users nearby when it activates.
         disaster_locs = [
             {"lat": sc["lat"], "lon": sc["lon"]}
             for sc in DISASTER_SCENARIOS
-            if sc["road_blocked"]
         ]
 
     if not disaster_locs:
