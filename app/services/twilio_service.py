@@ -13,6 +13,17 @@ from app.core.config import settings
 # Setup logging
 logger = logging.getLogger(__name__)
 
+# ── Twilio trial account: only verified Caller IDs can receive SMS ────────
+# These are the numbers registered under Verified Caller IDs in the Twilio
+# console.  Any send_sms() call to a number NOT in this list is silently
+# skipped (returns False) to avoid Twilio 21608 errors.
+TWILIO_VERIFIED_NUMBERS: set[str] = {
+    "+919567711507",
+    "+918125019220",
+    "+919207601082",
+    "+916301088229",
+}
+
 
 def _get_twilio_client():
     """
@@ -50,6 +61,10 @@ async def send_sms(phone_number: str, message: str) -> bool:
     """
     logger.info(f"📱 Sending SMS to {phone_number}")
     logger.debug(f"📝 Message length: {len(message)} characters")
+    
+    if phone_number not in TWILIO_VERIFIED_NUMBERS:
+        logger.info(f"⏭️  Skipping SMS to {phone_number} — not in TWILIO_VERIFIED_NUMBERS")
+        return False
     
     # Mock mode for testing
     if settings.ENVIRONMENT == "testing":
