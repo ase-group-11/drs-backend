@@ -346,6 +346,17 @@ class RerouteRepository:
     
         now = datetime.now(timezone.utc)
     
+        # Count total active trips in the whole table for diagnostics
+        total_result = await self.db.execute(
+            select(ActiveTrip).where(ActiveTrip.expires_at > now)
+        )
+        total_trips = total_result.scalars().all()
+        logger.info(
+            f"get_users_in_affected_area: bbox=({bounds['lat_min']:.4f},{bounds['lat_max']:.4f},"
+            f"{bounds['lng_min']:.4f},{bounds['lng_max']:.4f}) "
+            f"total_active_trips_in_db={len(total_trips)}"
+        )
+
         result = await self.db.execute(
             select(ActiveTrip).where(
                 ActiveTrip.current_lat >= bounds["lat_min"],
@@ -356,7 +367,11 @@ class RerouteRepository:
             )
         )
         trips = result.scalars().all()
-    
+        logger.info(
+            f"get_users_in_affected_area: found {len(trips)} trips in bbox "
+            f"(total in db={len(total_trips)})"
+        )
+
         return [
             {
                 "user_id": trip.user_id,

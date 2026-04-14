@@ -479,7 +479,7 @@ class TeamsRequest(BaseModel):
                        description="Total ERT members (min 4 to cover all departments).")
 
 class UsersRequest(BaseModel):
-    count: int = Field(default=40, ge=5, le=500,
+    count: int = Field(default=150, ge=5, le=500,
                        description="Number of citizen users.")
 
 class UnitsRequest(BaseModel):
@@ -938,15 +938,21 @@ async def _seed_trips(db: AsyncSession, count: int, citizens: List, now: datetim
     trips_per_loc = max(1, count // n_locs)
     offsets_per_loc = LONG_TRIP_OFFSETS
 
+    # Use an iterator so each citizen is assigned exactly once.
+    # ON CONFLICT (user_id) DO UPDATE means duplicate user_ids overwrite
+    # the previous row — so every citizen must appear at most once.
+    cit_iter = iter(citizens)
+
     trip_count = 0
-    citizen_idx = 0
 
     for loc_i, loc in enumerate(disaster_locs):
         for j in range(trips_per_loc):
             if trip_count >= count:
                 break
-            if not citizens:
-                break
+
+            c = next(cit_iter, None)
+            if c is None:
+                break   # ran out of unique citizens — stop cleanly
 
             offset = offsets_per_loc[j % len(offsets_per_loc)]
             cdlat, cdlon, ddlat, ddlon = offset
@@ -955,9 +961,6 @@ async def _seed_trips(db: AsyncSession, count: int, citizens: List, now: datetim
             cur_lng = loc["lon"] + cdlon
             dst_lat = loc["lat"] + ddlat
             dst_lng = loc["lon"] + ddlon
-
-            c = citizens[citizen_idx % len(citizens)]
-            citizen_idx += 1
 
             await db.execute(text("""
                 INSERT INTO active_trips (
@@ -997,13 +1000,12 @@ async def _seed_trips(db: AsyncSession, count: int, citizens: List, now: datetim
 
     # Fill remainder if trips_per_loc × n_locs < count
     for i in range(trip_count, count):
-        if not citizens:
-            break
+        c = next(cit_iter, None)
+        if c is None:
+            break   # no more unique citizens
         loc    = disaster_locs[i % n_locs]
         offset = offsets_per_loc[i % len(offsets_per_loc)]
         cdlat, cdlon, ddlat, ddlon = offset
-        c = citizens[citizen_idx % len(citizens)]
-        citizen_idx += 1
 
         await db.execute(text("""
             INSERT INTO active_trips (
