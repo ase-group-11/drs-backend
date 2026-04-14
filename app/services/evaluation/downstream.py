@@ -569,6 +569,7 @@ class DirectRerouteClient(BaseRerouteClient):
         lon: float = 0.0,
     ) -> None:
         try:
+            from app.db.session import async_session_factory
             from app.repositories.reroute_repository import RerouteRepository
             from app.services.reroute_service import RerouteService
             from app.services.instant_map_updates import MappingService
@@ -584,24 +585,16 @@ class DirectRerouteClient(BaseRerouteClient):
             integration = get_integration_service()
             mapping     = MappingService(sio=sio)
 
-            reroute_service = RerouteService(
-                db=RerouteRepository(self._db),
-                external=integration,
-                mapping=mapping,
-                publisher=publisher,
-            )
-
-            # Convert affected_roads list to the format expected by the service.
-            #
-            # IMPORTANT: identify_affected_roads_async() in the enrichment pipeline
-            # returns dicts with keys {road_name, start_lat, start_lng, end_lat,
-            # end_lng} — NO segment_id.  upsert_road_segments() does
-            # seg["segment_id"] unconditionally → KeyError without this guard.
+            # Use a fresh independent session rather than the evaluation session.
+            # The evaluation session has already committed by the time
+            # _dispatch_downstream fires; reusing it for reroute DB writes
+            # (upsert_road_segments, save_reroute_plan) causes the session to
+            # hang waiting on a connection from a pool that may be bound to a
+            # different asyncio loop (Celery asyncio.run() per-task).
             roads = []
             for i, road in enumerate(affected_roads or []):
                 if isinstance(road, dict):
                     if "segment_id" not in road:
-                        # Synthesise a stable ID from disaster + position index
                         road = {
                             **road,
                             "segment_id": f"eval-seg-{disaster_id[:8]}-{i}",
@@ -623,12 +616,19 @@ class DirectRerouteClient(BaseRerouteClient):
                         "capacity": 300,
                     })
 
-            result = await reroute_service.trigger_reroute_traffic(
-                disaster_id=disaster_id,
-                affected_roads=roads if roads else None,
-            )
-            # Commit reroute changes (road_segments status update, reroute_plan insert)
-            await self._db.commit()
+            async with async_session_factory() as reroute_db:
+                reroute_service = RerouteService(
+                    db=RerouteRepository(reroute_db),
+                    external=integration,
+                    mapping=mapping,
+                    publisher=publisher,
+                )
+
+                result = await reroute_service.trigger_reroute_traffic(
+                    disaster_id=disaster_id,
+                    affected_roads=roads if roads else None,
+                )
+                await reroute_db.commit()
 
             logger.info(
                 "DirectRerouteClient: reroute triggered for disaster=%s result=%s",
