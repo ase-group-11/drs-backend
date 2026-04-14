@@ -569,26 +569,41 @@ async def seed_full_database(
         report_count, n_clusters,
     )
 
-    # ── STEP 6: Create active trips guaranteed within 1 km of each disaster ──
+    # ── STEP 6: Create active trips routed THROUGH each disaster zone ────────
     #
-    # 8 trips per cluster with fixed sub-1km offsets so get_users_in_affected_area()
-    # always finds them inside the bounding box derived from impact_radius_km (2.0 km).
-    # For Dublin lat ~53.3°: 1 km ≈ 0.009° lat, 0.014° lon.
-    # All offsets below are ≤ 0.008° lat / 0.012° lon — well within 2 km radius.
+    # Each trip has its current position on one side of the disaster and its
+    # destination on the opposite side, so the straight-line path between them
+    # passes directly through the incident point.  This makes the reroute
+    # visually meaningful — without it the route would go through the blocked
+    # area; with it TomTom returns a detour around it.
+    #
+    # For Dublin lat ~53.3°: 1 km ≈ 0.009° lat / 0.015° lon.
+    # Current positions are ~0.8 km from the disaster centre so
+    # get_users_in_affected_area() (2 km radius) always finds them.
+    # Destinations are ~1.5 km on the OPPOSITE side so the path crosses the zone.
+    #
+    # Layout — (cur_dlat, cur_dlon,  dest_dlat, dest_dlon):
+    #   N→S, S→N, E→W, W→E, NE→SW, SW→NE, NW→SE, SE→NW
     TRIP_OFFSETS = [
-        (-0.007, -0.010), (-0.005, -0.005), (-0.003,  0.000), (-0.001,  0.008),
-        ( 0.002, -0.008), ( 0.004,  0.003), ( 0.006, -0.002), ( 0.008,  0.006),
+        ( 0.008,  0.000,  -0.013,  0.000),   # North  → South
+        (-0.008,  0.000,   0.013,  0.000),   # South  → North
+        ( 0.000,  0.012,   0.000, -0.020),   # East   → West
+        ( 0.000, -0.012,   0.000,  0.020),   # West   → East
+        ( 0.006,  0.009,  -0.010, -0.015),   # NE     → SW
+        (-0.006, -0.009,   0.010,  0.015),   # SW     → NE
+        ( 0.006, -0.009,  -0.010,  0.015),   # NW     → SE
+        (-0.006,  0.009,   0.010, -0.015),   # SE     → NW
     ]
 
     trip_count = 0
     for i, sc in enumerate(selected_scenarios):
-        for j, (dlat, dlon) in enumerate(TRIP_OFFSETS):
+        for j, (cdlat, cdlon, ddlat, ddlon) in enumerate(TRIP_OFFSETS):
             c = citizens[(citizen_idx + i * len(TRIP_OFFSETS) + j) % len(citizens)]
-            cur_lat = sc["lat"] + dlat
-            cur_lng = sc["lon"] + dlon
-            # Destination slightly outside the disaster zone (vehicle is heading through it)
-            dest_lat = sc["lat"] + dlat * 3
-            dest_lng = sc["lon"] + dlon * 3
+            cur_lat = sc["lat"] + cdlat
+            cur_lng = sc["lon"] + cdlon
+            # Destination on the opposite side — path crosses the disaster zone
+            dest_lat = sc["lat"] + ddlat
+            dest_lng = sc["lon"] + ddlon
             await db.execute(text("""
                 INSERT INTO active_trips (
                     id, user_id,
