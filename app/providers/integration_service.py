@@ -55,31 +55,76 @@ _circuit_breaker = pybreaker.CircuitBreaker(
     name="tomtom_circuit_breaker",
 )
 
-_tomtom_semaphore: Optional[asyncio.Semaphore] = None
-
-
-def _get_tomtom_semaphore() -> asyncio.Semaphore:
-    """Return (or create) the semaphore bound to the current running event loop.
-
-    asyncio.Semaphore is tied to the event loop active when it is created.
-    Celery uses asyncio.run() which spins up a fresh loop per task — reusing a
-    semaphore (or Lock) created by a previous loop raises
-    "Future attached to a different loop". Creating it lazily here ensures it is
-    always bound to the loop that is actually running the coroutine.
+class _AsyncTokenBucket:
     """
-    global _tomtom_semaphore
-    try:
-        running_loop = asyncio.get_running_loop()
-    except RuntimeError:
-        running_loop = None
+    Async token bucket rate limiter for TomTom API calls.
 
-    # Re-create if no semaphore yet, or if it belongs to a different (stale) loop
-    if _tomtom_semaphore is None or (
-        running_loop is not None
-        and getattr(_tomtom_semaphore, "_loop", None) is not running_loop
-    ):
-        _tomtom_semaphore = asyncio.Semaphore(3)
-    return _tomtom_semaphore
+    rate:  tokens refilled per second  (= sustained throughput)
+    burst: maximum token accumulation  (= allowed burst size)
+
+    How it works:
+      - First `burst` callers proceed immediately (no wait).
+      - Subsequent callers are spaced 1/rate seconds apart.
+      - Tokens go negative to track backpressure: each queued caller
+        pre-reserves its future slot, so callers are serialised correctly
+        even when all arrive at the same instant.
+
+    Thread/loop safety:
+      - The internal Lock is created lazily and is re-created whenever the
+        active event loop changes (important for tests and any code that
+        creates a fresh loop).
+    """
+
+    __slots__ = ("_rate", "_burst", "_tokens", "_last_refill", "_lock", "_loop")
+
+    def __init__(self, rate: float, burst: int) -> None:
+        self._rate = rate
+        self._burst = burst
+        self._tokens: float = float(burst)
+        self._last_refill: float = 0.0
+        self._lock: Optional[asyncio.Lock] = None
+        self._loop = None                          # loop the lock belongs to
+
+    def _get_lock(self) -> asyncio.Lock:
+        try:
+            current = asyncio.get_running_loop()
+        except RuntimeError:
+            current = None
+        if self._lock is None or self._loop is not current:
+            self._lock = asyncio.Lock()
+            self._loop = current
+        return self._lock
+
+    async def acquire(self) -> None:
+        """Block until a token is available, then consume one."""
+        async with self._get_lock():
+            now = asyncio.get_event_loop().time()
+            if self._last_refill == 0.0:
+                self._last_refill = now
+            elapsed = now - self._last_refill
+            self._tokens = min(float(self._burst), self._tokens + elapsed * self._rate)
+            self._last_refill = now
+
+            if self._tokens >= 1.0:
+                self._tokens -= 1.0
+                wait = 0.0
+            else:
+                # Pre-reserve a future slot — tokens can go negative to track
+                # N queued callers, each getting a 1/rate-second later slot.
+                wait = (1.0 - self._tokens) / self._rate
+                self._tokens -= 1.0
+
+        # Sleep OUTSIDE the lock so the next caller can compute its own wait
+        # immediately rather than queueing behind our sleep time.
+        if wait > 0.0:
+            await asyncio.sleep(wait)
+
+
+# Module-level singleton — 2.5 req/s sustained, burst of 2 immediate calls.
+# Tuned for TomTom's free-tier routing limit (~5 QPS; we stay at half that
+# to leave headroom for traffic/geometry calls sharing the same key).
+# All callers in this process (reroute, evacuation, monitoring) share it.
+_tomtom_rate_limiter = _AsyncTokenBucket(rate=2.5, burst=2)
 
 
 # ---------------------------------------------------------------------------
@@ -447,11 +492,11 @@ class IntegrationService:
             await self._cache_set(cache_key, result, self.ROUTING_CACHE_TTL)
             return result
         except pybreaker.CircuitBreakerError:
-            logger.warning("get_directions: circuit breaker open — returning mock routes")
-            return {"routes": parse_routing_response(MOCK_ROUTING_RESPONSE), "mode": "degraded"}
+            logger.warning("get_directions: circuit breaker open — skipping (no mock routes)")
+            return {"routes": [], "mode": "degraded"}
         except Exception as e:
             logger.error(f"get_directions failed: {e}")
-            return {"routes": parse_routing_response(MOCK_ROUTING_RESPONSE), "mode": "degraded"}
+            return {"routes": [], "mode": "degraded"}
 
 
     async def fetch_segment_geometry(
@@ -551,12 +596,13 @@ class IntegrationService:
     ) -> Dict[str, Any]:
         """Internal: routing call with retry + circuit breaker.
 
-        _tomtom_semaphore (module-level, max=3) limits the number of
-        concurrent outbound routing requests across ALL callers in this
-        process — evacuation _compute_routes + reroute geometry enrichment.
+        _tomtom_rate_limiter (module-level token bucket, 2.5 req/s / burst=2)
+        paces outbound routing requests across ALL callers in this process —
+        reroute, evacuation, monitoring — so concurrent asyncio.gather calls
+        never flood TomTom with more requests than the API key allows.
         """
-        async with _get_tomtom_semaphore():
-            session = await self._get_session()
+        await _tomtom_rate_limiter.acquire()
+        session = await self._get_session()
 
             origin_str = f"{origin['lat']},{origin['lng']}"
             dest_str = f"{destination['lat']},{destination['lng']}"
@@ -675,14 +721,13 @@ class IntegrationService:
         cache_key = self._routing_cache_key(origin, destination, combined_avoid)
         await self._cache_set(cache_key + ':bypass', {'bypass': True}, 1)  # invalidate
 
-        # Call TomTom directly, skipping cache check
+        # Call TomTom directly, skipping cache check.
+        # _get_directions_with_breaker acquires the rate limiter internally —
+        # no outer semaphore/lock needed here.
         try:
-            async with _get_tomtom_semaphore():
-                result = await self._get_directions_with_breaker(
-                    origin, destination, combined_avoid, True, 3
-                )
-                await asyncio.sleep(0.25) 
-                # Cache the new override result
+            result = await self._get_directions_with_breaker(
+                origin, destination, combined_avoid, True, 3
+            )
             await self._cache_set(cache_key, result, self.ROUTING_CACHE_TTL)
             return result
         except Exception as e:

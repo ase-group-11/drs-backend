@@ -443,12 +443,11 @@ class RerouteService:
         vehicles: List[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
 
-        # Build list of (origin, destination) call args — deduped
-        call_args: List[tuple] = []
-
         if vehicles:
             # Pair each unique origin+destination combination
+            # so each vehicle only gets routes relevant to their journey.
             seen_pairs: set = set()
+            tasks = []
             for v in vehicles:
                 loc = v.get("current_location", {})
                 dest = v.get("destination", {})
@@ -461,32 +460,41 @@ class RerouteService:
                 if pair in seen_pairs:
                     continue
                 seen_pairs.add(pair)
-                call_args.append((
-                    {"lat": loc["lat"], "lng": loc["lng"]},
-                    {"lat": dest["lat"], "lng": dest["lng"]},
-                ))
+                tasks.append(
+                    self.external.get_directions(
+                        origin={"lat": loc["lat"], "lng": loc["lng"]},
+                        destination={"lat": dest["lat"], "lng": dest["lng"]},
+                        avoid=blocked_roads,
+                        alternatives=True,
+                    )
+                )
         else:
             # Fallback: fixed origin to all destinations
-            for dest in destinations:
-                call_args.append(({"lat": 53.2900, "lng": -6.3800}, dest))
-
-        # Call TomTom sequentially with a short pause between requests to stay
-        # within the free-tier rate limit (~1 req/s for routing).
-        # Firing all calls concurrently causes 429s when there are many vehicles.
-        all_routes = []
-        for i, (origin, destination) in enumerate(call_args):
-            if i > 0:
-                await asyncio.sleep(0.4)   # 400 ms between calls → ~2.5 req/s
-            try:
-                result = await self.external.get_directions(
-                    origin=origin,
-                    destination=destination,
+            tasks = [
+                self.external.get_directions(
+                    origin={"lat": 53.2900, "lng": -6.3800},
+                    destination=dest,
                     avoid=blocked_roads,
                     alternatives=True,
                 )
-                all_routes.extend(result.get("routes", []))
-            except Exception as exc:
-                logger.warning(f"Route calculation failed ({origin} → {destination}): {exc}")
+                for dest in destinations
+            ]
+
+        # Launch all routing calls concurrently — rate limiting is enforced
+        # inside IntegrationService via _tomtom_rate_limiter (token bucket,
+        # 2.5 req/s / burst=2) so these gather normally without 429s.
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        all_routes = []
+        for result in results:
+            if isinstance(result, Exception):
+                logger.warning(f"Route calculation failed: {result}")
+                continue
+            # Skip degraded results — they carry no real geometry and would
+            # pollute the map with mock coordinates if saved to the plan.
+            if result.get("mode") == "degraded":
+                continue
+            all_routes.extend(result.get("routes", []))
 
         seen = set()
         unique_routes = []
