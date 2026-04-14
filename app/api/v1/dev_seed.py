@@ -583,16 +583,14 @@ async def seed_full_database(
     # Destinations are ~1.5 km on the OPPOSITE side so the path crosses the zone.
     #
     # Layout — (cur_dlat, cur_dlon,  dest_dlat, dest_dlon):
-    #   N→S, S→N, E→W, W→E, NE→SW, SW→NE, NW→SE, SE→NW
+    #   4 cardinal directions — each trip crosses the disaster zone.
+    #   Kept to 4 so rerouting fires exactly 4 TomTom routing calls,
+    #   comfortably within the free-tier rate limit (~2.5 req/s sequential).
     TRIP_OFFSETS = [
         ( 0.008,  0.000,  -0.013,  0.000),   # North  → South
         (-0.008,  0.000,   0.013,  0.000),   # South  → North
         ( 0.000,  0.012,   0.000, -0.020),   # East   → West
         ( 0.000, -0.012,   0.000,  0.020),   # West   → East
-        ( 0.006,  0.009,  -0.010, -0.015),   # NE     → SW
-        (-0.006, -0.009,   0.010,  0.015),   # SW     → NE
-        ( 0.006, -0.009,  -0.010,  0.015),   # NW     → SE
-        (-0.006,  0.009,   0.010, -0.015),   # SE     → NW
     ]
 
     trip_count = 0
