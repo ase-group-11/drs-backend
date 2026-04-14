@@ -21,8 +21,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.main import app
 from app.db.session import get_db
-from app.models.user import User
-from app.models.enums import UserStatus
+from app.db.models.user import User
+from app.db.models.enums import UserStatus
 
 
 # Test fixtures

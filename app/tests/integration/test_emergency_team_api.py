@@ -20,8 +20,8 @@ from datetime import datetime, UTC
 
 from app.main import app
 from app.db.session import get_db
-from app.models.emergency_team import EmergencyTeam
-from app.models.enums import UserStatus, EmergencyTeamRole, Department
+from app.db.models.emergency_team import EmergencyTeam
+from app.db.models.enums import UserStatus, EmergencyTeamRole, Department
 
 
 # Test fixtures

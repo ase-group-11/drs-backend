@@ -429,24 +429,24 @@ DISASTER_SCENARIOS: List[Dict[str, Any]] = [
 ]
 
 
-# ── Trip crossing offsets (long routes, ~20-28 km total) ─────────────────────
+# ── Trip crossing offsets (~8-12 km total route length) ──────────────────────
 #
 # Layout: (cur_dlat, cur_dlon, dest_dlat, dest_dlon)
 #
-# Current position is ~0.9 km from disaster centre — safely inside any radius
-# (even a tight 1.5 km bounding box).  Destination is ~17-22 km on the
-# OPPOSITE side so the route visibly crosses the disaster zone on the map.
+# Current position is ~0.9 km from disaster centre — safely inside any 2 km
+# bounding-box radius.  Destination is ~8 km on the OPPOSITE side so the
+# route clearly crosses the disaster zone without being unrealistically long.
 #
 # At Dublin latitude (53.3°):
-#   0.008° lat ≈ 0.89 km   |   0.175° lat ≈ 19.4 km
-#   0.011° lon ≈ 0.80 km   |   0.260° lon ≈ 19.0 km
+#   0.008° lat ≈ 0.89 km   |   0.072° lat ≈ 8.0 km
+#   0.011° lon ≈ 0.74 km   |   0.120° lon ≈ 8.0 km
 LONG_TRIP_OFFSETS = [
-    (+0.008,  0.000, -0.175,  0.000),   # North current → South dest (~21 km)
-    (-0.008,  0.000, +0.175,  0.000),   # South current → North dest (~21 km)
-    ( 0.000, +0.011,  0.000, -0.260),   # East  current → West  dest (~19 km)
-    ( 0.000, -0.011,  0.000, +0.260),   # West  current → East  dest (~19 km)
-    (+0.006, +0.008, -0.124, -0.184),   # NE current → SW dest (~20 km diagonal)
-    (-0.006, +0.008, +0.124, -0.184),   # SE current → NW dest (~20 km diagonal)
+    (+0.008,  0.000, -0.072,  0.000),   # North current → South dest (~9 km)
+    (-0.008,  0.000, +0.072,  0.000),   # South current → North dest (~9 km)
+    ( 0.000, +0.011,  0.000, -0.120),   # East  current → West  dest (~9 km)
+    ( 0.000, -0.011,  0.000, +0.120),   # West  current → East  dest (~9 km)
+    (+0.006, +0.008, -0.051, -0.085),   # NE current → SW dest (~9 km diagonal)
+    (-0.006, +0.008, +0.051, -0.085),   # SE current → NW dest (~9 km diagonal)
 ]
 
 VEHICLE_TYPES = ["general", "general", "general", "public_transport"]

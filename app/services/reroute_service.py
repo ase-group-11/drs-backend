@@ -386,6 +386,28 @@ class RerouteService:
                         },
                     }
 
+            # Guard: clamp very long segments (motorway approaches etc.) to a
+            # 1.5 km window around their midpoint.  This prevents a single far-
+            # apart segment from producing a 10+ km slash on the map when TomTom
+            # fails and the straight-line fallback fires.
+            _seg_km = math.sqrt(
+                ((start_lat - end_lat) * 111) ** 2
+                + ((start_lng - end_lng) * 73) ** 2
+            )
+            _MAX_SEG_KM = 3.0
+            if _seg_km > _MAX_SEG_KM:
+                mid_lat = (start_lat + end_lat) / 2
+                mid_lng = (start_lng + end_lng) / 2
+                _half_lat = 0.007   # ≈ 0.78 km each side → 1.56 km window
+                _half_lng = 0.011   # ≈ 0.80 km each side
+                start_lat, start_lng = mid_lat - _half_lat, mid_lng - _half_lng
+                end_lat,   end_lng   = mid_lat + _half_lat, mid_lng + _half_lng
+                logger.info(
+                    f"[enrich] segment {seg.get('segment_id')} clamped "
+                    f"{_seg_km:.1f} km → 1.5 km window around midpoint "
+                    f"({mid_lat:.5f},{mid_lng:.5f})"
+                )
+
             # Real segment — ask TomTom for road-following geometry.
             # Per-segment 12s timeout so a single hanging TomTom call never
             # blocks the entire gather — the circle fallback fires instead.
