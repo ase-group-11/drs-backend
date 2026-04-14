@@ -499,6 +499,79 @@ class IntegrationService:
             return {"routes": [], "mode": "degraded"}
 
 
+    async def geocode_road_name(
+        self,
+        road_name: str,
+        near_lat: float,
+        near_lon: float,
+        radius_m: int = 3000,
+    ) -> Optional[Dict[str, float]]:
+        """
+        Forward-geocode a road name to coordinates near a disaster centre.
+
+        Uses TomTom Fuzzy Search API (idxSet=Str — streets only) with
+        proximity bias toward near_lat/near_lon so "O'Connell Street" returns
+        the Dublin one, not a street with the same name elsewhere.
+
+        Returns {"lat": float, "lon": float} or None on failure / mock mode.
+
+        API: GET https://api.tomtom.com/search/2/search/{query}.json
+        """
+        if self.is_mock or not self.api_key:
+            logger.debug(f"geocode_road_name: mock/no-key — skipping '{road_name}'")
+            return None
+
+        await _tomtom_rate_limiter.acquire()
+
+        encoded = road_name.replace(" ", "%20")
+        url = f"https://api.tomtom.com/search/2/search/{encoded}.json"
+        params = {
+            "key":    self.api_key,
+            "lat":    near_lat,
+            "lon":    near_lon,
+            "radius": radius_m,
+            "limit":  1,
+            "idxSet": "Str",          # streets only (no POIs, cross streets)
+            "language": "en-GB",
+        }
+
+        try:
+            session = await self._get_session()
+            async with session.get(
+                url, params=params,
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as resp:
+                if resp.status != 200:
+                    logger.debug(
+                        f"geocode_road_name: TomTom HTTP {resp.status} for '{road_name}'"
+                    )
+                    return None
+                data = await resp.json()
+
+            results = data.get("results", [])
+            if not results:
+                logger.debug(f"geocode_road_name: no results for '{road_name}'")
+                return None
+
+            pos = results[0].get("position", {})
+            lat = pos.get("lat")
+            lon = pos.get("lon")
+            if lat and lon:
+                logger.info(
+                    f"[TomTom] geocode_road_name ✓ '{road_name}' → ({lat:.5f},{lon:.5f})"
+                )
+                return {"lat": float(lat), "lon": float(lon)}
+
+            return None
+
+        except asyncio.TimeoutError:
+            logger.debug(f"geocode_road_name: timeout for '{road_name}'")
+            return None
+        except Exception as exc:
+            logger.debug(f"geocode_road_name: failed for '{road_name}': {exc}")
+            return None
+
+
     async def fetch_segment_geometry(
         self,
         start_lat: float,

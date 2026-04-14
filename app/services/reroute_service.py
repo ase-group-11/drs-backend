@@ -317,30 +317,74 @@ class RerouteService:
             end_lat   = seg["end_lat"]
             end_lng   = seg["end_lng"]
 
-            # Zero-length segment — evaluation gave us only a centre point
-            # Draw a small circle so the frontend shows a blocked zone
+            # Zero-length segment — evaluation stored a road name without
+            # coordinates (start == end == disaster centre).
+            # Attempt forward geocoding to find where the road actually is,
+            # then fall through to the normal TomTom geometry fetch below.
             if start_lat == end_lat and start_lng == end_lng:
-                radius_deg = 0.005  # ~500m radius
-                points = [
-                    [
-                        start_lat + radius_deg * math.cos(math.radians(a)),
-                        start_lng + radius_deg * math.sin(math.radians(a)),
-                    ]
-                    for a in range(0, 360, 45)
-                ]
-                points.append(points[0])  # close the ring
-                return {
-                    **seg,
-                    "points": points,
-                    "geojson": {
-                        "type": "Feature",
-                        "geometry": {
-                            "type": "LineString",
-                            "coordinates": [[p[1], p[0]] for p in points],
+                road_name = seg.get("road_name", "")
+                geocoded  = None
+
+                if road_name:
+                    try:
+                        geocoded = await asyncio.wait_for(
+                            self.external.geocode_road_name(
+                                road_name,
+                                near_lat=start_lat,
+                                near_lon=start_lng,
+                            ),
+                            timeout=6.0,
+                        )
+                    except asyncio.TimeoutError:
+                        logger.debug(
+                            f"enrich: geocode timeout for road '{road_name}'"
+                        )
+                    except Exception as exc:
+                        logger.debug(
+                            f"enrich: geocode error for road '{road_name}': {exc}"
+                        )
+
+                if geocoded:
+                    # Build a short (~220 m) segment centred on the geocoded point
+                    # so fetch_segment_geometry can snap to the real road polyline.
+                    _offset = 0.001          # 0.001° lat ≈ 111 m each side
+                    start_lat = geocoded["lat"] - _offset
+                    start_lng = geocoded["lon"]
+                    end_lat   = geocoded["lat"] + _offset
+                    end_lng   = geocoded["lon"]
+                    seg = {
+                        **seg,
+                        "start_lat": start_lat, "start_lng": start_lng,
+                        "end_lat":   end_lat,   "end_lng":   end_lng,
+                    }
+                    logger.info(
+                        f"[enrich] geocoded '{road_name}' → "
+                        f"({geocoded['lat']:.5f},{geocoded['lon']:.5f}), "
+                        f"fetching road geometry"
+                    )
+                    # Fall through to the TomTom geometry call below
+                else:
+                    # Geocoding unavailable or no result — render a single point
+                    # marker so the frontend shows one ⊘ icon, not N overlapping rings.
+                    logger.debug(
+                        f"[enrich] no geocode result for '{road_name}' — point fallback"
+                    )
+                    return {
+                        **seg,
+                        "points": [[start_lat, start_lng]],
+                        "geojson": {
+                            "type": "Feature",
+                            "geometry": {
+                                "type": "Point",
+                                "coordinates": [start_lng, start_lat],
+                            },
+                            "properties": {
+                                "road_name":   road_name,
+                                "status":      "closed",
+                                "zero_length": True,
+                            },
                         },
-                        "properties": {},
-                    },
-                }
+                    }
 
             # Real segment — ask TomTom for road-following geometry.
             # Per-segment 12s timeout so a single hanging TomTom call never
@@ -363,18 +407,14 @@ class RerouteService:
                     "— falling back to midpoint circle"
                 )
 
-            # Fallback: draw a small circle centred at the segment midpoint
-            mid_lat = (start_lat + end_lat) / 2
-            mid_lng = (start_lng + end_lng) / 2
-            radius_deg = 0.003  # ~300 m
+            # TomTom failed — fall back to a straight line between the two
+            # endpoint coordinates so at least the correct road position is shown.
+            # Avoid drawing circles here too: multiple segments failing at once
+            # would produce the same overlapping-ring spiral problem.
             fallback_points = [
-                [
-                    mid_lat + radius_deg * math.cos(math.radians(a)),
-                    mid_lng + radius_deg * math.sin(math.radians(a)),
-                ]
-                for a in range(0, 360, 45)
+                [start_lat, start_lng],
+                [end_lat,   end_lng],
             ]
-            fallback_points.append(fallback_points[0])
             return {
                 **seg,
                 "points": fallback_points,
@@ -382,9 +422,16 @@ class RerouteService:
                     "type": "Feature",
                     "geometry": {
                         "type": "LineString",
-                        "coordinates": [[p[1], p[0]] for p in fallback_points],
+                        "coordinates": [
+                            [start_lng, start_lat],
+                            [end_lng,   end_lat],
+                        ],
                     },
-                    "properties": {},
+                    "properties": {
+                        "road_name": seg.get("road_name", ""),
+                        "status":    "closed",
+                        "fallback":  True,
+                    },
                 },
             }
 
@@ -504,7 +551,55 @@ class RerouteService:
                 seen.add(rid)
                 unique_routes.append(route)
 
-        return unique_routes
+        # ── Spiral / loop filter ──────────────────────────────────────────────
+        # When a trip's destination is inside or very near the blocked zone
+        # TomTom returns a route that circles the entire disaster perimeter
+        # (total distance >> straight-line distance).  These appear as ugly
+        # concentric red rings on the map.  Discard any route whose total
+        # length is more than 3× the straight-line origin→destination distance.
+        def _straight_km(pts: list) -> float:
+            if len(pts) < 2:
+                return 0.0
+            lat1, lon1 = pts[0][0],  pts[0][1]
+            lat2, lon2 = pts[-1][0], pts[-1][1]
+            dlat = math.radians(lat2 - lat1)
+            dlon = math.radians(lon2 - lon1)
+            a = (math.sin(dlat / 2) ** 2
+                 + math.cos(math.radians(lat1))
+                 * math.cos(math.radians(lat2))
+                 * math.sin(dlon / 2) ** 2)
+            return 6371.0 * 2 * math.asin(math.sqrt(max(0.0, a)))
+
+        clean_routes = []
+        for route in unique_routes:
+            points    = route.get("points", [])
+            route_km  = route.get("distance_meters", 0) / 1000.0
+            straight  = _straight_km(points)
+
+            # Keep if: no geometry data, OR straight-line ≈ 0 (skip — both ends
+            # in disaster zone, destination inaccessible), OR ratio is sane.
+            if straight < 0.2:
+                logger.info(
+                    f"[reroute] dropped spiral route {route.get('route_id')} — "
+                    f"origin≈destination (straight={straight:.2f} km, "
+                    f"both ends likely inside blocked zone)"
+                )
+                continue
+            if route_km > 0 and (route_km / straight) > 3.0:
+                logger.info(
+                    f"[reroute] dropped spiral route {route.get('route_id')} — "
+                    f"loop ratio {route_km/straight:.1f}× "
+                    f"(route={route_km:.1f} km, straight={straight:.1f} km)"
+                )
+                continue
+            clean_routes.append(route)
+
+        if len(clean_routes) < len(unique_routes):
+            logger.info(
+                f"[reroute] spiral filter: kept {len(clean_routes)}/{len(unique_routes)} routes"
+            )
+
+        return clean_routes
     
     # -------------------------------------------------------------------------
     # Step 7 — Feasibility + temporary controls
