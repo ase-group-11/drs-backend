@@ -35,15 +35,8 @@ celery_app.conf.update(
             "schedule": 298.0,
             "args": [],
         },
-        "auto-evaluate-pending-reports": {
-            "task": "app.workers.tasks.auto_evaluate_pending_reports",
-            "schedule": 60.0,
-            "args": [],
-        },
-        "periodic-reassess-disasters": {
-            "task": "app.workers.tasks.periodic_reassess_disasters",
-            "schedule": 900.0,
-            "args": [],
-        },
+        # auto_evaluate_pending_reports and periodic_reassess_disasters have
+        # been moved into FastAPI's asyncio lifespan (see main.py).
+        # They run on the same event loop as FastAPI — no loop isolation bugs.
     },
 )

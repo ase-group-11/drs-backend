@@ -4,12 +4,18 @@ app/workers/tasks.py
 Celery task definitions.
 
 Tasks:
-  monitor_traffic_conditions — runs every 30s via Celery beat.
+  monitor_traffic_conditions — runs every 300s via Celery beat.
     Polls TomTom for all active reroute regions, runs dual congestion
     check (reactive + predictive), triggers recalculation if needed.
+
+Active region registry is stored in Redis so it is visible to both the
+FastAPI process (which triggers reroutes) and the Celery worker (which
+runs the monitoring loop). Previously this was an in-memory dict, which
+meant the monitoring loop could never see regions registered by FastAPI.
 """
 
 import asyncio
+import json
 import logging
 from typing import List, Dict, Any
 
@@ -21,40 +27,56 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# In-memory active regions registry
-# Populated when RerouteService.trigger_reroute_traffic completes.
-# Cleared when restore_normal_flow is called.
+# Active regions registry — Redis-backed so FastAPI and Celery share state
 # ---------------------------------------------------------------------------
-# { disaster_id: { region_id, route_plan, segment_capacities } }
-_active_reroute_regions: Dict[str, Dict[str, Any]] = {}
+
+_REGION_PREFIX = "active_region:"
+_REGION_TTL    = 86400  # 24 hours — covers the longest realistic disaster
 
 
-def register_active_region(
+async def register_active_region(
     disaster_id: str,
-    lat: float,          
+    lat: float,
     lon: float,
     radius_km: float,
     route_plan: dict,
     segment_capacities: dict,
 ) -> None:
-    _active_reroute_regions[disaster_id] = {
-        "disaster_id": disaster_id,
-        "lat": lat,
-        "lon": lon,
-        "radius_km": radius_km,
-        "route_plan": route_plan,
+    from cache.redis_client import get_redis_client
+    redis = await get_redis_client()
+    data = {
+        "disaster_id":       disaster_id,
+        "lat":               lat,
+        "lon":               lon,
+        "radius_km":         radius_km,
+        "route_plan":        route_plan,
         "segment_capacities": segment_capacities,
     }
+    await redis.set(f"{_REGION_PREFIX}{disaster_id}", json.dumps(data), ex=_REGION_TTL)
+    logger.info("tasks: registered active region for disaster %s", disaster_id)
 
 
-def deregister_active_region(disaster_id: str) -> None:
-    """Remove a region from monitoring after disaster is cleared."""
-    _active_reroute_regions.pop(disaster_id, None)
-    logger.info(f"tasks: deregistered disaster {disaster_id}")
+async def deregister_active_region(disaster_id: str) -> None:
+    from cache.redis_client import get_redis_client
+    redis = await get_redis_client()
+    await redis.delete(f"{_REGION_PREFIX}{disaster_id}")
+    logger.info("tasks: deregistered disaster %s", disaster_id)
 
 
-def get_active_regions() -> Dict[str, Dict[str, Any]]:
-    return dict(_active_reroute_regions)
+async def get_active_regions() -> Dict[str, Dict[str, Any]]:
+    from cache.redis_client import get_redis_client
+    redis = await get_redis_client()
+    keys = await redis.keys(f"{_REGION_PREFIX}*")
+    regions: Dict[str, Dict[str, Any]] = {}
+    for key in keys:
+        raw = await redis.get(key)
+        if raw:
+            try:
+                entry = json.loads(raw)
+                regions[entry["disaster_id"]] = entry
+            except Exception:
+                pass
+    return regions
 
 
 # ---------------------------------------------------------------------------
@@ -69,48 +91,55 @@ def get_active_regions() -> Dict[str, Dict[str, Any]]:
 )
 def monitor_traffic_conditions(self):
     """
-    Periodic monitoring loop — runs every 30s via Celery beat.
- 
-    For each active reroute disaster:
+    Periodic monitoring loop — runs every 300s via Celery beat.
+
+    Fetches active regions from Redis (shared with FastAPI process), then
+    for each active reroute disaster:
       1. Fetch live traffic data from TomTom (via IntegrationService)
       2. Run dual_congestion_check (reactive + predictive)
-      3. If recalculation needed → trigger async recalculation task
- 
-    Celery tasks are synchronous — async calls use asyncio.run().
+      3. If recalculation needed → trigger recalculate_routes task
     """
-    if not _active_reroute_regions:
+    try:
+        return asyncio.run(_monitor_all())
+    except Exception as exc:
+        logger.error("monitor_traffic_conditions failed: %s", exc)
+        return {"status": "error", "regions_checked": 0}
+
+
+async def _monitor_all() -> dict:
+    from app.db.session import engine as _engine
+    await _engine.dispose()
+
+    regions = await get_active_regions()
+    if not regions:
         logger.debug("monitor_traffic_conditions: no active regions — skipping")
         return {"status": "idle", "regions_checked": 0}
- 
-    logger.info(
-        f"monitor_traffic_conditions: checking {len(_active_reroute_regions)} regions"
+
+    logger.info("monitor_traffic_conditions: checking %d regions", len(regions))
+
+    results = await asyncio.gather(
+        *[
+            _check_region(
+                disaster_id=did,
+                lat=data["lat"],
+                lon=data["lon"],
+                radius_km=data["radius_km"],
+                route_plan=data["route_plan"],
+                segment_capacities=data["segment_capacities"],
+            )
+            for did, data in regions.items()
+        ],
+        return_exceptions=True,
     )
- 
-    results = []
-    for disaster_id, region_data in list(_active_reroute_regions.items()):
-        try:
-            result = asyncio.run(
-                _check_region(
-                    disaster_id=disaster_id,
-                    lat=region_data["lat"],
-                    lon=region_data["lon"],
-                    radius_km=region_data["radius_km"],
-                    route_plan=region_data["route_plan"],
-                    segment_capacities=region_data["segment_capacities"],
-                )
-            )
-            results.append(result)
-        except Exception as e:
-            logger.error(
-                f"monitor_traffic_conditions: error checking "
-                f"disaster={disaster_id} — {e}"
-            )
- 
-    return {
-        "status": "ok",
-        "regions_checked": len(results),
-        "results": results,
-    }
+
+    checked = []
+    for did, res in zip(regions.keys(), results):
+        if isinstance(res, Exception):
+            logger.error("monitor_traffic_conditions: error for disaster=%s — %s", did, res)
+        else:
+            checked.append(res)
+
+    return {"status": "ok", "regions_checked": len(checked), "results": checked}
 
 async def _check_region(
     disaster_id: str,
@@ -149,28 +178,34 @@ async def _check_region(
     name="app.workers.tasks.warm_traffic_cache",
     bind=True,
 )
-
 def warm_traffic_cache(self):
     """
-    Pre-warm Redis traffic cache for all active disasters every 25s.
- 
-    Runs slightly faster than TRAFFIC_CACHE_TTL (30s) so the monitoring
-    loop always finds warm cache — zero cold starts, no TomTom wait.
+    Pre-warm Redis traffic cache for all active disasters.
+
+    Runs slightly ahead of monitor_traffic_conditions so the cache is
+    always warm when the monitoring loop fires.
     """
-    if not _active_reroute_regions:
+    try:
+        return asyncio.run(_warm_all())
+    except Exception as exc:
+        logger.warning("warm_traffic_cache: failed — %s", exc)
+        return {"status": "error", "regions_warmed": 0}
+
+
+async def _warm_all() -> dict:
+    from app.db.session import engine as _engine
+    await _engine.dispose()
+
+    regions = await get_active_regions()
+    if not regions:
         return {"status": "idle", "regions_warmed": 0}
- 
+
     coords = list({
         (data["lat"], data["lon"], data["radius_km"])
-        for data in _active_reroute_regions.values()
+        for data in regions.values()
     })
- 
-    try:
-        asyncio.run(_warm_regions(coords))
-    except Exception as e:
-        logger.warning(f"warm_traffic_cache: failed — {e}")
- 
-    logger.info(f"warm_traffic_cache: warmed {len(coords)} regions")
+    await _warm_regions(coords)
+    logger.info("warm_traffic_cache: warmed %d regions", len(coords))
     return {"status": "ok", "regions_warmed": len(coords)}
  
  
@@ -257,6 +292,8 @@ async def _recalculate_async(
         repo = RerouteRepository(db)
         external = get_integration_service()
         publisher = get_publisher()
+        if not publisher.is_connected:
+            await publisher.connect()
         mapping = MappingService()
 
         service = RerouteService(
@@ -310,109 +347,8 @@ async def _recalculate_async(
         )
 
 # ---------------------------------------------------------------------------
-# Evaluation tasks — delegate to app/tasks/ functions
+# Evaluation tasks have been moved into FastAPI's asyncio lifespan (main.py).
+# They run as asyncio.create_task loops on the same event loop as FastAPI,
+# eliminating all "Future attached to a different loop" errors that arose
+# from Celery's asyncio.run()-per-task model.
 # ---------------------------------------------------------------------------
-
-@celery_app.task(
-    name="app.workers.tasks.auto_evaluate_pending_reports",
-    bind=True,
-    max_retries=2,
-    default_retry_delay=10,
-)
-def auto_evaluate_pending_reports(self):
-    """
-    Runs every 60s — picks up PENDING disaster reports and evaluates them.
-    Delegates to app/tasks/process_pending_reports.py.
-    """
-    try:
-        asyncio.run(_run_process_pending())
-        return {"status": "ok"}
-    except Exception as exc:
-        logger.error(f"auto_evaluate_pending_reports failed: {exc}")
-        raise self.retry(exc=exc)
-
-
-async def _run_process_pending():
-    # Dispose any pooled connections that are bound to a previously closed
-    # event loop.  Each asyncio.run() call creates a new loop; asyncpg
-    # futures from the old loop raise "Future attached to a different loop"
-    # if we let the pool reuse them.  dispose() closes all idle connections
-    # immediately and invalidates checked-out ones so they are discarded on
-    # return — the pool will open fresh connections on this new loop.
-    from app.db.session import engine as _engine
-    await _engine.dispose()
-
-    from app.tasks.process_pending_reports import process_pending_reports
-    from app.providers.map_provider import MapProvider
-    from app.providers.traffic import TrafficProvider
-    from app.services.evaluation.rules_engine import RulesEngineStrategy
-    from app.services.evaluation.ensemble import EnsembleStrategy
-    from app.core.config import settings
-
-    map_provider = MapProvider(api_key=settings.MAPBOX_API_KEY)
-    traffic_provider = TrafficProvider(api_key=settings.TRAFFIC_API_KEY)
-
-    try:
-        from app.services.evaluation.xgboost_strategy import XGBoostStrategy
-        xgb = XGBoostStrategy(model_path=settings.MODEL_PATH)
-        xgb.load()
-        strategy = EnsembleStrategy(rules=RulesEngineStrategy(), xgb=xgb)
-    except Exception:
-        strategy = RulesEngineStrategy()
-
-    await process_pending_reports(
-        strategy=strategy,
-        map_provider=map_provider,
-        traffic_provider=traffic_provider,
-    )
-
-
-@celery_app.task(
-    name="app.workers.tasks.periodic_reassess_disasters",
-    bind=True,
-    max_retries=2,
-    default_retry_delay=10,
-)
-def periodic_reassess_disasters(self):
-    """
-    Runs every 15 minutes — re-evaluates all active disasters.
-    Picks up new corroborating reports and updated conditions.
-    Delegates to app/tasks/periodic_reassess.py.
-    """
-    try:
-        asyncio.run(_run_periodic_reassess())
-        return {"status": "ok"}
-    except Exception as exc:
-        logger.error(f"periodic_reassess_disasters failed: {exc}")
-        raise self.retry(exc=exc)
-
-
-async def _run_periodic_reassess():
-    # Same dispose() guard as _run_process_pending — prevents stale asyncpg
-    # connections from a previous asyncio.run() loop from poisoning this task.
-    from app.db.session import engine as _engine
-    await _engine.dispose()
-
-    from app.tasks.periodic_reassess import run_periodic_reassess
-    from app.providers.map_provider import MapProvider
-    from app.providers.traffic import TrafficProvider
-    from app.services.evaluation.rules_engine import RulesEngineStrategy
-    from app.services.evaluation.ensemble import EnsembleStrategy
-    from app.core.config import settings
-
-    map_provider = MapProvider()
-    traffic_provider = TrafficProvider(api_key=settings.TRAFFIC_API_KEY)
-
-    try:
-        from app.services.evaluation.xgboost_strategy import XGBoostStrategy
-        xgb = XGBoostStrategy(model_path=settings.MODEL_PATH)
-        xgb.load()
-        strategy = EnsembleStrategy(rules=RulesEngineStrategy(), xgb=xgb)
-    except Exception:
-        strategy = RulesEngineStrategy()
-
-    await run_periodic_reassess(
-        strategy=strategy,
-        map_provider=map_provider,
-        traffic_provider=traffic_provider,
-    )

@@ -244,10 +244,10 @@ class RerouteService:
             },
         )
 
-        # Register region for Celery monitoring loop (Phase 4a)
-        register_active_region(
+        # Register region for traffic monitoring loop
+        await register_active_region(
             disaster_id=disaster_id,
-            lat = lat, lon = lon, radius_km=radius_km,
+            lat=lat, lon=lon, radius_km=radius_km,
             route_plan={
                 r["route_id"]: {
                     "vehicles_assigned": plan.route_stats.get(r["route_id"], {}).get("assigned", 0),
@@ -696,8 +696,8 @@ class RerouteService:
         """
         from app.services.predictive_congestion import dual_congestion_check
         from app.workers.tasks import get_active_regions
- 
-        active = get_active_regions()
+
+        active = await get_active_regions()
         region_entry = active.get(disaster_id)
  
         if not region_entry:
@@ -797,7 +797,7 @@ class RerouteService:
 
         # Fetch existing active incidents
         from app.workers.tasks import get_active_regions
-        active = get_active_regions()
+        active = await get_active_regions()
 
         all_incidents = list(active.values()) + [{
             "region_id": incident.get("region_id", "region-dublin"),
@@ -918,8 +918,8 @@ class RerouteService:
 
         await self.db.clear_reroute_plans(disaster_id)
 
-        # Deregister from Celery monitoring loop
-        deregister_active_region(disaster_id)
+        # Deregister from traffic monitoring loop
+        await deregister_active_region(disaster_id)
 
         logger.info(
             f"restore_normal_flow: disaster={disaster_id}"

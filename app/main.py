@@ -85,6 +85,28 @@ logger = logging.getLogger(__name__)
 # Lifespan — startup + graceful shutdown
 # ═════════════════════════════════════════════════════════════════════════════
 
+async def _evaluation_loop(strategy, map_provider, traffic_provider) -> None:
+    """Run process_pending_reports every 60 s on the FastAPI event loop."""
+    from app.tasks.process_pending_reports import process_pending_reports
+    while True:
+        await asyncio.sleep(60)
+        try:
+            await process_pending_reports(strategy, map_provider, traffic_provider)
+        except Exception:
+            logger.exception("Evaluation loop: process_pending_reports failed")
+
+
+async def _reassess_loop(strategy, map_provider, traffic_provider) -> None:
+    """Run run_periodic_reassess every 900 s on the FastAPI event loop."""
+    from app.tasks.periodic_reassess import run_periodic_reassess
+    while True:
+        await asyncio.sleep(900)
+        try:
+            await run_periodic_reassess(strategy, map_provider, traffic_provider)
+        except Exception:
+            logger.exception("Reassess loop: run_periodic_reassess failed")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # ── STARTUP ───────────────────────────────────────────────────────────────
@@ -127,6 +149,25 @@ async def lifespan(app: FastAPI):
     listener_task = asyncio.create_task(redis_listener())
     logger.info("📡 Redis notification listener started")
 
+    # 4. Evaluation pipeline loops — run on the FastAPI event loop so all
+    #    singletons (aiohttp sessions, asyncio primitives, RabbitMQ publisher)
+    #    are shared without any cross-loop issues.
+    from app.services.evaluation.rules_engine import RulesEngineStrategy
+    from app.services.evaluation.ensemble import EnsembleStrategy
+    try:
+        from app.services.evaluation.xgboost_strategy import XGBoostStrategy
+        xgb = XGBoostStrategy(model_path=settings.MODEL_PATH)
+        xgb.load()
+        strategy = EnsembleStrategy(rules=RulesEngineStrategy(), xgb=xgb)
+        logger.info("🤖 Evaluation strategy: Ensemble (XGBoost + Rules)")
+    except Exception:
+        strategy = RulesEngineStrategy()
+        logger.info("🤖 Evaluation strategy: Rules engine (XGBoost unavailable)")
+
+    eval_task     = asyncio.create_task(_evaluation_loop(strategy, map_provider, traffic_provider))
+    reassess_task = asyncio.create_task(_reassess_loop(strategy, map_provider, traffic_provider))
+    logger.info("⏱️  Evaluation loops started (pending reports: 60s, reassess: 900s)")
+
     yield  # ── application runs here ──────────────────────────────────────────
 
     # ── SHUTDOWN ──────────────────────────────────────────────────────────────
@@ -145,15 +186,13 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             logger.warning(f"⚠️  {label} close error — {exc}")
 
-    # Cancel the Redis pub/sub listener task.
-    # Give it slightly longer than its own internal wait_for(timeout=5.0) so
-    # that the CancelledError always wins on Python 3.9/3.10 where wait_for
-    # can delay propagation until the inner timeout fires.
-    listener_task.cancel()
-    try:
-        await asyncio.wait_for(asyncio.shield(listener_task), timeout=6.0)
-    except (asyncio.CancelledError, asyncio.TimeoutError):
-        pass
+    # Cancel background tasks
+    for task, label in [(listener_task, "Redis listener"), (eval_task, "Evaluation loop"), (reassess_task, "Reassess loop")]:
+        task.cancel()
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=6.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
 
     # Close remote connections — all guarded so a network blip never stalls
     # the server for longer than the sum of these timeouts (~9 s worst-case).
