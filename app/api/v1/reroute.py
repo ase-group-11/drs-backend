@@ -239,6 +239,8 @@ async def get_citizen_route(
             detail=f"No active reroute plan found for disaster_id={disaster_id}",
         )
 
+    return plan
+
 @router.get(
         "/plans",
         summary="Get all active reroute plans across all disasters",
