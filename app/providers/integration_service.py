@@ -199,7 +199,6 @@ class IntegrationService:
         self.api_key = api_key or settings.TRAFFIC_API_KEY
         self.timeout = timeout
         self._session: Optional[aiohttp.ClientSession] = None
-        self._inflight_locks: dict = {}
 
         # Auto-switch to mock if no API key or testing environment
         if not self.api_key or settings.ENVIRONMENT == "testing":
@@ -441,35 +440,18 @@ class IntegrationService:
         if cached:
             return cached
         
-        # Re-create the lock if it belongs to a stale event loop (Celery asyncio.run())
-        existing_lock = self._inflight_locks.get(cache_key)
-        if existing_lock is None or (
-            getattr(existing_lock, "_loop", None) is not asyncio.get_running_loop()
-        ):
-            self._inflight_locks[cache_key] = asyncio.Lock()
-
-        async with self._inflight_locks[cache_key]:
-            cached = await self._cache_get(cache_key)
-            if cached:
-                return cached
-
-            try:
-                async with _get_tomtom_semaphore():
-
-                    result = await self._get_directions_with_breaker(
-                        origin, destination, avoid or [], alternatives, max_alternatives
-                    )
-                    await asyncio.sleep(0.25) 
-                await self._cache_set(cache_key, result, self.ROUTING_CACHE_TTL)
-                return result
-            except pybreaker.CircuitBreakerError:
-                logger.warning("get_directions: circuit breaker open — returning mock routes")
-                return {"routes": parse_routing_response(MOCK_ROUTING_RESPONSE), "mode": "degraded"}
-            except Exception as e:
-                logger.error(f"get_directions failed: {e}")
-                return {"routes": parse_routing_response(MOCK_ROUTING_RESPONSE), "mode": "degraded"}
-            finally: 
-                self._inflight_locks.pop(cache_key, None)
+        try:
+            result = await self._get_directions_with_breaker(
+                origin, destination, avoid or [], alternatives, max_alternatives
+            )
+            await self._cache_set(cache_key, result, self.ROUTING_CACHE_TTL)
+            return result
+        except pybreaker.CircuitBreakerError:
+            logger.warning("get_directions: circuit breaker open — returning mock routes")
+            return {"routes": parse_routing_response(MOCK_ROUTING_RESPONSE), "mode": "degraded"}
+        except Exception as e:
+            logger.error(f"get_directions failed: {e}")
+            return {"routes": parse_routing_response(MOCK_ROUTING_RESPONSE), "mode": "degraded"}
 
 
     async def fetch_segment_geometry(
