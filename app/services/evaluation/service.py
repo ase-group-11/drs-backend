@@ -1107,6 +1107,9 @@ class DisasterEvaluationService:
         # Fire downstream triggers if ERT approved — reads stored flags from metadata
         if approved:
             meta = (disaster.get("disaster_metadata") or {}).get("evaluation", {})
+            _loc = disaster.get("location") or {}
+            _lat = float(_loc.get("lat", meta.get("lat", 0.0)))
+            _lon = float(_loc.get("lon", meta.get("lon", 0.0)))
             try:
                 await self._coordination.trigger_deploy(
                     disaster_id,
@@ -1115,7 +1118,7 @@ class DisasterEvaluationService:
                 )
                 if meta.get("trigger_reroute"):
                     await self._reroute.trigger_reroute(
-                        disaster_id, meta.get("affected_roads", [])
+                        disaster_id, meta.get("affected_roads", []), _lat, _lon
                     )
                 if meta.get("trigger_evacuation"):
                     await self._coordination.trigger_evacuation(

@@ -36,7 +36,7 @@ from app.providers.traffic import TrafficProvider
 from app.repositories.disaster_repository import DisasterRepository
 from app.repositories.disaster_report_repository import DisasterReportRepository
 from app.repositories.user_repository import UserRepository
-from app.services.evaluation.downstream import NoopCoordinationClient, NoopRerouteClient
+from app.services.evaluation.downstream import NoopCoordinationClient, NoopRerouteClient, DirectRerouteClient
 from app.services.evaluation.enrichment import EnrichmentPipeline, OpenWeatherMapProvider
 from app.services.evaluation.service import DisasterEvaluationService
 from app.services.live_map_service import LiveMapService
@@ -119,7 +119,7 @@ async def run_periodic_reassess(
                     ),
                     user_repo=UserRepository(db),
                     coordination_client=NoopCoordinationClient(),
-                    reroute_client=NoopRerouteClient(),
+                    reroute_client=DirectRerouteClient(db),
                 )
 
                 result = await service.reassess(disaster_id)
