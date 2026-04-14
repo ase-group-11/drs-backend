@@ -604,57 +604,57 @@ class IntegrationService:
         await _tomtom_rate_limiter.acquire()
         session = await self._get_session()
 
-            origin_str = f"{origin['lat']},{origin['lng']}"
-            dest_str = f"{destination['lat']},{destination['lng']}"
-            url = f"{self.ROUTING_BASE_URL}/{origin_str}:{dest_str}/json"
+        origin_str = f"{origin['lat']},{origin['lng']}"
+        dest_str = f"{destination['lat']},{destination['lng']}"
+        url = f"{self.ROUTING_BASE_URL}/{origin_str}:{dest_str}/json"
 
-            avoid_params = build_avoidance_params(avoid) if avoid else []
+        avoid_params = build_avoidance_params(avoid) if avoid else []
 
-            params: Dict[str, Any] = {
-                "key": self.api_key,
-                "traffic": "true",
-                "travelMode": "car",
-                "routeType": "fastest",
-            }
+        params: Dict[str, Any] = {
+            "key": self.api_key,
+            "traffic": "true",
+            "travelMode": "car",
+            "routeType": "fastest",
+        }
 
-            if alternatives:
-                params["maxAlternatives"] = min(max_alternatives, 3)
+        if alternatives:
+            params["maxAlternatives"] = min(max_alternatives, 3)
 
-            payload = {}
-            if avoid_params:
-                payload["avoidAreas"] = {"rectangles": [
-                    a["avoidAreaRectangle"] for a in avoid_params
-                ]}
+        payload = {}
+        if avoid_params:
+            payload["avoidAreas"] = {"rectangles": [
+                a["avoidAreaRectangle"] for a in avoid_params
+            ]}
 
-            method = "POST" if payload else "GET"
-            logger.info(
-                f"[TomTom] Routing {method} {origin_str} → {dest_str} "
-                f"alts={alternatives} avoid={len(avoid_params)}"
-            )
+        method = "POST" if payload else "GET"
+        logger.info(
+            f"[TomTom] Routing {method} {origin_str} → {dest_str} "
+            f"alts={alternatives} avoid={len(avoid_params)}"
+        )
 
-            if payload:
-                async with session.post(
-                    url,
-                    params=params,
-                    json=payload,
-                    timeout=aiohttp.ClientTimeout(total=self.timeout),
-                ) as response:
-                    logger.info(f"[TomTom] Routing response HTTP {response.status}")
-                    response.raise_for_status()
-                    data = await response.json()
-            else:
-                async with session.get(
-                    url,
-                    params=params,
-                    timeout=aiohttp.ClientTimeout(total=self.timeout),
-                ) as response:
-                    logger.info(f"[TomTom] Routing response HTTP {response.status}")
-                    response.raise_for_status()
-                    data = await response.json()
+        if payload:
+            async with session.post(
+                url,
+                params=params,
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=self.timeout),
+            ) as response:
+                logger.info(f"[TomTom] Routing response HTTP {response.status}")
+                response.raise_for_status()
+                data = await response.json()
+        else:
+            async with session.get(
+                url,
+                params=params,
+                timeout=aiohttp.ClientTimeout(total=self.timeout),
+            ) as response:
+                logger.info(f"[TomTom] Routing response HTTP {response.status}")
+                response.raise_for_status()
+                data = await response.json()
 
-            routes = parse_routing_response(data)
-            logger.info(f"[TomTom] get_directions: {len(routes)} route(s) parsed")
-            return {"routes": routes}
+        routes = parse_routing_response(data)
+        logger.info(f"[TomTom] get_directions: {len(routes)} route(s) parsed")
+        return {"routes": routes}
 
     # -------------------------------------------------------------------------
     # Recomputation helpers (for overrides + multi-incident)
