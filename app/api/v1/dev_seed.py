@@ -498,7 +498,7 @@ class DisastersRequest(BaseModel):
                                      description="Reports per pipeline cluster (1 lead + N-1 corroborating).")
 
 class TripsRequest(BaseModel):
-    count: int = Field(default=24, ge=4, le=200,
+    count: int = Field(default=60, ge=4, le=200,
                        description="Total active trips to create, spread across disaster locations.")
 
 class AllRequest(BaseModel):
@@ -927,9 +927,9 @@ async def _seed_trips(db: AsyncSession, count: int, citizens: List, now: datetim
         # (pipeline disasters are PENDING reports at this point)
         disaster_locs = [
             {"lat": sc["lat"], "lon": sc["lon"]}
-            for sc in DISASTER_SCENARIOS[:8]
+            for sc in DISASTER_SCENARIOS
             if sc["road_blocked"]
-        ][:5]
+        ]
 
     if not disaster_locs:
         disaster_locs = [{"lat": 53.3498, "lon": -6.2603}]  # O'Connell St fallback
