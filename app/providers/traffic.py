@@ -623,14 +623,14 @@ class TrafficProvider:
         event loop per task but the singleton session was bound to a
         previous (now-closed) loop.
         """
+        running_loop = asyncio.get_running_loop()
         if self.session is not None and not self.session.closed:
             try:
                 connector = self.session.connector
-                if connector is not None:
-                    loop = getattr(connector, "_loop", None)
-                    if loop is not None and loop.is_closed():
-                        await self.session.close()
-                        self.session = None
+                connector_loop = getattr(connector, "_loop", None)
+                if connector_loop is not None and connector_loop is not running_loop:
+                    await self.session.close()
+                    self.session = None
             except Exception:
                 self.session = None
         if self.session is None or self.session.closed:
@@ -656,14 +656,14 @@ class TrafficProvider:
     # Radial routes — M1, M4, N7, N11, N3, N2 + city centre connectors
     DUBLIN_HIGHWAY_POINTS = [
         # M50 ring road (clockwise from north)
-        (53.424, -6.244),   # M50 North — M1 interchange (J2)
+        (53.422, -6.248),   # M50 North — M1 interchange (J2) — nudged onto M50 carriageway
         (53.410, -6.320),   # M50 Northwest — Finglas area (J4)
         (53.392, -6.402),   # M50 West — M4 interchange (J7)
         (53.360, -6.405),   # M50 Southwest — Ballymount (J9)
         (53.299, -6.371),   # M50 South — N7 interchange (J11)
         (53.285, -6.290),   # M50 Southeast — Dundrum (J13)
         (53.302, -6.196),   # M50 East — N11 interchange (J15)
-        (53.348, -6.192),   # M50 Northeast — East Link approach (J1)
+        (53.346, -6.196),   # M50 Northeast — East Link approach (J1) — nudged onto M50 carriageway
 
         # M1 / N1 — Airport & north corridor
         (53.434, -6.243),   # M1 — Dublin Airport approach

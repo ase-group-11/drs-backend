@@ -278,18 +278,19 @@ class IntegrationService:
         return f"integration:routing:{hashlib.md5(payload.encode()).hexdigest()[:12]}"
 
     async def _get_session(self) -> aiohttp.ClientSession:
-        # Also recreate the session if the underlying connector's event loop
-        # is no longer the running loop — this happens in Celery ForkPool
-        # workers where asyncio.run() creates a new event loop per task but
-        # the singleton session was created in a previous (now-closed) loop.
+        # Recreate the session if it belongs to a stale event loop.
+        # asyncio.run() (used by Celery per-task) creates a brand-new loop each
+        # time. A session (and its connector) created in a previous loop will
+        # raise "Future attached to a different loop" even if that old loop is
+        # still technically open. We must compare against the *running* loop.
+        running_loop = asyncio.get_running_loop()
         if self._session is not None and not self._session.closed:
             try:
                 connector = self._session.connector
-                if connector is not None:
-                    loop = getattr(connector, "_loop", None)
-                    if loop is not None and loop.is_closed():
-                        await self._session.close()
-                        self._session = None
+                connector_loop = getattr(connector, "_loop", None)
+                if connector_loop is not None and connector_loop is not running_loop:
+                    await self._session.close()
+                    self._session = None
             except Exception:
                 self._session = None
         if self._session is None or self._session.closed:
