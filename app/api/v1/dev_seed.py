@@ -1196,7 +1196,7 @@ async def seed_units(
 
     class _M:
         def __init__(self, r):
-            self.id         = r.id
+            self.id         = str(r.id)
             self.department = Department(r.department)
             self.role       = EmergencyTeamRole(r.role)
 
@@ -1250,7 +1250,7 @@ async def seed_disasters(
     """))
     class _E:
         def __init__(self, r):
-            self.id         = r.id
+            self.id         = str(r.id)
             self.department = Department(r.department)
             self.role       = EmergencyTeamRole(r.role)
     ert = [_E(r) for r in ert_result.fetchall()]
@@ -1260,7 +1260,7 @@ async def seed_disasters(
     """))
     class _C:
         def __init__(self, r):
-            self.id           = r.id
+            self.id           = str(r.id)
             self.phone_number = r.phone_number
     citizens = [_C(r) for r in cit_result.fetchall()]
 
@@ -1337,7 +1337,7 @@ async def seed_trips(
     """))
     class _C:
         def __init__(self, r):
-            self.id = r.id
+            self.id = str(r.id)
             self.phone_number = r.phone_number
 
     citizens = [_C(r) for r in cit_result.fetchall()]
