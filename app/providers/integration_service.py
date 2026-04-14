@@ -55,7 +55,31 @@ _circuit_breaker = pybreaker.CircuitBreaker(
     name="tomtom_circuit_breaker",
 )
 
-_tomtom_semaphore = asyncio.Semaphore(3)
+_tomtom_semaphore: Optional[asyncio.Semaphore] = None
+
+
+def _get_tomtom_semaphore() -> asyncio.Semaphore:
+    """Return (or create) the semaphore bound to the current running event loop.
+
+    asyncio.Semaphore is tied to the event loop active when it is created.
+    Celery uses asyncio.run() which spins up a fresh loop per task — reusing a
+    semaphore (or Lock) created by a previous loop raises
+    "Future attached to a different loop". Creating it lazily here ensures it is
+    always bound to the loop that is actually running the coroutine.
+    """
+    global _tomtom_semaphore
+    try:
+        running_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        running_loop = None
+
+    # Re-create if no semaphore yet, or if it belongs to a different (stale) loop
+    if _tomtom_semaphore is None or (
+        running_loop is not None
+        and getattr(_tomtom_semaphore, "_loop", None) is not running_loop
+    ):
+        _tomtom_semaphore = asyncio.Semaphore(3)
+    return _tomtom_semaphore
 
 
 # ---------------------------------------------------------------------------
@@ -420,7 +444,11 @@ class IntegrationService:
         if cached:
             return cached
         
-        if cache_key not in self._inflight_locks:
+        # Re-create the lock if it belongs to a stale event loop (Celery asyncio.run())
+        existing_lock = self._inflight_locks.get(cache_key)
+        if existing_lock is None or (
+            getattr(existing_lock, "_loop", None) is not asyncio.get_running_loop()
+        ):
             self._inflight_locks[cache_key] = asyncio.Lock()
 
         async with self._inflight_locks[cache_key]:
@@ -429,7 +457,7 @@ class IntegrationService:
                 return cached
 
             try:
-                async with _tomtom_semaphore:
+                async with _get_tomtom_semaphore():
 
                     result = await self._get_directions_with_breaker(
                         origin, destination, avoid or [], alternatives, max_alternatives
@@ -548,7 +576,7 @@ class IntegrationService:
         concurrent outbound routing requests across ALL callers in this
         process — evacuation _compute_routes + reroute geometry enrichment.
         """
-        async with _tomtom_semaphore:
+        async with _get_tomtom_semaphore():
             session = await self._get_session()
 
             origin_str = f"{origin['lat']},{origin['lng']}"
@@ -670,7 +698,7 @@ class IntegrationService:
 
         # Call TomTom directly, skipping cache check
         try:
-            async with _tomtom_semaphore:
+            async with _get_tomtom_semaphore():
                 result = await self._get_directions_with_breaker(
                     origin, destination, combined_avoid, True, 3
                 )

@@ -577,6 +577,10 @@ class DirectRerouteClient(BaseRerouteClient):
             from app.providers.integration_service import get_integration_service
 
             publisher   = get_publisher()
+            # In the Celery worker the publisher singleton is never connected
+            # by FastAPI's lifespan hook — connect lazily here.
+            if not publisher.is_connected:
+                await publisher.connect()
             integration = get_integration_service()
             mapping     = MappingService(sio=sio)
 
