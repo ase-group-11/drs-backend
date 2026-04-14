@@ -343,19 +343,21 @@ class RerouteService:
                 }
 
             # Real segment — ask TomTom for road-following geometry.
-            # If TomTom is unavailable (expired key, rate-limit, network error)
-            # fall back to the same small-circle pattern used for zero-length
-            # segments so the frontend always has something valid to render.
+            # Per-segment 12s timeout so a single hanging TomTom call never
+            # blocks the entire gather — the circle fallback fires instead.
             try:
-                geometry = await self.external.fetch_segment_geometry(
-                    start_lat=start_lat,
-                    start_lng=start_lng,
-                    end_lat=end_lat,
-                    end_lng=end_lng,
+                geometry = await asyncio.wait_for(
+                    self.external.fetch_segment_geometry(
+                        start_lat=start_lat,
+                        start_lng=start_lng,
+                        end_lat=end_lat,
+                        end_lng=end_lng,
+                    ),
+                    timeout=12.0,
                 )
                 if geometry.get("points"):
                     return {**seg, **geometry}
-            except Exception as exc:
+            except (asyncio.TimeoutError, Exception) as exc:
                 logger.warning(
                     f"fetch_segment_geometry failed for {seg.get('segment_id')}: {exc} "
                     "— falling back to midpoint circle"
@@ -388,20 +390,12 @@ class RerouteService:
 
         # return_exceptions=True so one TomTom failure doesn't kill all segments.
         # Any Exception result is replaced with the original unenriched segment
-        # (the fallback inside _enrich_one should make raw exceptions rare).
-        # Hard 15s cap: TomTom rate-limits silently — without a cap, 5+ segments
-        # that all timeout (10s each, semaphore(3)) can block for 30-40s total.
-        try:
-            raw_results = await asyncio.wait_for(
-                asyncio.gather(*[_enrich_one(s) for s in segments], return_exceptions=True),
-                timeout=15.0,
-            )
-        except asyncio.TimeoutError:
-            logger.warning(
-                "enrich_segments_with_geometry: 15s cap hit — using fallback geometry for all %d segments",
-                len(segments),
-            )
-            raw_results = segments  # keep unenriched; frontend shows circle fallback
+        # (the per-segment 12s timeout in _enrich_one ensures each call falls
+        # back to circle geometry independently rather than blocking the batch).
+        raw_results = await asyncio.gather(
+            *[_enrich_one(s) for s in segments],
+            return_exceptions=True,
+        )
         enriched = []
         for i, res in enumerate(raw_results):
             if isinstance(res, Exception):
