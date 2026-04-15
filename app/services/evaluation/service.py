@@ -399,7 +399,7 @@ class DisasterEvaluationService:
     ) -> EvaluationContext:
         """Convert a report dict + enrichment + window into an EvaluationContext."""
         severity_value: str = report["severity"]
-        severity = DisasterSeverity(severity_value)
+        severity = DisasterSeverity(severity_value.upper())
 
         lat: Optional[float] = report.get("location", {}).get("lat")
         lon: Optional[float] = report.get("location", {}).get("lon")

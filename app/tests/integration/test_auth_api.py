@@ -146,7 +146,7 @@ async def test_register_user_invalid_phone_format(async_client):
 async def test_verify_registration_success(async_client, override_get_db):
     """Test successful registration verification."""
     
-    from datetime import datetime, UTC
+    from datetime import datetime, timezone
     
     with patch('app.services.user_service.verify_otp', return_value=True), \
          patch('app.services.user_service.get_registration_data') as mock_get_data, \
@@ -170,7 +170,7 @@ async def test_verify_registration_success(async_client, override_get_db):
             email="john@example.com",
             status=UserStatus.ACTIVE
         )
-        mock_user.created_at = datetime.now(UTC)
+        mock_user.created_at = datetime.now(timezone.utc)
         
         mock_repo = MockRepo.return_value
         mock_repo.create = AsyncMock(return_value=mock_user)
@@ -299,7 +299,7 @@ async def test_login_user_not_found(async_client, override_get_db):
 async def test_verify_login_success(async_client, override_get_db):
     """Test successful login verification."""
     
-    from datetime import datetime, UTC
+    from datetime import datetime, timezone
     
     with patch('app.services.user_service.verify_otp', return_value=True), \
          patch('app.services.user_service.UserRepository') as MockRepo, \
@@ -313,7 +313,7 @@ async def test_verify_login_success(async_client, override_get_db):
             full_name="John Doe",
             status=UserStatus.ACTIVE
         )
-        mock_user.created_at = datetime.now(UTC)
+        mock_user.created_at = datetime.now(timezone.utc)
         
         mock_repo = MockRepo.return_value
         mock_repo.get_active_user_by_phone = AsyncMock(return_value=mock_user)

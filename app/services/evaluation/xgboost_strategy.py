@@ -138,7 +138,7 @@ class XGBoostStrategy(BaseEvaluationStrategy):
             return await self._fallback.evaluate(context)
 
         # Derive services/triggers/flag via rules engine with the ML-predicted severity
-        corrected_severity = DisasterSeverity(predicted_label.lower())
+        corrected_severity = DisasterSeverity(predicted_label.upper())
         corrected_context = dataclasses.replace(context, severity=corrected_severity)
         rules_result = await self._fallback.evaluate(corrected_context)
 

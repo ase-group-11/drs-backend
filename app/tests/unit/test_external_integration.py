@@ -41,7 +41,10 @@ class TestMockMode:
     """Service auto-switches to mock when no API key is set."""
 
     def test_no_api_key_activates_mock_mode(self):
-        svc = IntegrationService(api_key=None)
+        from unittest.mock import patch as _patch
+        import app.providers.integration_service as _mod
+        with _patch.object(_mod.settings, 'TRAFFIC_API_KEY', ''):
+            svc = IntegrationService(api_key=None)
         assert svc.mode == "mock"
 
     def test_is_mock_property_true_in_mock_mode(self, mock_service):
@@ -52,7 +55,7 @@ class TestMockMode:
 
     @pytest.mark.asyncio
     async def test_fetch_traffic_data_returns_segments_in_mock_mode(self, mock_service):
-        result = await mock_service.fetch_traffic_data("region-dublin-m50")
+        result = await mock_service.fetch_traffic_data(53.3498, -6.2603)
         assert "segments" in result
         assert result["mode"] == "mock"
 
@@ -80,7 +83,7 @@ class TestMockMode:
     @pytest.mark.asyncio
     async def test_mock_mode_does_not_call_http(self, mock_service):
         with patch.object(mock_service, "_get_session") as mock_session:
-            await mock_service.fetch_traffic_data("region-test")
+            await mock_service.fetch_traffic_data(53.3498, -6.2603)
             mock_session.assert_not_called()
 
     def test_set_mode_switches_to_mock(self, live_service):
@@ -124,7 +127,7 @@ class TestCircuitBreakerStateMachine:
         ):
             for _ in range(3):
                 try:
-                    await live_service._fetch_traffic_with_breaker("region-test")
+                    await live_service._fetch_traffic_with_breaker(53.3498, -6.2603, 3.0)
                 except Exception:
                     pass
 
@@ -136,13 +139,13 @@ class TestCircuitBreakerStateMachine:
         # Force circuit open
         live_service.circuit_breaker.open()
 
-        result = await live_service.fetch_traffic_data("region-test")
+        result = await live_service.fetch_traffic_data(53.3498, -6.2603)
         assert result["mode"] == "degraded"
 
     @pytest.mark.asyncio
     async def test_degraded_mode_includes_segments(self, live_service):
         live_service.circuit_breaker.open()
-        result = await live_service.fetch_traffic_data("region-test")
+        result = await live_service.fetch_traffic_data(53.3498, -6.2603)
         assert "segments" in result
 
     @pytest.mark.asyncio
@@ -151,7 +154,7 @@ class TestCircuitBreakerStateMachine:
         with patch.object(
             live_service._traffic_provider, "get_traffic"
         ) as mock_get:
-            await live_service.fetch_traffic_data("region-test")
+            await live_service.fetch_traffic_data(53.3498, -6.2603)
             mock_get.assert_not_called()
 
     @pytest.mark.asyncio
@@ -183,13 +186,13 @@ class TestDegradedModeResponse:
     @pytest.mark.asyncio
     async def test_degraded_traffic_has_mode_key(self, live_service):
         live_service.circuit_breaker.open()
-        result = await live_service.fetch_traffic_data("region-test")
+        result = await live_service.fetch_traffic_data(53.3498, -6.2603)
         assert result.get("mode") in ("degraded", "mock")
 
     @pytest.mark.asyncio
     async def test_degraded_traffic_segments_are_list(self, live_service):
         live_service.circuit_breaker.open()
-        result = await live_service.fetch_traffic_data("region-test")
+        result = await live_service.fetch_traffic_data(53.3498, -6.2603)
         assert isinstance(result["segments"], list)
 
     @pytest.mark.asyncio
@@ -209,7 +212,7 @@ class TestDegradedModeResponse:
             "_fetch_traffic_with_breaker",
             side_effect=Exception("network error"),
         ):
-            result = await live_service.fetch_traffic_data("region-test")
+            result = await live_service.fetch_traffic_data(53.3498, -6.2603)
 
         assert result.get("mode") in ("degraded", "mock")
         assert "segments" in result

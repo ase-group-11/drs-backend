@@ -37,6 +37,23 @@ def reroute_service(
     )
 
 
+@pytest.fixture(autouse=True)
+def patch_disaster_repository():
+    """Patch DisasterRepository so trigger_reroute_traffic/receive_override/restore_normal_flow
+    don't try to create a real repo against the mock db session."""
+    mock_repo = AsyncMock()
+    mock_repo.get_disaster_by_id.return_value = {
+        "id": "test-disaster-id",
+        "tracking_id": "DIS-2026-001",
+        "location": {"lat": 53.3498, "lon": -6.2603},
+        "disaster_metadata": {"evaluation": {"impact_radius_km": 3.0}},
+        "status": "ACTIVE",
+    }
+    mock_repo.get_affected_users.return_value = []
+    with patch('app.services.reroute_service.DisasterRepository', return_value=mock_repo):
+        yield mock_repo
+
+
 @pytest.fixture
 def mock_directions_response(sample_alternative_routes):
     """Parsed routes response as returned by IntegrationService.get_directions."""
@@ -77,7 +94,6 @@ class TestFullReroutePipeline:
 
         result = await reroute_service.trigger_reroute_traffic(
             disaster_id=disaster_id,
-            region_id="region-dublin-m50",
             affected_roads=sample_blocked_roads,
         )
 
@@ -104,7 +120,6 @@ class TestFullReroutePipeline:
 
         await reroute_service.trigger_reroute_traffic(
             disaster_id=disaster_id,
-            region_id="region-dublin-m50",
             affected_roads=sample_blocked_roads,
         )
 
@@ -130,7 +145,6 @@ class TestFullReroutePipeline:
 
         await reroute_service.trigger_reroute_traffic(
             disaster_id=disaster_id,
-            region_id="region-dublin-m50",
             affected_roads=sample_blocked_roads,
         )
 
@@ -157,7 +171,6 @@ class TestFullReroutePipeline:
 
         await reroute_service.trigger_reroute_traffic(
             disaster_id=disaster_id,
-            region_id="region-dublin-m50",
             affected_roads=sample_blocked_roads,
         )
 
@@ -185,7 +198,6 @@ class TestFullReroutePipeline:
 
         await reroute_service.trigger_reroute_traffic(
             disaster_id=disaster_id,
-            region_id="region-dublin-m50",
             affected_roads=sample_blocked_roads,
         )
 
@@ -213,7 +225,6 @@ class TestFullReroutePipeline:
 
         await reroute_service.trigger_reroute_traffic(
             disaster_id=disaster_id,
-            region_id="region-dublin-m50",
             affected_roads=sample_blocked_roads,
         )
 
@@ -235,7 +246,6 @@ class TestFullReroutePipeline:
 
         result = await reroute_service.trigger_reroute_traffic(
             disaster_id=disaster_id,
-            region_id="region-dublin-m50",
             affected_roads=sample_blocked_roads,
         )
 
@@ -435,7 +445,6 @@ class TestPublisherEvents:
         # Should not raise even if publisher returns False
         result = await reroute_service.trigger_reroute_traffic(
             disaster_id=disaster_id,
-            region_id="region-dublin-m50",
             affected_roads=sample_blocked_roads,
         )
         assert result["status"] == "rerouted"

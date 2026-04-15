@@ -16,7 +16,7 @@ import pytest_asyncio
 import httpx
 from httpx import AsyncClient
 from unittest.mock import AsyncMock, patch
-from datetime import datetime, UTC
+from datetime import datetime, timezone
 
 from app.main import app
 from app.db.session import get_db
@@ -92,7 +92,7 @@ async def test_register_team_member_success(async_client, override_get_db):
             department=Department.MEDICAL,
             status=UserStatus.ACTIVE
         )
-        mock_team_member.created_at = datetime.now(UTC)
+        mock_team_member.created_at = datetime.now(timezone.utc)
         
         mock_repo = MockRepo.return_value
         mock_repo.phone_exists = AsyncMock(return_value=False)
@@ -234,7 +234,7 @@ async def test_login_team_member_with_email_success(async_client, override_get_d
             department=Department.MEDICAL,
             status=UserStatus.ACTIVE
         )
-        mock_team_member.created_at = datetime.now(UTC)
+        mock_team_member.created_at = datetime.now(timezone.utc)
         
         mock_repo = MockRepo.return_value
         mock_repo.get_active_team_member_by_email = AsyncMock(return_value=mock_team_member)
@@ -275,7 +275,7 @@ async def test_login_team_member_with_phone_success(async_client, override_get_d
             department=Department.MEDICAL,
             status=UserStatus.ACTIVE
         )
-        mock_team_member.created_at = datetime.now(UTC)
+        mock_team_member.created_at = datetime.now(timezone.utc)
         
         mock_repo = MockRepo.return_value
         mock_repo.get_active_team_member_by_phone = AsyncMock(return_value=mock_team_member)

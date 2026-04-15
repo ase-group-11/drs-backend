@@ -68,14 +68,14 @@ async def test_verify_registration_creates_user_and_returns_tokens(mock_db_sessi
     """Test that OTP verification creates user and returns JWT tokens."""
     # Arrange
     from app.services.user_service import UserService
-    from app.models.user import User
-    from app.models.enums import UserStatus
-    from datetime import datetime, UTC
-    
+    from app.db.models.user import User
+    from app.db.models.enums import UserStatus
+    from datetime import datetime, timezone
+
     service = UserService(mock_db_session)
     phone_number = "+1234567890"
     otp = "123456"
-    
+
     # Create mock user
     mock_user = User(
         id="test-user-id",
@@ -83,15 +83,15 @@ async def test_verify_registration_creates_user_and_returns_tokens(mock_db_sessi
         full_name="John Doe",
         status=UserStatus.ACTIVE
     )
-    mock_user.created_at = datetime.now(UTC)
-    
+    mock_user.created_at = datetime.now(timezone.utc)
+
     with patch('app.services.user_service.verify_otp', return_value=True), \
          patch.object(service.user_repo, 'create', return_value=mock_user), \
          patch('app.services.user_service.create_access_token', return_value="access_token_123"), \
          patch('app.services.user_service.create_refresh_token', return_value="refresh_token_456"):
-        
+
         # Act
-        result = await service.verify_registration(phone_number, otp, "John Doe")
+        result = await service.verify_registration(phone_number, otp)
         
         # Assert
         assert result is not None
@@ -114,7 +114,7 @@ async def test_verify_registration_invalid_otp_raises_error(mock_db_session):
         
         # Act & Assert
         with pytest.raises(Exception) as exc_info:
-            await service.verify_registration("+1234567890", "wrong_otp", "John Doe")
+            await service.verify_registration("+1234567890", "wrong_otp")
         
         assert "invalid" in str(exc_info.value).lower() or \
                "expired" in str(exc_info.value).lower()
@@ -125,12 +125,12 @@ async def test_login_user_sends_otp(mock_db_session):
     """Test that user login sends OTP."""
     # Arrange
     from app.services.user_service import UserService
-    from app.models.user import User
-    from app.models.enums import UserStatus
-    
+    from app.db.models.user import User
+    from app.db.models.enums import UserStatus
+
     service = UserService(mock_db_session)
     phone_number = "+1234567890"
-    
+
     # Mock active user
     mock_user = User(
         id="test-id",
@@ -138,7 +138,7 @@ async def test_login_user_sends_otp(mock_db_session):
         full_name="John Doe",
         status=UserStatus.ACTIVE
     )
-    
+
     with patch.object(service.user_repo, 'get_active_user_by_phone', return_value=mock_user), \
          patch('app.services.user_service.send_otp_code', return_value="123456") as mock_send_otp:
         
@@ -173,21 +173,21 @@ async def test_verify_login_returns_tokens(mock_db_session):
     """Test that login verification returns JWT tokens."""
     # Arrange
     from app.services.user_service import UserService
-    from app.models.user import User
-    from app.models.enums import UserStatus
-    from datetime import datetime, UTC
-    
+    from app.db.models.user import User
+    from app.db.models.enums import UserStatus
+    from datetime import datetime, timezone
+
     service = UserService(mock_db_session)
     phone_number = "+1234567890"
     otp = "123456"
-    
+
     mock_user = User(
         id="test-id",
         phone_number=phone_number,
         full_name="John Doe",
         status=UserStatus.ACTIVE
     )
-    mock_user.created_at = datetime.now(UTC)
+    mock_user.created_at = datetime.now(timezone.utc)
     
     with patch('app.services.user_service.verify_otp', return_value=True), \
          patch.object(service.user_repo, 'get_active_user_by_phone', return_value=mock_user), \
@@ -209,11 +209,11 @@ async def test_get_user_by_id(mock_db_session):
     """Test getting user by ID."""
     # Arrange
     from app.services.user_service import UserService
-    from app.models.user import User
-    
+    from app.db.models.user import User
+
     service = UserService(mock_db_session)
     user_id = "test-id"
-    
+
     mock_user = User(
         id=user_id,
         phone_number="+1234567890",

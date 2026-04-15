@@ -37,11 +37,11 @@ def test_create_refresh_token():
     """Test that refresh token is created."""
     # Arrange
     from app.auth.jwt_handler import create_refresh_token
-    
+
     user_id = "123"
-    
+
     # Act
-    token = create_refresh_token(user_id=user_id)
+    token = create_refresh_token(user_id=user_id, user_type="user")
     
     # Assert
     assert token is not None
@@ -77,7 +77,7 @@ def test_decode_refresh_token_valid():
     from app.auth.jwt_handler import create_refresh_token, decode_token
     
     user_id = "456"
-    token = create_refresh_token(user_id=user_id)
+    token = create_refresh_token(user_id=user_id, user_type="user")
     
     # Act
     payload = decode_token(token)
@@ -189,7 +189,7 @@ def test_token_type_field():
     )
     
     access_token = create_access_token(user_id="123", user_type="user")
-    refresh_token = create_refresh_token(user_id="123")
+    refresh_token = create_refresh_token(user_id="123", user_type="user")
     
     # Act
     access_payload = decode_token(access_token)

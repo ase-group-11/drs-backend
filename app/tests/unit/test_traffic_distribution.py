@@ -167,10 +167,26 @@ class TestOptimizeTrafficDistribution:
         assert len(plan.route_assignments) == len(fifty_vehicles)
 
     def test_load_spreads_across_multiple_routes(
-        self, three_routes_equal_capacity, fifty_vehicles
+        self, fifty_vehicles
     ):
-        """Core assertion: not all 50 vehicles on the fastest route."""
-        plan = optimize_traffic_distribution(three_routes_equal_capacity, fifty_vehicles)
+        """Core assertion: not all 50 vehicles on the fastest route.
+        Use small per-segment capacity (10) so route-primary fills up quickly
+        and the greedy balancer is forced to use secondary/tertiary routes.
+        """
+        small_cap_routes = [
+            {
+                "route_id": f"route-{label}",
+                "travel_time_seconds": base_time,
+                "length_meters": 12000 + i * 2000,
+                "segments": [f"seg-{label}-A", f"seg-{label}-B"],
+                "segment_capacities": {f"seg-{label}-A": 10, f"seg-{label}-B": 10},
+                "current_load": {f"seg-{label}-A": 0, f"seg-{label}-B": 0},
+            }
+            for i, (label, base_time) in enumerate(
+                [("primary", 600), ("secondary", 800), ("tertiary", 1000)]
+            )
+        ]
+        plan = optimize_traffic_distribution(small_cap_routes, fifty_vehicles)
         routes_used = set(plan.route_assignments.values())
         assert len(routes_used) > 1, (
             "All vehicles piled onto one route — greedy balancer not working"

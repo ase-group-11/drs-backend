@@ -32,6 +32,23 @@ def reroute_service(
     )
 
 
+@pytest.fixture(autouse=True)
+def patch_disaster_repository():
+    """Patch DisasterRepository so trigger_reroute_traffic/receive_override/restore_normal_flow
+    don't try to create a real repo against the mock db session."""
+    mock_repo = AsyncMock()
+    mock_repo.get_disaster_by_id.return_value = {
+        "id": "test-disaster-id",
+        "tracking_id": "DIS-2026-001",
+        "location": {"lat": 53.3498, "lon": -6.2603},
+        "disaster_metadata": {"evaluation": {"impact_radius_km": 3.0}},
+        "status": "ACTIVE",
+    }
+    mock_repo.get_affected_users.return_value = []
+    with patch('app.services.reroute_service.DisasterRepository', return_value=mock_repo):
+        yield mock_repo
+
+
 # ---------------------------------------------------------------------------
 # Step 2 — getBlockedRoads
 # ---------------------------------------------------------------------------
@@ -397,7 +414,7 @@ class TestClearanceRestoration:
 
     @pytest.mark.asyncio
     async def test_sends_all_clear_notification_on_restoration(
-        self, reroute_service, mock_notification_service,
+        self, reroute_service, mock_publisher,
         mock_db_repository, sample_blocked_roads
     ):
         mock_db_repository.get_users_in_affected_area.return_value = [
@@ -407,7 +424,7 @@ class TestClearanceRestoration:
             disaster_id="disaster-001",
             cleared_segments=sample_blocked_roads,
         )
-        mock_notification_service.send_all_clear.assert_called_once()
+        mock_publisher.publish_all_clear.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_logs_restored_event_on_clearance(

@@ -103,7 +103,7 @@ class EnsembleStrategy(BaseEvaluationStrategy):
         if blended_severity != rules_result.severity:
             corrected = dataclasses.replace(
                 context,
-                severity=DisasterSeverity(blended_severity.lower()),
+                severity=DisasterSeverity(blended_severity.upper()),
             )
             final = await self._rules.evaluate(corrected)
         else:
