@@ -19,6 +19,8 @@ POST /dev/seed/disasters      Seed N disasters + reports  {count, with_reroutes,
 POST /dev/seed/trips          Seed N active trips crossing live disaster zones
                               {count}  (reads active disasters from DB)
 POST /dev/seed/all            Run all of the above in one call
+POST /dev/seed/override       Apply demo operator overrides on an active reroute plan
+                              (close_lane on a blocked segment + pin_detour on a route)
 
 Coordinate strategy
 ───────────────────
@@ -429,27 +431,47 @@ DISASTER_SCENARIOS: List[Dict[str, Any]] = [
 ]
 
 
-# ── Trip crossing offsets (~8-12 km total route length) ──────────────────────
+# ── Trip crossing offsets (~6-7 km total route length) ───────────────────────
 #
 # Layout: (cur_dlat, cur_dlon, dest_dlat, dest_dlon)
 #
 # Current position is ~0.9 km from disaster centre — safely inside any 2 km
-# bounding-box radius.  Destination is ~8 km on the OPPOSITE side so the
-# route clearly crosses the disaster zone without being unrealistically long.
+# bounding-box radius.  Destination is ~6 km on the OPPOSITE side.
+#
+# Kept short to avoid coastal cities (Cork, Galway, Limerick, Bray) routing
+# destinations out into the Atlantic or Irish Sea.
 #
 # At Dublin latitude (53.3°):
-#   0.008° lat ≈ 0.89 km   |   0.072° lat ≈ 8.0 km
-#   0.011° lon ≈ 0.74 km   |   0.120° lon ≈ 8.0 km
+#   0.008° lat ≈ 0.89 km   |   0.054° lat ≈ 6.0 km
+#   0.011° lon ≈ 0.74 km   |   0.090° lon ≈ 6.0 km
 LONG_TRIP_OFFSETS = [
-    (+0.008,  0.000, -0.072,  0.000),   # North current → South dest (~9 km)
-    (-0.008,  0.000, +0.072,  0.000),   # South current → North dest (~9 km)
-    ( 0.000, +0.011,  0.000, -0.120),   # East  current → West  dest (~9 km)
-    ( 0.000, -0.011,  0.000, +0.120),   # West  current → East  dest (~9 km)
-    (+0.006, +0.008, -0.051, -0.085),   # NE current → SW dest (~9 km diagonal)
-    (-0.006, +0.008, +0.051, -0.085),   # SE current → NW dest (~9 km diagonal)
+    (+0.008,  0.000, -0.054,  0.000),   # North current → South dest (~6 km)
+    (-0.008,  0.000, +0.054,  0.000),   # South current → North dest (~6 km)
+    ( 0.000, +0.011,  0.000, -0.090),   # East  current → West  dest (~6 km)
+    ( 0.000, -0.011,  0.000, +0.090),   # West  current → East  dest (~6 km)
+    (+0.006, +0.008, -0.038, -0.063),   # NE current → SW dest (~6 km diagonal)
+    (-0.006, +0.008, +0.038, -0.063),   # SE current → NW dest (~6 km diagonal)
 ]
 
 VEHICLE_TYPES = ["general", "general", "general", "public_transport"]
+
+# ── ERT approach offsets (~4 km from disaster → destination IS the disaster) ──
+#
+# ERT members start ~4 km away and their destination is the disaster centre,
+# showing emergency vehicles converging on the scene from different directions.
+#
+# At Dublin latitude (53.3°):
+#   0.036° lat ≈ 4.0 km   |   0.055° lon ≈ 4.0 km
+ERT_APPROACH_OFFSETS = [
+    (+0.036,  0.000),   # 4 km north → heading south to disaster
+    (-0.036,  0.000),   # 4 km south → heading north to disaster
+    ( 0.000, +0.055),   # 4 km east  → heading west  to disaster
+    ( 0.000, -0.055),   # 4 km west  → heading east  to disaster
+    (+0.025, +0.038),   # 4 km NE    → heading SW    to disaster
+    (-0.025, -0.038),   # 4 km SW    → heading NE    to disaster
+]
+
+ERT_TRIPS_PER_DISASTER = 3   # emergency vehicles converging per active disaster zone
 
 WIPE_TABLES = [
     "disaster_chat_sessions",
@@ -900,14 +922,25 @@ async def _seed_disasters(
     }
 
 
-async def _seed_trips(db: AsyncSession, count: int, citizens: List, now: datetime) -> int:
+async def _seed_trips(
+    db: AsyncSession,
+    count: int,
+    citizens: List,
+    now: datetime,
+    ert_members: Optional[List] = None,
+) -> Dict[str, int]:
     """
     Create active trips centred on live disasters found in the DB.
-    Falls back to the first 5 DISASTER_SCENARIOS if no disasters are seeded yet.
+    Falls back to all DISASTER_SCENARIOS if no disasters are seeded yet.
 
-    Each trip has:
-    - current_lat/lng  within ~1.5 km of disaster (gets picked up by 2 km reroute radius)
-    - dest_lat/lng     ~17-22 km on the OPPOSITE side (creates long, visually clear route)
+    Citizen trips:
+    - current_lat/lng  within ~0.9 km of disaster (inside 2 km reroute radius)
+    - dest_lat/lng     ~6 km on the OPPOSITE side  (crosses the disaster zone)
+
+    ERT trips (when ert_members provided):
+    - current_lat/lng  ~4 km away from disaster    (outside reroute radius)
+    - dest_lat/lng     = disaster centre            (heading TO the scene)
+    - vehicle_type     = "emergency"
     """
     # Query active disaster locations from the DB
     result = await db.execute(text("""
@@ -1031,8 +1064,61 @@ async def _seed_trips(db: AsyncSession, count: int, citizens: List, now: datetim
         trip_count += 1
 
     await db.flush()
-    logger.info(f"[dev/seed] created {trip_count} active trips across {n_locs} disaster zones")
-    return trip_count
+    logger.info(f"[dev/seed] created {trip_count} citizen trips across {n_locs} disaster zones")
+
+    # ── ERT trips: emergency personnel heading TO each disaster zone ──────────
+    ert_count = 0
+    if ert_members:
+        ert_iter = iter(ert_members)
+        for loc in disaster_locs:
+            for k in range(ERT_TRIPS_PER_DISASTER):
+                m = next(ert_iter, None)
+                if m is None:
+                    break   # ran out of ERT members
+                approach = ERT_APPROACH_OFFSETS[k % len(ERT_APPROACH_OFFSETS)]
+                cur_lat = loc["lat"] + approach[0]
+                cur_lng = loc["lon"] + approach[1]
+
+                await db.execute(text("""
+                    INSERT INTO active_trips (
+                        id, user_id,
+                        current_lat, current_lng,
+                        dest_lat, dest_lng,
+                        vehicle_type,
+                        expires_at, created_at, updated_at
+                    ) VALUES (
+                        :id, :user_id,
+                        :current_lat, :current_lng,
+                        :dest_lat, :dest_lng,
+                        :vehicle_type,
+                        :expires_at, :created_at, :updated_at
+                    )
+                    ON CONFLICT (user_id) DO UPDATE SET
+                        current_lat  = EXCLUDED.current_lat,
+                        current_lng  = EXCLUDED.current_lng,
+                        dest_lat     = EXCLUDED.dest_lat,
+                        dest_lng     = EXCLUDED.dest_lng,
+                        vehicle_type = EXCLUDED.vehicle_type,
+                        expires_at   = EXCLUDED.expires_at,
+                        updated_at   = EXCLUDED.updated_at
+                """), {
+                    "id":           _uid(),
+                    "user_id":      m.id,
+                    "current_lat":  cur_lat,
+                    "current_lng":  cur_lng,
+                    "dest_lat":     loc["lat"],
+                    "dest_lng":     loc["lon"],
+                    "vehicle_type": "emergency",
+                    "expires_at":   now + timedelta(hours=6),
+                    "created_at":   now,
+                    "updated_at":   now,
+                })
+                ert_count += 1
+
+        await db.flush()
+        logger.info(f"[dev/seed] created {ert_count} ERT trips converging on {n_locs} disaster zones")
+
+    return {"citizen_trips": trip_count, "ert_trips": ert_count}
 
 
 async def _get_tokens(db: AsyncSession, now: datetime):
@@ -1346,15 +1432,36 @@ async def seed_trips(
     if not citizens:
         citizens = await _seed_users(db, body.count + 10, now)
 
-    trip_count = await _seed_trips(db, body.count, citizens, now)
+    # Fetch ERT members to create emergency-vehicle trips heading TO disasters
+    ert_result = await db.execute(text("""
+        SELECT id FROM emergency_teams WHERE status = 'ACTIVE' ORDER BY created_at
+    """))
+    class _E:
+        def __init__(self, r): self.id = str(r.id)
+    ert_members = [_E(r) for r in ert_result.fetchall()]
+
+    stats = await _seed_trips(db, body.count, citizens, now, ert_members=ert_members)
     await db.commit()
 
     return {
-        "message": f"Created {trip_count} active trips crossing disaster zones.",
-        "trips_created": trip_count,
-        "trip_length_km": "≈ 20–28 km end-to-end",
-        "current_position": "within 1.5 km of disaster centre (2 km reroute radius)",
-        "destination":      "17–22 km on opposite side of disaster",
+        "message": (
+            f"Created {stats['citizen_trips']} citizen trips crossing disaster zones "
+            f"and {stats['ert_trips']} ERT trips heading to the scene."
+        ),
+        "citizen_trips": stats["citizen_trips"],
+        "ert_trips":     stats["ert_trips"],
+        "total_trips":   stats["citizen_trips"] + stats["ert_trips"],
+        "citizen_trip_details": {
+            "current_position": "within ~0.9 km of disaster centre (inside 2 km reroute radius)",
+            "destination":      "~6 km on opposite side of disaster",
+            "vehicle_type":     "general / public_transport",
+        },
+        "ert_trip_details": {
+            "current_position": "~4 km away from disaster (en route)",
+            "destination":      "disaster centre",
+            "vehicle_type":     "emergency",
+            "per_disaster":     ERT_TRIPS_PER_DISASTER,
+        },
     }
 
 
@@ -1414,8 +1521,9 @@ async def seed_all(
     )
 
     # 6. Trips — read disasters from DB (direct ACTIVE ones are already committed
-    #    via flush; pipeline ones are PENDING so we fall back to scenario coords)
-    trip_count = await _seed_trips(db, body.trips.count, citizens, now)
+    #    via flush; pipeline ones are PENDING so we fall back to scenario coords).
+    #    Pass ERT members so emergency-vehicle trips are created heading TO disasters.
+    trip_stats = await _seed_trips(db, body.trips.count, citizens, now, ert_members=members)
 
     await db.commit()
 
@@ -1424,23 +1532,29 @@ async def seed_all(
     pipeline_n = disaster_stats["pipeline_disasters"]
     direct_n   = disaster_stats["direct_active"]
 
+    citizen_trips = trip_stats["citizen_trips"]
+    ert_trips     = trip_stats["ert_trips"]
+    total_trips   = citizen_trips + ert_trips
+
     return {
         "message": (
             f"Full seed complete — {len(members)} ERT, {len(citizens)} citizens, "
             f"{unit_stats['units']} units, "
             f"{d.count} disasters ({pipeline_n} pipeline + {direct_n} direct ACTIVE), "
-            f"{trip_count} trips."
+            f"{citizen_trips} citizen trips + {ert_trips} ERT trips."
         ),
         "summary": {
-            "ert_members":           len(members),
-            "citizens":              len(citizens),
-            "emergency_units":       unit_stats["units"],
-            "crew_assignments":      unit_stats["crew_assignments"],
-            "capacity_per_unit":     body.units.max_crew,
-            "direct_active_disasters":    direct_n,
-            "pipeline_disasters":    pipeline_n,
-            "pending_reports":       disaster_stats["pending_reports"],
-            "active_trips":          trip_count,
+            "ert_members":              len(members),
+            "citizens":                 len(citizens),
+            "emergency_units":          unit_stats["units"],
+            "crew_assignments":         unit_stats["crew_assignments"],
+            "capacity_per_unit":        body.units.max_crew,
+            "direct_active_disasters":  direct_n,
+            "pipeline_disasters":       pipeline_n,
+            "pending_reports":          disaster_stats["pending_reports"],
+            "citizen_trips":            citizen_trips,
+            "ert_trips":                ert_trips,
+            "total_active_trips":       total_trips,
         },
         "tokens": tokens,
         "credentials": creds,
@@ -1463,6 +1577,137 @@ async def seed_all(
             "sligo":       "1 disaster",
             "donegal":     "1 disaster",
             "wicklow":     "1 disaster",
+        },
+    }
+
+
+# ── Override (demo operator traffic override) ──────────────────────────────────
+
+@router.post("/dev/seed/override",
+             summary="[DEV] Apply demo operator overrides on an active reroute plan")
+async def seed_override(
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Finds the most recent **active** reroute plan, then applies two demo overrides
+    on it so you can see how the plan reacts to operator intervention:
+
+    1. **close_lane** — on the first blocked road segment in the plan
+    2. **pin_detour** — on the first chosen route in the plan (if any)
+
+    After calling this endpoint, `GET /reroute/plans` will show:
+    - `trigger_source: "operator_override"` (was `"disaster_triggered"`)
+    - Updated `chosen_routes` recomputed with the override constraints
+
+    **Prerequisite:** At least one active reroute plan must exist.
+    Run `POST /dev/seed/all` first, then wait ~60 s for the evaluation loop to
+    create the reroute plans, then call this endpoint.
+    """
+    from app.services.reroute_service import RerouteService
+
+    # 1. Find the most recent active reroute plan
+    result = await db.execute(text("""
+        SELECT id, disaster_id, blocked_roads, chosen_routes,
+               trigger_source, vehicles_affected
+        FROM reroute_plans
+        WHERE status = 'active'
+        ORDER BY created_at DESC
+        LIMIT 1
+    """))
+    plan_row = result.fetchone()
+
+    if not plan_row:
+        return {
+            "message": (
+                "No active reroute plans found. "
+                "Run POST /dev/seed/all first, then wait ~60 s for the evaluation loop "
+                "to create reroute plans, then call this endpoint."
+            ),
+            "active_plans": 0,
+            "hint": "You can also call POST /dev/seed/disasters with with_reroutes=5 "
+                    "and wait for the pipeline to process the PENDING reports.",
+        }
+
+    disaster_id = str(plan_row.disaster_id)
+    blocked_roads  = plan_row.blocked_roads  or []
+    chosen_routes  = plan_row.chosen_routes  or []
+    trigger_before = plan_row.trigger_source
+    vehicles_before = plan_row.vehicles_affected
+
+    # 2. Pick segment_id from blocked_roads (fall back to a synthetic id)
+    segment_id = None
+    if isinstance(blocked_roads, list) and blocked_roads:
+        seg = blocked_roads[0]
+        if isinstance(seg, dict):
+            segment_id = seg.get("segment_id") or seg.get("id")
+    if not segment_id:
+        segment_id = f"seg-demo-{disaster_id[:8]}"
+
+    # 3. Pick route_id from chosen_routes (optional — for pin_detour)
+    route_id = None
+    if isinstance(chosen_routes, list) and chosen_routes:
+        first_route = chosen_routes[0]
+        if isinstance(first_route, dict):
+            route_id = first_route.get("route_id")
+
+    # 4. Build the RerouteService instance (same wiring as get_reroute_service)
+    from app.repositories.reroute_repository import RerouteRepository
+    from app.providers.integration_service import get_integration_service
+    from app.services.instant_map_updates import MappingService
+    from app.workers.reroute_publisher import ReroutePublisher, get_publisher
+    from app.socket.manager import sio
+
+    # Both are plain module-level singletons — no generator protocol needed.
+    external  = get_integration_service()
+    publisher = get_publisher()
+
+    service = RerouteService(
+        db=RerouteRepository(db),
+        external=external,
+        mapping=MappingService(sio=sio),
+        publisher=publisher,
+    )
+
+    # 5. Apply close_lane override
+    overrides_applied = []
+    override_close = {
+        "disaster_id": disaster_id,
+        "type":        "close_lane",
+        "operator_id": "seed-operator-001",
+        "segment_id":  segment_id,
+    }
+    await service.receive_override(override_close)
+    overrides_applied.append({"type": "close_lane", "segment_id": segment_id})
+
+    # 6. Apply pin_detour override (only if a route_id was found)
+    if route_id:
+        override_pin = {
+            "disaster_id": disaster_id,
+            "type":        "pin_detour",
+            "operator_id": "seed-operator-001",
+            "route_id":    route_id,
+        }
+        await service.receive_override(override_pin)
+        overrides_applied.append({"type": "pin_detour", "route_id": route_id})
+
+    return {
+        "message": (
+            "Demo overrides applied. "
+            "Call GET /reroute/plans to see trigger_source='operator_override'."
+        ),
+        "disaster_id": disaster_id,
+        "overrides_applied": overrides_applied,
+        "plan_before": {
+            "trigger_source":      trigger_before,
+            "vehicles_affected":   vehicles_before,
+            "chosen_routes_count": len(chosen_routes),
+            "blocked_roads_count": len(blocked_roads),
+        },
+        "what_to_check": {
+            "endpoint":        "GET /reroute/plans",
+            "field_to_verify": "trigger_source should now be 'operator_override'",
+            "socket_event":    "route.updated broadcast via Socket.IO",
+            "rabbitmq_event":  "route.updated published to RabbitMQ",
         },
     }
 
