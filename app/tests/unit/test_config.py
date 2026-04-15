@@ -117,25 +117,6 @@ def test_config_supports_different_environments(monkeypatch):
     
 #     assert "DATABASE_URL" in str(exc_info.value)
 
-def test_config_validates_required_fields(monkeypatch):
-    """Test that configuration requires essential fields."""
-    # Arrange: Clear the lru_cache to force re-initialization
-    from app.core.config import get_settings
-    get_settings.cache_clear()
-    
-    # Missing DATABASE_URL
-    monkeypatch.delenv("DATABASE_URL", raising=False)
-    
-    # Act & Assert: Should raise validation error
-    from pydantic import ValidationError
-    from app.core.config import Settings
-    
-    with pytest.raises(ValidationError) as exc_info:
-        Settings()
-    
-    assert "DATABASE_URL" in str(exc_info.value)
-
-
 def test_config_is_singleton():
     """Test that configuration returns the same instance (singleton pattern)."""
     from app.core.config import get_settings

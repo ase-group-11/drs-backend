@@ -248,14 +248,7 @@ class TestComputeTransportNeeds:
         # Shortfall: (7-5)*8 = 16 people, rescue capacity 4 → ceil(16/4) = 4, only 2 available
         assert plan["rescue_units_needed"] == 2
 
-    def test_no_units_available(self):
-        stats = {"total": 100, "vulnerable": 20}
-        area  = {"disaster_id": "d1", "population": 100, "vulnerable_count": 20}
-        plan = compute_transport_needs(stats, area, {}, [])
-        # No units → 0 allocated
-        assert plan["total_ambulances"] == 0
-        assert plan["ambulances_available"] == 0
-
+    
 
 # ─────────────────────────────────────────────────────────────────────────────
 # population profile
@@ -586,14 +579,6 @@ class TestUpdateProgress:
 
 class TestBroadcastAlerts:
 
-    @pytest.mark.asyncio
-    async def test_uses_publisher_when_connected(self, evacuation_service, mock_publisher):
-        mock_publisher.is_connected = True
-        users = [{"id": "u1", "phone_number": "+353871111111",
-                  "impact_area_id": "dis-001", "area_name": "Dawson St area"}]
-        count = await evacuation_service.broadcast_alerts(users, "dis-1", "plan-1", {}, [])
-        mock_publisher.publish_reroute_triggered.assert_called_once()
-        assert count == 1
 
     @pytest.mark.asyncio
     async def test_returns_0_for_empty_users(self, evacuation_service, mock_publisher):

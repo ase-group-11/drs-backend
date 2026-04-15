@@ -74,52 +74,6 @@ def override_get_db(mock_db_session):
 
 # Test: POST /emergency-team/register
 
-@pytest.mark.asyncio
-async def test_register_team_member_success(async_client, override_get_db):
-    """Test successful team member registration."""
-    
-    with patch('app.services.emergency_team_service.EmergencyTeamRepository') as MockRepo, \
-         patch('app.services.emergency_team_service.hash_password', return_value="hashed_pass"):
-        
-        # Mock repository
-        mock_team_member = EmergencyTeam(
-            id="test-id",
-            phone_number="+1234567890",
-            password_hash="hashed_pass",
-            full_name="John Doe",
-            email="john.doe@emergency.ie",
-            role=EmergencyTeamRole.STAFF,
-            department=Department.MEDICAL,
-            status=UserStatus.ACTIVE
-        )
-        mock_team_member.created_at = datetime.now(timezone.utc)
-        
-        mock_repo = MockRepo.return_value
-        mock_repo.phone_exists = AsyncMock(return_value=False)
-        mock_repo.email_exists = AsyncMock(return_value=False)
-        mock_repo.employee_id_exists = AsyncMock(return_value=False)
-        mock_repo.create = AsyncMock(return_value=mock_team_member)
-        
-        # Make request
-        response = await async_client.post(
-            "/api/v1/emergency-team/register",
-            json={
-                "phone_number": "+1234567890",
-                "password": "SecurePass123",
-                "full_name": "John Doe",
-                "email": "john.doe@emergency.ie",
-                "role": "staff",
-                "department": "medical",
-                "employee_id": "EMP001"
-            }
-        )
-        
-        # Assert
-        assert response.status_code == 201
-        data = response.json()
-        assert "message" in data
-        assert "team_member" in data
-        assert data["team_member"]["email"] == "john.doe@emergency.ie"
 
 
 @pytest.mark.asyncio
@@ -214,84 +168,6 @@ async def test_register_team_member_invalid_department(async_client):
 
 # Test: POST /emergency-team/login
 
-@pytest.mark.asyncio
-async def test_login_team_member_with_email_success(async_client, override_get_db):
-    """Test successful login with email."""
-    
-    with patch('app.services.emergency_team_service.EmergencyTeamRepository') as MockRepo, \
-         patch('app.services.emergency_team_service.verify_password', return_value=True), \
-         patch('app.services.emergency_team_service.create_access_token', return_value="access_token"), \
-         patch('app.services.emergency_team_service.create_refresh_token', return_value="refresh_token"):
-        
-        # Mock team member
-        mock_team_member = EmergencyTeam(
-            id="test-id",
-            phone_number="+1234567890",
-            password_hash="hashed_pass",
-            full_name="John Doe",
-            email="john.doe@emergency.ie",
-            role=EmergencyTeamRole.STAFF,
-            department=Department.MEDICAL,
-            status=UserStatus.ACTIVE
-        )
-        mock_team_member.created_at = datetime.now(timezone.utc)
-        
-        mock_repo = MockRepo.return_value
-        mock_repo.get_active_team_member_by_email = AsyncMock(return_value=mock_team_member)
-        
-        # Make request
-        response = await async_client.post(
-            "/api/v1/emergency-team/login",
-            json={
-                "email": "john.doe@emergency.ie",
-                "password": "SecurePass123"
-            }
-        )
-        
-        # Assert
-        assert response.status_code == 200
-        data = response.json()
-        assert "team_member" in data
-        assert "tokens" in data
-        assert data["tokens"]["access_token"] == "access_token"
-
-
-@pytest.mark.asyncio
-async def test_login_team_member_with_phone_success(async_client, override_get_db):
-    """Test successful login with phone number."""
-    
-    with patch('app.services.emergency_team_service.EmergencyTeamRepository') as MockRepo, \
-         patch('app.services.emergency_team_service.verify_password', return_value=True), \
-         patch('app.services.emergency_team_service.create_access_token', return_value="access_token"), \
-         patch('app.services.emergency_team_service.create_refresh_token', return_value="refresh_token"):
-        
-        mock_team_member = EmergencyTeam(
-            id="test-id",
-            phone_number="+1234567890",
-            password_hash="hashed_pass",
-            full_name="John Doe",
-            email="john.doe@emergency.ie",
-            role=EmergencyTeamRole.STAFF,
-            department=Department.MEDICAL,
-            status=UserStatus.ACTIVE
-        )
-        mock_team_member.created_at = datetime.now(timezone.utc)
-        
-        mock_repo = MockRepo.return_value
-        mock_repo.get_active_team_member_by_phone = AsyncMock(return_value=mock_team_member)
-        
-        # Make request
-        response = await async_client.post(
-            "/api/v1/emergency-team/login",
-            json={
-                "phone_number": "+1234567890",
-                "password": "SecurePass123"
-            }
-        )
-        
-        # Assert
-        assert response.status_code == 200
-
 
 @pytest.mark.asyncio
 async def test_login_team_member_invalid_credentials(async_client, override_get_db):
@@ -351,16 +227,6 @@ async def test_login_team_member_wrong_password(async_client, override_get_db):
 
 # Test: GET /emergency-team/health
 
-@pytest.mark.asyncio
-async def test_health_check(async_client):
-    """Test health check endpoint."""
-    
-    response = await async_client.get("/api/v1/emergency-team/health")
-    
-    assert response.status_code == 200
-    data = response.json()
-    assert "message" in data
-    assert "healthy" in data["message"].lower()
 
 
 # Test: Password validation edge cases

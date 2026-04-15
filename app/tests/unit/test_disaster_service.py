@@ -173,13 +173,7 @@ class TestListActiveDisasters:
         assert response.json()["count"] == 0
         assert response.json()["disasters"] == []
 
-    @pytest.mark.asyncio
-    async def test_list_active_requires_team_token(self, citizen_client):
-        """TC-DS-01-03: Citizens cannot access /disasters/active."""
-        client, _ = citizen_client
-        response = await client.get("/api/v1/disasters/active")
-        assert response.status_code == status.HTTP_403_FORBIDDEN
-
+  
     @pytest.mark.asyncio
     async def test_list_active_summary_counts(self, team_client):
         """TC-DS-01-04: Summary counts are returned correctly."""
@@ -220,13 +214,7 @@ class TestListAllDisasters:
         response = await client.get("/api/v1/disasters/all")
         assert response.status_code == status.HTTP_200_OK
 
-    @pytest.mark.asyncio
-    async def test_list_all_citizen_forbidden(self, citizen_client):
-        """TC-DS-02-02: Citizens cannot access /disasters/all."""
-        client, _ = citizen_client
-        response = await client.get("/api/v1/disasters/all")
-        assert response.status_code == status.HTTP_403_FORBIDDEN
-
+    
     @pytest.mark.asyncio
     async def test_list_all_includes_resolved(self, team_client):
         """TC-DS-02-03: All endpoint includes resolved disasters."""

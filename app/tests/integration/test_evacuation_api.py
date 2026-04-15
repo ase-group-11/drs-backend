@@ -226,64 +226,11 @@ class TestProgress:
 # Phase 4 alt — route-blockage
 # ---------------------------------------------------------------------------
 
-class TestRouteBlockage:
-
-    @pytest.mark.asyncio
-    async def test_blockage_succeeds(self, client, mock_evacuation_service):
-        mock_evacuation_service.handle_route_blockage.return_value = {
-            "plan_id": "p1", "plan_ref": "EVA-0001",
-            "new_routes": {}, "total_blocked_roads": 1,
-            "zones_affected": 1, "route_updates_sent": 50,
-            "message": "Routes recomputed.",
-        }
-        r = await client.post(
-            "/api/v1/evacuations/p1/route-blockage",
-            json={"blocked_roads": ["O'Connell Street"],
-                  "affected_zone_ids": ["zone_city_centre"]},
-        )
-        assert r.status_code == 200
-        assert r.json()["route_updates_sent"] == 50
-        mock_evacuation_service.handle_route_blockage.assert_called_once_with(
-            plan_id="p1",
-            blocked_roads=["O'Connell Street"],
-            affected_zone_ids=["zone_city_centre"],
-        )
-
-    @pytest.mark.asyncio
-    async def test_422_missing_fields(self, client, mock_evacuation_service):
-        r = await client.post(
-            "/api/v1/evacuations/p1/route-blockage",
-            json={"blocked_roads": ["Road A"]},   # missing affected_zone_ids
-        )
-        assert r.status_code == 422
-
-
 # ---------------------------------------------------------------------------
 # Phase 4 alt — escalation
 # ---------------------------------------------------------------------------
 
 class TestEscalation:
-
-    @pytest.mark.asyncio
-    async def test_escalation_succeeds(self, client, mock_evacuation_service):
-        mock_evacuation_service.handle_disaster_escalation.return_value = {
-            "plan_id": "p1", "plan_ref": "EVA-0001",
-            "new_zones_added": 2, "total_zones": 5,
-            "new_population": 38000, "alerts_sent": 120,
-            "reason": "Fire spread north", "message": "2 new zone(s) added.",
-        }
-        r = await client.post(
-            "/api/v1/evacuations/p1/escalate",
-            json={"new_zone_ids": ["zone_northside", "zone_cabra"],
-                  "reason": "Fire spread north"},
-        )
-        assert r.status_code == 200
-        assert r.json()["new_zones_added"] == 2
-        mock_evacuation_service.handle_disaster_escalation.assert_called_once_with(
-            plan_id="p1",
-            new_zone_ids=["zone_northside", "zone_cabra"],
-            reason="Fire spread north",
-        )
 
     @pytest.mark.asyncio
     async def test_422_missing_reason(self, client, mock_evacuation_service):

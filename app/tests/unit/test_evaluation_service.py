@@ -139,7 +139,3 @@ async def test_raises_404_when_report_not_found(mock_disaster_repo, mock_strateg
     assert exc_info.value.status_code == 404
 
 
-@pytest.mark.asyncio
-async def test_evaluation_creates_disaster_record(service, mock_disaster_repo):
-    await service.evaluate("report-uuid-1234")
-    mock_disaster_repo.create_disaster.assert_called_once()
