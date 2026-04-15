@@ -1,16 +1,73 @@
-name: Deploy Backend to VM + K3s
+name: Test + Deploy Backend to VM + K3s
 
 on:
   push:
     branches: ["main"]
+
 
 permissions:
   contents: read
   packages: write
 
 jobs:
+  # ─────────────────────────────────────────────
+  # JOB 1: Run tests (no VM needed, runs in CI)
+  # ─────────────────────────────────────────────
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create minimal .env for tests
+        run: |
+          cat > .env << 'EOF'
+          ENVIRONMENT=testing
+          DEBUG=false
+          DATABASE_URL=postgresql+asyncpg://test:test@localhost:5432/test_db
+          REDIS_URL=redis://localhost:6379/1
+          JWT_SECRET_KEY=test-secret-key-for-testing-minimum-32-characters-long-required
+          JWT_ALGORITHM=HS256
+          ACCESS_TOKEN_EXPIRE_MINUTES=30
+          REFRESH_TOKEN_EXPIRE_DAYS=7
+          TWILIO_ACCOUNT_SID=test_account_sid
+          TWILIO_AUTH_TOKEN=test_auth_token
+          TWILIO_PHONE_NUMBER=+1234567890
+          OTP_EXPIRY_SECONDS=300
+          OTP_LENGTH=6
+          TRAFFIC_API_KEY=
+          MAPBOX_API_KEY=test_mapbox_key
+          EOF
+
+      - name: Run unit tests
+        run: |
+          pytest app/tests/unit/ \
+            --cov=app \
+            --cov-report=xml:reports/coverage.xml \
+            --cov-report=term-missing \
+            --html=reports/test-report.html \
+            --self-contained-html \
+            -v --tb=short
+        env:
+          ENVIRONMENT: testing
+
+  # ─────────────────────────────────────────────
+  # JOB 2: Deploy (only runs if tests pass)
+  # ─────────────────────────────────────────────
   deploy:
     runs-on: ubuntu-latest
+    needs: test                        # ← blocked until test job is green
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
 
     steps:
       - name: Checkout code
@@ -29,7 +86,6 @@ jobs:
           echo "${{ secrets.ENV_FILE }}" | ssh -o StrictHostKeyChecking=no \
             ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
             "cat > ~/drs-app/backend/.env"
-
 
       - name: Copy code to VM
         run: |
@@ -61,7 +117,7 @@ jobs:
             docker push ghcr.io/${{ github.repository_owner }}/drs-backend:${{ github.sha }}
           "
 
-      - name: Stop Docker containers on VM (K3s handles the app now)
+      - name: Stop old Docker containers on VM
         run: |
           ssh -o StrictHostKeyChecking=no ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} "
             docker stop drs-backend 2>/dev/null || true
@@ -83,10 +139,8 @@ jobs:
       - name: Rolling deploy to K3s
         run: |
           ssh -o StrictHostKeyChecking=no ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} "
-            # Apply full deployment config (deployments + HPA)
             KUBECONFIG=/home/azureuser/.kube/config kubectl apply -f ~/drs-app/backend/k8s/deployment.yaml
 
-            # Update image to new SHA
             KUBECONFIG=/home/azureuser/.kube/config kubectl set image deployment/drs-api \
               drs-api=ghcr.io/${{ github.repository_owner }}/drs-backend:${{ github.sha }} \
               -n drs
@@ -103,7 +157,7 @@ jobs:
               drs-celery-beat=ghcr.io/${{ github.repository_owner }}/drs-backend:${{ github.sha }} \
               -n drs
 
-            echo 'Deploy triggered successfully. Pods updating in background'
+            echo 'Deploy triggered. Pods updating in background.'
           "
 
       - name: Verify K3s pods
