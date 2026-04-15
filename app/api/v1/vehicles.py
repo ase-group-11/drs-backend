@@ -20,7 +20,7 @@ import logging
 import math
 import os
 from datetime import datetime, timezone, timedelta
-from typing import Optional
+from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel, Field, field_validator
@@ -92,8 +92,13 @@ async def _notify_if_reroute_active(
 ) -> None:
     """
     Check whether the user's current position falls inside any live reroute
-    plan's impact radius.  If so, push a targeted reroute.triggered alert
-    directly to Redis so the WebSocket fan-out reaches only this user.
+    plan's impact radius.  If so:
+
+    1. Pick the least-loaded route from chosen_routes.
+    2. Persist the assignment to reroute_plans.route_assignments via a
+       PostgreSQL JSONB merge (no overwrite of existing assignments).
+    3. Push a targeted reroute.triggered alert to Redis so the WebSocket
+       fan-out reaches only this user.
 
     • Runs as a fire-and-forget asyncio task — never blocks registration.
     • No TomTom calls — reuses chosen_routes already stored in the plan.
@@ -106,6 +111,7 @@ async def _notify_if_reroute_active(
                 rp.id                                               AS plan_id,
                 rp.disaster_id,
                 rp.chosen_routes,
+                rp.route_assignments,
                 rp.vehicles_affected,
                 ST_Y(d.location::geometry)                          AS disaster_lat,
                 ST_X(d.location::geometry)                          AS disaster_lon,
@@ -149,8 +155,68 @@ async def _notify_if_reroute_active(
     if best_plan is None:
         return
 
-    # Build the standard reroute.triggered envelope understood by the app,
-    # but with target_user_ids so only this user's WebSocket receives it.
+    # ── Pick a route for this user ────────────────────────────────────────────
+    # chosen_routes is a list of route objects, each with a "route_id" key and
+    # optional "vehicles_assigned" count.  Pick the route with the fewest
+    # current assignments so load stays balanced; fall back to the first route.
+    chosen_routes: List[dict] = best_plan.chosen_routes or []
+    existing_assignments: Dict[str, str] = best_plan.route_assignments or {}
+
+    assigned_route_id: Optional[str] = None
+    if chosen_routes:
+        # Count how many users are already on each route
+        load_by_route: dict[str, int] = {}
+        for r in chosen_routes:
+            rid = r.get("route_id") if isinstance(r, dict) else None
+            if rid:
+                load_by_route[rid] = 0
+
+        for _uid, rid in existing_assignments.items():
+            if rid in load_by_route:
+                load_by_route[rid] += 1
+
+        # Choose route with minimum current load (stable sort keeps order on ties)
+        if load_by_route:
+            assigned_route_id = min(load_by_route, key=lambda k: load_by_route[k])
+        else:
+            # Fallback: first route regardless of structure
+            first = chosen_routes[0]
+            assigned_route_id = first.get("route_id") if isinstance(first, dict) else None
+
+    # ── Persist the assignment to the DB ─────────────────────────────────────
+    # Use PostgreSQL JSONB || operator to merge a single key without touching
+    # the rest of route_assignments.  This is atomic at the row level and safe
+    # to call concurrently for multiple late joiners.
+    if assigned_route_id:
+        try:
+            await db.execute(
+                text("""
+                    UPDATE reroute_plans
+                    SET route_assignments = (
+                        route_assignments::jsonb
+                        || jsonb_build_object(:user_id::text, :route_id::text)
+                    )::json
+                    WHERE id = :plan_id
+                """),
+                {
+                    "user_id":  user_id,
+                    "route_id": assigned_route_id,
+                    "plan_id":  best_plan.plan_id,
+                },
+            )
+            await db.commit()
+            logger.info(
+                f"[late-join reroute] persisted assignment "
+                f"user={user_id} → route={assigned_route_id} "
+                f"plan={best_plan.plan_id}"
+            )
+        except Exception as exc:
+            logger.warning(
+                f"[late-join] DB assignment persist failed for user={user_id}: {exc}"
+            )
+            await db.rollback()
+
+    # ── Build the WebSocket notification payload ──────────────────────────────
     payload = json.dumps(
         {
             "service":    "reroute",
@@ -163,17 +229,17 @@ async def _notify_if_reroute_active(
                 "Follow the highlighted alternative path."
             ),
             "data": {
-                "disaster_id":      best_plan.disaster_id,
-                "plan_id":          best_plan.plan_id,
-                "tracking_id":      best_plan.tracking_id,
-                "vehicles_count":   best_plan.vehicles_affected or 0,
-                "route_assignments": {},      # no personal assignment for late joiners
-                "routes":           best_plan.chosen_routes or [],
-                "overflow_count":   0,
-                "late_join":        True,     # app can distinguish from initial broadcast
-                "dist_km":          round(best_dist, 2),
+                "disaster_id":       best_plan.disaster_id,
+                "plan_id":           best_plan.plan_id,
+                "tracking_id":       best_plan.tracking_id,
+                "vehicles_count":    best_plan.vehicles_affected or 0,
+                "route_assignments": {user_id: assigned_route_id} if assigned_route_id else {},
+                "routes":            chosen_routes,
+                "overflow_count":    0,
+                "late_join":         True,     # app can distinguish from initial broadcast
+                "dist_km":           round(best_dist, 2),
             },
-            "target_user_ids": [user_id],     # WebSocket fan-out to this user only
+            "target_user_ids": [user_id],      # WebSocket fan-out to this user only
             "timestamp": datetime.now(timezone.utc).isoformat(),
         },
         default=str,
@@ -186,8 +252,8 @@ async def _notify_if_reroute_active(
         await client.aclose()
         logger.info(
             f"[late-join reroute] user={user_id} notified "
-            f"plan={best_plan.plan_id} dist={best_dist:.2f} km "
-            f"radius={best_plan.radius_km:.1f} km"
+            f"plan={best_plan.plan_id} route={assigned_route_id} "
+            f"dist={best_dist:.2f} km radius={best_plan.radius_km:.1f} km"
         )
     except Exception as exc:
         logger.warning(f"[late-join] Redis publish failed for user={user_id}: {exc}")
